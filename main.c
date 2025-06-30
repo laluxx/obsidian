@@ -14,6 +14,8 @@
 #include "camera.h"
 #include "renderer.h"
 
+#include <time.h>  
+
 
 // Constants
 #define WIDTH 800
@@ -39,6 +41,17 @@ VkDescriptorSet descriptorSet;
 VkBuffer uniformBuffer;
 VkDeviceMemory uniformBufferMemory;
 
+typedef struct {
+    vec3 pos;
+    vec4 color;
+} Block;
+
+
+#define WORLD_WIDTH  10
+#define WORLD_HEIGHT 10
+#define WORLD_DEPTH  10
+
+Block blocks[WORLD_WIDTH][WORLD_HEIGHT][WORLD_DEPTH];
 
 
 typedef struct {
@@ -72,7 +85,15 @@ typedef struct {
     VkSemaphore* renderFinishedSemaphores; // size = swapChainImageCount
     VkDescriptorSetLayout descriptorSetLayout;
 
+    VkImage depthImage;
+    VkDeviceMemory depthImageMemory;
+    VkImageView depthImageView;
+    VkFormat depthFormat;
+
+
 } VulkanContext;
+
+uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
 void createDescriptorSet(VulkanContext* context) {
     VkDescriptorSetAllocateInfo allocInfo = {
@@ -364,16 +385,35 @@ void createRenderPass(VulkanContext* context) {
         .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
 
+    VkAttachmentDescription depthAttachment = {
+        .format = context->depthFormat,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+
+
     VkAttachmentReference colorAttachmentRef = {
         .attachment = 0,
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
     };
 
+    VkAttachmentReference depthAttachmentRef = {
+        .attachment = 1,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    };
+
     VkSubpassDescription subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
-        .pColorAttachments = &colorAttachmentRef
+        .pColorAttachments = &colorAttachmentRef,
+        .pDepthStencilAttachment = &depthAttachmentRef,
     };
+
 
     // Add subpass dependency for layout transitions
     VkSubpassDependency dependency = {
@@ -387,13 +427,16 @@ void createRenderPass(VulkanContext* context) {
 
     VkRenderPassCreateInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &colorAttachment,
+        .attachmentCount = 2,
+        /* .pAttachments = &colorAttachment, */
+        .pAttachments = (VkAttachmentDescription[]){ colorAttachment, depthAttachment },
         .subpassCount = 1,
         .pSubpasses = &subpass,
         .dependencyCount = 1,
         .pDependencies = &dependency
     };
+
+
 
     if (vkCreateRenderPass(context->device, &renderPassInfo, NULL, &context->renderPass) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create render pass\n");
@@ -448,15 +491,6 @@ void createGraphicsPipeline(VulkanContext* context) {
     };
 
     VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
-
-    // Vertex input (we're hardcoding vertices in the shader)
-    /* VkPipelineVertexInputStateCreateInfo vertexInputInfo = { */
-    /*     .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, */
-    /*     .vertexBindingDescriptionCount = 0, */
-    /*     .vertexAttributeDescriptionCount = 0 */
-    /* }; */
-
-
 
     VkVertexInputBindingDescription bindingDescription = {
         .binding = 0,
@@ -524,8 +558,10 @@ void createGraphicsPipeline(VulkanContext* context) {
         .depthClampEnable = VK_FALSE,
         .rasterizerDiscardEnable = VK_FALSE,
         .polygonMode = VK_POLYGON_MODE_FILL,
+        /* .polygonMode = VK_POLYGON_MODE_LINE, */
+        /* .polygonMode = VK_POLYGON_MODE_POINT, */
         .lineWidth = 1.0f,
-        .cullMode = VK_CULL_MODE_BACK_BIT,
+        .cullMode = VK_CULL_MODE_NONE,
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = VK_FALSE
     };
@@ -567,6 +603,16 @@ void createGraphicsPipeline(VulkanContext* context) {
         exit(EXIT_FAILURE);
     }
 
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+
     // Create graphics pipeline
     VkGraphicsPipelineCreateInfo pipelineInfo = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -581,7 +627,8 @@ void createGraphicsPipeline(VulkanContext* context) {
         .layout = context->pipelineLayout,
         .renderPass = context->renderPass,
         .subpass = 0,
-        .basePipelineHandle = VK_NULL_HANDLE
+        .basePipelineHandle = VK_NULL_HANDLE,
+        .pDepthStencilState = &depthStencil,
     };
 
     if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &context->graphicsPipeline) != VK_SUCCESS) {
@@ -599,13 +646,15 @@ void createFramebuffers(VulkanContext* context) {
 
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         VkImageView attachments[] = {
-            context->swapChainImageViews[i]
+            context->swapChainImageViews[i],
+            context->depthImageView
         };
+
 
         VkFramebufferCreateInfo framebufferInfo = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = context->renderPass,
-            .attachmentCount = 1,
+            .attachmentCount = 2,
             .pAttachments = attachments,
             .width = context->swapChainExtent.width,
             .height = context->swapChainExtent.height,
@@ -657,31 +706,35 @@ void createCommandBuffers(VulkanContext* context) {
             exit(EXIT_FAILURE);
         }
 
+
+
+
+        VkClearValue clearValues[2];
+        clearValues[0].color = (VkClearColorValue){{0.0f, 0.0f, 0.0f, 1.0f}};
+        clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
+
         VkRenderPassBeginInfo renderPassInfo = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass = context->renderPass,
             .framebuffer = context->swapChainFramebuffers[i],
+
+            
             .renderArea = {
                 .offset = {0, 0},
                 .extent = context->swapChainExtent
             },
-            .clearValueCount = 1,
-            .pClearValues = &(VkClearValue){.color = {{0.0f, 0.0f, 0.0f, 1.0f}}}
+            .clearValueCount = 2,
+            .pClearValues = clearValues,
         };
+
 
         vkCmdBeginRenderPass(context->commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-
-
-        /* vkCmdBindPipeline(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline); */
-        /* vkCmdBindDescriptorSets(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL); */
-        /* vkCmdDraw(context->commandBuffers[i], 3, 1, 0, 0); */
 
         vkCmdBindPipeline(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
         vkCmdBindDescriptorSets(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
 
         renderer_draw(context->commandBuffers[i]);
-
 
 
         vkCmdEndRenderPass(context->commandBuffers[i]);
@@ -727,6 +780,60 @@ void createSyncObjects(VulkanContext* context) {
     }
 }
 
+void createDepthResources(VulkanContext* context) {
+    context->depthFormat = VK_FORMAT_D32_SFLOAT;
+
+    // Create depth image
+    VkImageCreateInfo depthImageInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent.width = context->swapChainExtent.width,
+        .extent.height = context->swapChainExtent.height,
+        .extent.depth = 1,
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = context->depthFormat,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    if (vkCreateImage(context->device, &depthImageInfo, NULL, &context->depthImage) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create depth image\n");
+        exit(EXIT_FAILURE);
+    }
+
+    VkMemoryRequirements depthMemReq;
+    vkGetImageMemoryRequirements(context->device, context->depthImage, &depthMemReq);
+
+    VkMemoryAllocateInfo depthAllocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = depthMemReq.size,
+        .memoryTypeIndex = findMemoryType(context->physicalDevice, depthMemReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    };
+    if (vkAllocateMemory(context->device, &depthAllocInfo, NULL, &context->depthImageMemory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate depth image memory\n");
+        exit(EXIT_FAILURE);
+    }
+    vkBindImageMemory(context->device, context->depthImage, context->depthImageMemory, 0);
+
+    VkImageViewCreateInfo depthImageViewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = context->depthImage,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = context->depthFormat,
+        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+        .subresourceRange.baseMipLevel = 0,
+        .subresourceRange.levelCount = 1,
+        .subresourceRange.baseArrayLayer = 0,
+        .subresourceRange.layerCount = 1,
+    };
+    if (vkCreateImageView(context->device, &depthImageViewInfo, NULL, &context->depthImageView) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create depth image view\n");
+        exit(EXIT_FAILURE);
+    }
+}
 
 // Main render loop
 void drawFrame(VulkanContext* context) {
@@ -844,6 +951,12 @@ void cleanup(VulkanContext* context) {
     if (context->graphicsPipeline) vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
     if (context->pipelineLayout) vkDestroyPipelineLayout(context->device, context->pipelineLayout, NULL);
     if (context->renderPass) vkDestroyRenderPass(context->device, context->renderPass, NULL);
+
+    // DEPTH
+    if (context->depthImageView) vkDestroyImageView(context->device, context->depthImageView, NULL);
+    if (context->depthImage) vkDestroyImage(context->device, context->depthImage, NULL);
+    if (context->depthImageMemory) vkFreeMemory(context->device, context->depthImageMemory, NULL);
+
 
     // UNIFORM BUFFER & DESCRIPTORS
     if (uniformBuffer) vkDestroyBuffer(context->device, uniformBuffer, NULL);
@@ -968,6 +1081,12 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
 
     vkBeginCommandBuffer(cmd, &beginInfo);
 
+
+
+    VkClearValue clearValues[2];
+    clearValues[0].color = (VkClearColorValue){{0.0f, 0.0f, 0.0f, 1.0f}};
+    clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
+
     VkRenderPassBeginInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = context->renderPass,
@@ -976,8 +1095,8 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
             .offset = {0, 0},
             .extent = context->swapChainExtent
         },
-        .clearValueCount = 1,
-        .pClearValues = &(VkClearValue){.color = {{0.0f, 0.0f, 0.0f, 1.0f}}}
+        .clearValueCount = 2,
+        .pClearValues = clearValues,
     };
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -994,6 +1113,15 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
 
 
 
+
+
+vec4 red    = {1.0f, 0.0f, 0.0f, 0.5f};
+vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
+vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
+vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
+
+
+
 int main() {
     VulkanContext context = {0};
     context.currentFrame = 0;
@@ -1004,9 +1132,8 @@ int main() {
     createInstance(&context);
 
     Camera camera;
-    vec3 camera_pos = {0.0f, 0.0f, -5.0f};
-    vec3 camera_target = {0.0f, 0.0f, 0.0f};
-    
+    vec3 camera_pos = {0.0f, 2.0f, 0.0f}; // 2 blocks up
+    vec3 camera_target = {0.0f, 2.0f, 0.0f}; // looking at world center, player-eye level
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
 
 
@@ -1024,6 +1151,9 @@ int main() {
     createLogicalDevice(&context);
     createSwapChain(&context);
     createImageViews(&context);
+    createDepthResources(&context);
+
+
     createRenderPass(&context);
 
     createUniformBuffer(&context);
@@ -1048,6 +1178,37 @@ int main() {
     createCommandBuffers(&context);
     createSyncObjects(&context);
 
+
+
+srand((unsigned int)time(0)); // call this once at startup
+
+ for (int x = 0; x < WORLD_WIDTH;  ++x)
+     for (int y = 0; y < WORLD_HEIGHT; ++y)
+         for (int z = 0; z < WORLD_DEPTH; ++z) {
+             blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2) + 0.5f;
+             blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2) + 0.5f;
+             blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2) + 0.5f;
+             blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
+             blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
+             blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
+             blocks[x][y][z].color[3] = 1.0f;
+         }
+
+ for (int x = 0; x < WORLD_WIDTH;  ++x)
+     for (int z = 0; z < WORLD_DEPTH; ++z) {
+         int y = 0; // ground level
+         blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2) + 0.5f;
+         blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2) + 0.5f;
+         blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2) + 0.5f;
+         blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
+         blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
+         blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
+         blocks[x][y][z].color[3] = 1.0f;
+     }
+
+
+
+
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
         delta_time = current_frame - last_frame;
@@ -1066,22 +1227,21 @@ int main() {
 
         renderer_clear();
 
-        vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left
-        vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right
-        vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right
-        vec3 v3 = { -0.5f,  0.5f, 0.0f }; // Top Left
-        vec3 center = { 0.0f, 0.0f, 0.0f }; // Center
+        /* vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left */
+        /* vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right */
+        /* vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right */
+        /* vec3 v3 = { -0.5f,  0.5f, 0.0f }; // Top Left */
+        /* vec3 center = { 0.0f, 0.0f, 0.0f }; // Center */
+        /* triangle(v0, center, v1, red);    // Bottom */
+        /* triangle(v1, center, v2, green);  // Right */
+        /* triangle(v2, center, v3, blue);   // Top */
+        /* triangle(v3, center, v0, yellow); // Left */
 
-        vec4 red    = {1.0f, 0.0f, 0.0f, 0.5f};
-        vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
-        vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
-        vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
-        triangle(v0, center, v1, red);    // Bottom
-        triangle(v1, center, v2, green);  // Right
-        triangle(v2, center, v3, blue);   // Top
-        triangle(v3, center, v0, yellow); // Left
-
+        for (int x = 0; x < WORLD_WIDTH;  ++x)
+        for (int y = 0; y < WORLD_HEIGHT; ++y)
+        for (int z = 0; z < WORLD_DEPTH; ++z)
+            cube(blocks[x][y][z].pos, 1.0f, blocks[x][y][z].color);
 
         renderer_upload();
 
@@ -1149,52 +1309,7 @@ int main() {
         }
 
         context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-}
-
-
-    /* while (!glfwWindowShouldClose(context.window)) { */
-    /*     float current_frame = glfwGetTime(); */
-    /*     delta_time = current_frame - last_frame; */
-    /*     last_frame = current_frame; */
-
-    /*     glfwPollEvents(); */
-
-    /*     camera_process_keyboard(&camera, context.window, delta_time); */
-    /*     camera_update(&camera); */
-
-    /*     UniformBufferObject ubo; */
-    /*     glm_mat4_mul(camera.projection_matrix, camera.view_matrix, ubo.vp); */
-    /*     void* data; */
-    /*     vkMapMemory(context.device, uniformBufferMemory, 0, sizeof(ubo), 0, &data); */
-    /*     memcpy(data, &ubo, sizeof(ubo)); */
-    /*     vkUnmapMemory(context.device, uniformBufferMemory); */
-
-
-    /*     renderer_clear(); */
-
-    /*     vec3 a = { -0.5f, -0.5f,  0.0f }; */
-    /*     vec3 b = {  0.5f, -0.5f,  0.0f }; */
-    /*     vec3 c = {  0.0f,  0.5f,  0.0f }; */
-
-    /*     vec4 color1 = {1.0f, 0.0f, 0.0f, 1.0f}; // Red */
-    /*     triangle(a, b, c, color1); */
-
-    /*     // You can add more triangles as you wish for the other positions (front, back, left, right)... */
-    /*     // For example, place a triangle behind: */
-    /*     vec3 a2 = { -0.5f, -0.5f, -2.0f }; */
-    /*     vec3 b2 = {  0.5f, -0.5f, -2.0f }; */
-    /*     vec3 c2 = {  0.0f,  0.5f, -2.0f }; */
-    /*     vec4 color2 = {0.0f, 1.0f, 0.0f, 1.0f}; // Green */
-    /*     triangle(a2, b2, c2, color2); */
-
-    /*     // ...and so on for left/right */
-
-    /*     renderer_upload(); */
-
-
-    /*     drawFrame(&context); */
-    /* } */
-
+    }
     
     vkDeviceWaitIdle(context.device);
     cleanup(&context);

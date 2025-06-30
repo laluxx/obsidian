@@ -75,6 +75,15 @@ void triangle(vec3 a, vec3 b, vec3 c, vec4 color) {
     vertex(c, color);
 }
 
+
+//    h-------g
+//   /|      /|
+//  d-------c |
+//  | |  .  | |   funny cube
+//  | e-----|-f
+//  |/      |/
+//  a-------b
+
 void cube(vec3 origin, float size, vec4 color) {
     vec3 a, b, c, d, e, f, g, h;
     glm_vec3_copy(origin, a);
@@ -86,10 +95,35 @@ void cube(vec3 origin, float size, vec4 color) {
     glm_vec3_add(origin, (vec3){size, size, size}, g);
     glm_vec3_add(origin, (vec3){0, size, size}, h);
 
-    line(a, b, color); line(b, c, color); line(c, d, color); line(d, a, color);
-    line(e, f, color); line(f, g, color); line(g, h, color); line(h, e, color);
-    line(a, e, color); line(b, f, color); line(c, g, color); line(d, h, color);
+    // Front face (a, b, c, d) // Back face (e, f, g, h)
+    triangle(a, b, c, color);  triangle(e, f, g, color);
+    triangle(a, c, d, color);  triangle(e, g, h, color);
+
+    // Front face (z=0)
+    triangle(a, b, c, color); // a (0,0,0), b (s,0,0), c (s,s,0)
+    triangle(a, c, d, color); // a (0,0,0), c (s,s,0), d (0,s,0)
+
+    // Back face (z=s)
+    triangle(e, h, g, color); // e (0,0,s), h (0,s,s), g (s,s,s)
+    triangle(e, g, f, color); // e (0,0,s), g (s,s,s), f (s,0,s)
+
+    // Left face (x=0)
+    triangle(a, d, h, color); // a (0,0,0), d (0,s,0), h (0,s,s)
+    triangle(a, h, e, color); // a (0,0,0), h (0,s,s), e (0,0,s)
+
+    // Right face (x=s)
+    triangle(b, f, g, color); // b (s,0,0), f (s,0,s), g (s,s,s)
+    triangle(b, g, c, color); // b (s,0,0), g (s,s,s), c (s,s,0)
+
+    // Top face (y=s)
+    triangle(d, c, g, color); // d (0,s,0), c (s,s,0), g (s,s,s)
+    triangle(d, g, h, color); // d (0,s,0), g (s,s,s), h (0,s,s)
+
+    // Bottom face (y=0)
+    triangle(a, e, f, color); // a (0,0,0), e (0,0,s), f (s,0,s)
+    triangle(a, f, b, color); // a (0,0,0), f (s,0,s), b (s,0,0)
 }
+
 
 void renderer_upload() {
     void* data;
