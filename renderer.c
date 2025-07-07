@@ -1,4 +1,6 @@
 #include "renderer.h"
+#include "context.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -79,51 +81,39 @@ void triangle(vec3 a, vec3 b, vec3 c, vec4 color) {
 //    h-------g
 //   /|      /|
 //  d-------c |
-//  | |  .  | |   funny cube
+//  | |  .  | |  <- Origin
 //  | e-----|-f
 //  |/      |/
 //  a-------b
 
 void cube(vec3 origin, float size, vec4 color) {
+    float s = size / 2.0f;
     vec3 a, b, c, d, e, f, g, h;
-    glm_vec3_copy(origin, a);
-    glm_vec3_add(origin, (vec3){size, 0, 0}, b);
-    glm_vec3_add(origin, (vec3){size, size, 0}, c);
-    glm_vec3_add(origin, (vec3){0, size, 0}, d);
-    glm_vec3_add(origin, (vec3){0, 0, size}, e);
-    glm_vec3_add(origin, (vec3){size, 0, size}, f);
-    glm_vec3_add(origin, (vec3){size, size, size}, g);
-    glm_vec3_add(origin, (vec3){0, size, size}, h);
 
-    // Front face (a, b, c, d) // Back face (e, f, g, h)
-    triangle(a, b, c, color);  triangle(e, f, g, color);
-    triangle(a, c, d, color);  triangle(e, g, h, color);
+    // Define vertices relative to center
+    glm_vec3_add(origin, (vec3){-s, -s, -s}, a); // a
+    glm_vec3_add(origin, (vec3){+s, -s, -s}, b); // b
+    glm_vec3_add(origin, (vec3){+s, +s, -s}, c); // c
+    glm_vec3_add(origin, (vec3){-s, +s, -s}, d); // d
+    glm_vec3_add(origin, (vec3){-s, -s, +s}, e); // e
+    glm_vec3_add(origin, (vec3){+s, -s, +s}, f); // f
+    glm_vec3_add(origin, (vec3){+s, +s, +s}, g); // g
+    glm_vec3_add(origin, (vec3){-s, +s, +s}, h); // h
 
-    // Front face (z=0)
-    triangle(a, b, c, color); // a (0,0,0), b (s,0,0), c (s,s,0)
-    triangle(a, c, d, color); // a (0,0,0), c (s,s,0), d (0,s,0)
-
-    // Back face (z=s)
-    triangle(e, h, g, color); // e (0,0,s), h (0,s,s), g (s,s,s)
-    triangle(e, g, f, color); // e (0,0,s), g (s,s,s), f (s,0,s)
-
-    // Left face (x=0)
-    triangle(a, d, h, color); // a (0,0,0), d (0,s,0), h (0,s,s)
-    triangle(a, h, e, color); // a (0,0,0), h (0,s,s), e (0,0,s)
-
-    // Right face (x=s)
-    triangle(b, f, g, color); // b (s,0,0), f (s,0,s), g (s,s,s)
-    triangle(b, g, c, color); // b (s,0,0), g (s,s,s), c (s,s,0)
-
-    // Top face (y=s)
-    triangle(d, c, g, color); // d (0,s,0), c (s,s,0), g (s,s,s)
-    triangle(d, g, h, color); // d (0,s,0), g (s,s,s), h (0,s,s)
-
-    // Bottom face (y=0)
-    triangle(a, e, f, color); // a (0,0,0), e (0,0,s), f (s,0,s)
-    triangle(a, f, b, color); // a (0,0,0), f (s,0,s), b (s,0,0)
+    // Now the triangles stay exactly the same!
+    // Front face (z=-s)
+    triangle(a, b, c, color); triangle(a, c, d, color);
+    // Back face (z=+s)
+    triangle(e, h, g, color); triangle(e, g, f, color);
+    // Left face (x=-s)
+    triangle(a, d, h, color); triangle(a, h, e, color);
+    // Right face (x=+s)
+    triangle(b, f, g, color); triangle(b, g, c, color);
+    // Top face (y=+s)
+    triangle(d, c, g, color); triangle(d, g, h, color);
+    // Bottom face (y=-s)
+    triangle(a, e, f, color); triangle(a, f, b, color);
 }
-
 
 void renderer_upload() {
     void* data;
@@ -133,6 +123,17 @@ void renderer_upload() {
 }
 
 void renderer_draw(VkCommandBuffer cmd) {
+    mat4 identity;
+    glm_mat4_identity(identity);
+    vkCmdPushConstants(
+        cmd,
+        context.pipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(mat4),
+        identity
+    );
+
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, offsets);
     vkCmdDraw(cmd, vertex_count, 1, 0, 0);
@@ -140,4 +141,71 @@ void renderer_draw(VkCommandBuffer cmd) {
 
 void renderer_clear() {
     vertex_count = 0;
+}
+
+
+void mesh(VkCommandBuffer cmd, Mesh* mesh) {
+    vkCmdPushConstants(
+        cmd,
+        context.pipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(mat4),
+        mesh->model
+    );
+
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vertexBuffer, offsets);
+    vkCmdDraw(cmd, mesh->vertexCount, 1, 0, 0);
+}
+
+void mesh_destroy(VkDevice device, Mesh* mesh) {
+    if (mesh->vertexBuffer) vkDestroyBuffer(device, mesh->vertexBuffer, NULL);
+    if (mesh->vertexBufferMemory) vkFreeMemory(device, mesh->vertexBufferMemory, NULL);
+
+    mesh->vertexBuffer = VK_NULL_HANDLE;
+    mesh->vertexBufferMemory = VK_NULL_HANDLE;
+    mesh->vertexCount = 0;
+}
+
+//
+
+void meshes_init(Meshes* meshes) {
+    meshes->items = NULL;
+    meshes->count = 0;
+    meshes->capacity = 0;
+}
+
+void meshes_add(Meshes* meshes, Mesh mesh) {
+    if (meshes->count == meshes->capacity) {
+        size_t new_capacity = meshes->capacity ? meshes->capacity * 2 : 4;
+        meshes->items = realloc(meshes->items, new_capacity * sizeof(Mesh));
+        meshes->capacity = new_capacity;
+    }
+    meshes->items[meshes->count++] = mesh;
+}
+
+void meshes_remove(Meshes* meshes, size_t index) {
+    if (index >= meshes->count) return;
+    // Destroy the mesh buffer on device!
+    // mesh_destroy(device, &meshes->items[index]);
+    for (size_t i = index; i < meshes->count - 1; ++i)
+        meshes->items[i] = meshes->items[i + 1];
+    meshes->count--;
+}
+
+void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
+    for (size_t i = 0; i < meshes->count; ++i) {
+        mesh(cmd, &meshes->items[i]);
+    }
+}
+
+void meshes_destroy(VkDevice device, Meshes* meshes) {
+    for (size_t i = 0; i < meshes->count; ++i) {
+        mesh_destroy(device, &meshes->items[i]);
+    }
+    free(meshes->items);
+    meshes->items = NULL;
+    meshes->count = 0;
+    meshes->capacity = 0;
 }

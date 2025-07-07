@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra
+CFLAGS = -std=c11 -Wall -Wextra -g3 -o3
 LDFLAGS = -lvulkan -lglfw -lcglm -lm
 GLSLANG = glslangValidator
 XXD = xxd
@@ -9,7 +9,7 @@ INCLUDES = -I/usr/include
 LIBRARIES = -L/usr/lib/x86_64-linux-gnu
 
 # Project settings
-TARGET = vulkan_minimal
+TARGET = revox
 SOURCES = $(wildcard *.c)
 OBJECTS = $(SOURCES:.c=.o)
 

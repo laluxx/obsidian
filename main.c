@@ -1,3 +1,4 @@
+#include "obj.h"
 #include <vulkan/vulkan_core.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -13,11 +14,13 @@
 #include <cglm/cglm.h>
 #include "camera.h"
 #include "renderer.h"
+#include "scene.h"
+
+#include "context.h"
 
 #include <time.h>  
 
 
-// Constants
 #define WIDTH 800
 #define HEIGHT 600
 
@@ -44,6 +47,7 @@ VkDeviceMemory uniformBufferMemory;
 typedef struct {
     vec3 pos;
     vec4 color;
+    float scale;
 } Block;
 
 
@@ -53,45 +57,10 @@ typedef struct {
 
 Block blocks[WORLD_WIDTH][WORLD_HEIGHT][WORLD_DEPTH];
 
-
 typedef struct {
     mat4 vp;
 } UniformBufferObject;
 
-typedef struct {
-    GLFWwindow *window;
-    VkInstance instance;
-    VkPhysicalDevice physicalDevice;
-    VkDevice device;
-    VkQueue graphicsQueue;
-    VkSurfaceKHR surface;
-    VkSwapchainKHR swapChain;
-    VkImage *swapChainImages;
-    uint32_t swapChainImageCount;
-    VkFormat swapChainImageFormat;
-    VkExtent2D swapChainExtent;
-    VkImageView *swapChainImageViews;
-    VkRenderPass renderPass;
-    VkPipelineLayout pipelineLayout;
-    VkPipeline graphicsPipeline;
-    VkFramebuffer *swapChainFramebuffers;
-    VkCommandPool commandPool;
-    VkCommandBuffer *commandBuffers;
-    VkSemaphore *imageAvailableSemaphores;
-    VkFence *inFlightFences;
-    uint32_t currentFrame;
-
-    VkFence* imagesInFlight; // size: swapChainImageCount
-    VkSemaphore* renderFinishedSemaphores; // size = swapChainImageCount
-    VkDescriptorSetLayout descriptorSetLayout;
-
-    VkImage depthImage;
-    VkDeviceMemory depthImageMemory;
-    VkImageView depthImageView;
-    VkFormat depthFormat;
-
-
-} VulkanContext;
 
 uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
@@ -143,9 +112,6 @@ void createDescriptorPool(VulkanContext* context) {
     }
 }
 
-
-
-// Helper function to check extension support
 bool checkExtensionSupport(const char** requiredExtensions, uint32_t requiredCount) {
     uint32_t extensionCount = 0;
     vkEnumerateInstanceExtensionProperties(NULL, &extensionCount, NULL);
@@ -170,7 +136,6 @@ bool checkExtensionSupport(const char** requiredExtensions, uint32_t requiredCou
     return true;
 }
 
-// Helper function to check validation layer support
 bool checkValidationLayerSupport() {
     uint32_t layerCount;
     vkEnumerateInstanceLayerProperties(&layerCount, NULL);
@@ -195,15 +160,14 @@ bool checkValidationLayerSupport() {
     return true;
 }
 
-// Initialize GLFW window
 void initWindow(VulkanContext* context) {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-    context->window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Triangle", NULL, NULL);
+    context->window = glfwCreateWindow(WIDTH, HEIGHT, "Revox", NULL, NULL);
 }
 
-// Create Vulkan instance
+
 void createInstance(VulkanContext* context) {
 #if ENABLE_VALIDATION_LAYERS
     if (!checkValidationLayerSupport()) {
@@ -214,7 +178,7 @@ void createInstance(VulkanContext* context) {
 
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "Vulkan Triangle",
+        .pApplicationName = "Revox",
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
@@ -265,13 +229,26 @@ void createLogicalDevice(VulkanContext* context) {
         .pQueuePriorities = &queuePriority
     };
 
-    const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    /* const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME}; */
+
+    const char* deviceExtensions[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+        VK_KHR_SPIRV_1_4_EXTENSION_NAME,
+        VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME
+    };
+
 
     VkPhysicalDeviceFeatures deviceFeatures = {0};
 
     VkDeviceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
+        /* .queueCreateInfoCount = 8, */
         .pQueueCreateInfos = &queueCreateInfo,
         .enabledExtensionCount = 1,
         .ppEnabledExtensionNames = deviceExtensions,
@@ -298,9 +275,9 @@ void createSwapChain(VulkanContext* context) {
     };
 
     /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR; // Supported by all implementations, it enforces VSync */
-    VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // No VSync, low latency, but possible tearing
+    /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // No VSync, low latency, but possible tearing */
     /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, lower latency than FIFO, no tearing, but higher GPU load. */
-    /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR; */
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
 
     VkExtent2D extent = capabilities.currentExtent.width != UINT32_MAX ? 
         capabilities.currentExtent : 
@@ -576,8 +553,15 @@ void createGraphicsPipeline(VulkanContext* context) {
     // Color blending
     VkPipelineColorBlendAttachmentState colorBlendAttachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-        .blendEnable = VK_FALSE
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
     };
+
 
     VkPipelineColorBlendStateCreateInfo colorBlending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -586,11 +570,28 @@ void createGraphicsPipeline(VulkanContext* context) {
         .pAttachments = &colorBlendAttachment
     };
 
+
+
     // Pipeline layout
+    /* VkPipelineLayoutCreateInfo pipelineLayoutInfo = { */
+    /*     .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, */
+    /*     .setLayoutCount = 1, */
+    /*     .pSetLayouts = &context->descriptorSetLayout */
+    /* }; */
+
+
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(mat4),
+    };
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
-        .pSetLayouts = &context->descriptorSetLayout
+        .pSetLayouts = &context->descriptorSetLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange,
     };
 
 
@@ -705,8 +706,6 @@ void createCommandBuffers(VulkanContext* context) {
             fprintf(stderr, "Failed to begin recording command buffer\n");
             exit(EXIT_FAILURE);
         }
-
-
 
 
         VkClearValue clearValues[2];
@@ -914,6 +913,7 @@ void cleanup(VulkanContext* context) {
     vkDeviceWaitIdle(context->device); // Wait for all operations to complete
 
     renderer_shutdown();
+    meshes_destroy(context->device, &scene.meshes);
     
     // SYNC OBJECTS
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -987,6 +987,33 @@ float last_frame = 0.0f;
 
 
 
+bool shiftPressed;
+bool ctrlPressed;
+bool altPressed;
+bool lerp_minimap_on_startup;
+
+void screenshot( VkDevice device, VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue queue, VkImage srcImage, VkFormat imageFormat, uint32_t width, uint32_t height, const char* filename);
+
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    shiftPressed = mods & GLFW_MOD_SHIFT;
+    ctrlPressed  = mods & GLFW_MOD_CONTROL;
+    altPressed   = mods & GLFW_MOD_ALT;
+
+    if (key == GLFW_KEY_TAB && action == GLFW_PRESS) {
+        screenshot(
+                        context.device,
+                        context.physicalDevice,
+                        context.commandPool,
+                        context.graphicsQueue,
+                        context.swapChainImages[0], // or whichever image you want
+                        VK_FORMAT_B8G8R8A8_SRGB,    // or your swapchain format
+                        context.swapChainExtent.width,
+                        context.swapChainExtent.height,
+                        "screenshot.png"
+                        );
+    }
+}
+
 
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     if (firstMouse) {
@@ -1049,8 +1076,6 @@ void createUniformBuffer(VulkanContext* context) {
 }
 
 
-
-
 void createDescriptorSetLayout(VulkanContext* context) {
     VkDescriptorSetLayoutBinding uboLayoutBinding = {
         .binding = 0,
@@ -1068,8 +1093,6 @@ void createDescriptorSetLayout(VulkanContext* context) {
 
     vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout);
 }
-
-
 
 
 void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
@@ -1104,6 +1127,7 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
 
+    meshes_draw(cmd, &scene.meshes);
     renderer_draw(cmd);
 
     vkCmdEndRenderPass(cmd);
@@ -1111,21 +1135,183 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     vkEndCommandBuffer(cmd);
 }
 
-
-
-
-
-vec4 red    = {1.0f, 0.0f, 0.0f, 0.5f};
+vec4 red    = {1.0f, 0.0f, 0.0f, 1.0f};
 vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
 vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
 vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+
+void screenshot(
+    VkDevice device,
+    VkPhysicalDevice physicalDevice,
+    VkCommandPool commandPool,
+    VkQueue queue,
+    VkImage srcImage,
+    VkFormat imageFormat,
+    uint32_t width,
+    uint32_t height,
+    const char* filename)
+{
+    VkResult err;
+
+    // 1. Create CPU-accessible buffer
+    VkDeviceSize imageSize = width * height * 4;
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = imageSize,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    err = vkCreateBuffer(device, &bufferInfo, NULL, &stagingBuffer);
+    assert(err == VK_SUCCESS);
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+
+    err = vkAllocateMemory(device, &allocInfo, NULL, &stagingBufferMemory);
+    assert(err == VK_SUCCESS);
+    vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
+
+    // 2. Create command buffer for copy
+    VkCommandBufferAllocateInfo cmdBufAllocInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandPool = commandPool,
+        .commandBufferCount = 1,
+    };
+
+    VkCommandBuffer cmdBuf;
+    vkAllocateCommandBuffers(device, &cmdBufAllocInfo, &cmdBuf);
+
+    VkCommandBufferBeginInfo beginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+    // 3. Transition image layout if necessary (skip if already TRANSFER_SRC_OPTIMAL)
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,  // adjust if different!
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = srcImage,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    vkCmdPipelineBarrier(
+        cmdBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0, NULL,
+        0, NULL,
+        1, &barrier);
+
+    // 4. Copy image to buffer
+    VkBufferImageCopy region = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {width, height, 1},
+    };
+
+    vkCmdCopyImageToBuffer(cmdBuf, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &region);
+
+    // 5. Barrier to host read
+    VkBufferMemoryBarrier bufBarrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = stagingBuffer,
+        .offset = 0,
+        .size = imageSize,
+    };
+    vkCmdPipelineBarrier(
+        cmdBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT,
+        0,
+        0, NULL,
+        1, &bufBarrier,
+        0, NULL);
+
+    vkEndCommandBuffer(cmdBuf);
+
+    // 6. Submit and wait
+    VkSubmitInfo submitInfo = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmdBuf,
+    };
+    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+
+    // 7. Map buffer and save with stb_image_write
+    void* data;
+    vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+
+    // NOTE: Vulkan default is BGRA, convert to RGBA for PNG
+    uint8_t* rgba_pixels = malloc(imageSize);
+    for (uint32_t i = 0; i < width * height; ++i) {
+        uint8_t* src = (uint8_t*)data + i * 4;
+        uint8_t* dst = rgba_pixels + i * 4;
+        dst[0] = src[2]; // R
+        dst[1] = src[1]; // G
+        dst[2] = src[0]; // B
+        dst[3] = src[3]; // A
+    }
+
+    stbi_write_png(filename, width, height, 4, rgba_pixels, width * 4);
+
+    free(rgba_pixels);
+
+    vkUnmapMemory(device, stagingBufferMemory);
+
+    // 8. Cleanup
+    vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
+    vkDestroyBuffer(device, stagingBuffer, NULL);
+    vkFreeMemory(device, stagingBufferMemory, NULL);
+    printf("took screenshot");
+}
 
 
 int main() {
-    VulkanContext context = {0};
+
     context.currentFrame = 0;
 
+    
     initWindow(&context);
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
@@ -1139,6 +1325,7 @@ int main() {
 
     glfwSetWindowUserPointer(context.window, &camera);
     glfwSetCursorPosCallback(context.window, mouse_callback);
+    glfwSetKeyCallback(context.window, key_callback);
 
 
 
@@ -1172,7 +1359,7 @@ int main() {
                   context.physicalDevice,
                   context.commandPool,
                   context.graphicsQueue
-    );
+                  );
 
 
     createCommandBuffers(&context);
@@ -1180,34 +1367,38 @@ int main() {
 
 
 
-srand((unsigned int)time(0)); // call this once at startup
+    srand((unsigned int)time(0)); // call this once at startup
 
- for (int x = 0; x < WORLD_WIDTH;  ++x)
-     for (int y = 0; y < WORLD_HEIGHT; ++y)
-         for (int z = 0; z < WORLD_DEPTH; ++z) {
-             blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2) + 0.5f;
-             blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2) + 0.5f;
-             blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2) + 0.5f;
-             blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
-             blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
-             blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
-             blocks[x][y][z].color[3] = 1.0f;
-         }
+    for (int x = 0; x < WORLD_WIDTH;  ++x)
+        for (int y = 0; y < WORLD_HEIGHT; ++y)
+            for (int z = 0; z < WORLD_DEPTH; ++z) {
+                blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2) /* + 0.5f */;
+                blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2) /* + 0.5f */;
+                blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2) /* + 0.5f */;
+                blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
+                blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
+                blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
+                blocks[x][y][z].color[3] = 1.0f;
+            }
 
- for (int x = 0; x < WORLD_WIDTH;  ++x)
-     for (int z = 0; z < WORLD_DEPTH; ++z) {
-         int y = 0; // ground level
-         blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2) + 0.5f;
-         blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2) + 0.5f;
-         blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2) + 0.5f;
-         blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
-         blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
-         blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
-         blocks[x][y][z].color[3] = 1.0f;
-     }
+    for (int x = 0; x < WORLD_WIDTH;  ++x)
+        for (int z = 0; z < WORLD_DEPTH; ++z) {
+            int y = 0; // ground level
+            blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2);
+            blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2);
+            blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2);
+            blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
+            blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
+            blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
+            blocks[x][y][z].color[3] = 1.0f;
+        }
 
 
 
+    scene_init(&scene); // Initialize the scene before loading meshes
+
+    /* Mesh teapot = */ load_obj("./assets/teapot.obj", red);
+    /* Mesh cow = */ load_obj("./assets/cow.obj", blue);
 
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
@@ -1227,6 +1418,8 @@ srand((unsigned int)time(0)); // call this once at startup
 
         renderer_clear();
 
+
+
         /* vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left */
         /* vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right */
         /* vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right */
@@ -1238,10 +1431,23 @@ srand((unsigned int)time(0)); // call this once at startup
         /* triangle(v3, center, v0, yellow); // Left */
 
 
-        for (int x = 0; x < WORLD_WIDTH;  ++x)
-        for (int y = 0; y < WORLD_HEIGHT; ++y)
-        for (int z = 0; z < WORLD_DEPTH; ++z)
-            cube(blocks[x][y][z].pos, 1.0f, blocks[x][y][z].color);
+        /* for (int x = 0; x < WORLD_WIDTH;  ++x) */
+        /* for (int y = 0; y < WORLD_HEIGHT; ++y) */
+        /* for (int z = 0; z < WORLD_DEPTH; ++z) */
+        /*     cube(blocks[x][y][z].pos, 1.0f, blocks[x][y][z].color); */
+
+        /* cube((vec3){0, 0, 0}, 1.0f, red); */
+
+  
+
+        static float cow_rotation = 0.0f;
+
+        cow_rotation += delta_time; // radians per frame
+
+        glm_mat4_identity(scene.meshes.items[1].model);
+        glm_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f});
+
+
 
         renderer_upload();
 
@@ -1307,6 +1513,7 @@ srand((unsigned int)time(0)); // call this once at startup
             fprintf(stderr, "Failed to present swap chain image\n");
             exit(EXIT_FAILURE);
         }
+
 
         context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }

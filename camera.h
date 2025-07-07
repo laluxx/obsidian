@@ -3,6 +3,7 @@
 
 #include <cglm/cglm.h>
 #include <GLFW/glfw3.h>
+#include <stdbool.h>
 
 
 typedef struct {
@@ -19,6 +20,7 @@ typedef struct {
     float aspect_ratio;
     float near_plane;
     float far_plane;
+    bool active;
 } Camera;
 
 void camera_init(Camera* cam, vec3 position, float yaw, float pitch, float aspect_ratio);

@@ -11,6 +11,7 @@ void camera_init(Camera* cam, vec3 position, float yaw, float pitch, float aspec
     cam->fov = 45.0f;
     cam->near_plane = 0.1f;
     cam->far_plane = 100.0f;
+    cam->active = true;
     glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, cam->up);
     camera_update(cam);
 }

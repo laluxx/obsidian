@@ -10,6 +10,20 @@ typedef struct {
     vec4 color;
 } Vertex;
 
+typedef struct {
+    VkBuffer vertexBuffer;
+    VkDeviceMemory vertexBufferMemory;
+    uint32_t vertexCount;
+    mat4 model; 
+} Mesh;
+
+typedef struct {
+    Mesh* items;
+    size_t count;
+    size_t capacity;
+} Meshes;
+
+
 void renderer_init(
     VkDevice device,
     VkPhysicalDevice physicalDevice,
@@ -29,3 +43,14 @@ void line(vec3 a, vec3 b, vec4 color);
 void triangle(vec3 a, vec3 b, vec3 c, vec4 color);
 void plane(vec3 origin, vec2 size, vec4 color);
 void cube(vec3 origin, float size, vec4 color);
+
+void mesh(VkCommandBuffer cmd, Mesh* mesh);
+void mesh_destroy(VkDevice device, Mesh* mesh);
+
+
+void meshes_init(Meshes* meshes);
+void meshes_add(Meshes* meshes, Mesh mesh);
+void meshes_remove(Meshes* meshes, size_t index);
+void meshes_destroy(VkDevice device, Meshes* meshes);
+void meshes_draw(VkCommandBuffer cmd, Meshes* meshes);
+
