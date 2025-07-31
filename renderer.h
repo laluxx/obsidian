@@ -43,6 +43,7 @@ void line(vec3 a, vec3 b, vec4 color);
 void triangle(vec3 a, vec3 b, vec3 c, vec4 color);
 void plane(vec3 origin, vec2 size, vec4 color);
 void cube(vec3 origin, float size, vec4 color);
+void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color);
 
 void mesh(VkCommandBuffer cmd, Mesh* mesh);
 void mesh_destroy(VkDevice device, Mesh* mesh);

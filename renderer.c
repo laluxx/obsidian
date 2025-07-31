@@ -115,6 +115,44 @@ void cube(vec3 origin, float size, vec4 color) {
     triangle(a, e, f, color); triangle(a, f, b, color);
 }
 
+void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color) {
+    for (int lat = 0; lat < latDiv; ++lat) {
+        float theta1 = (float)lat / latDiv * GLM_PI;
+        float theta2 = (float)(lat + 1) / latDiv * GLM_PI;
+
+        for (int lon = 0; lon < longDiv; ++lon) {
+            float phi1 = (float)lon / longDiv * 2.0f * GLM_PI;
+            float phi2 = (float)(lon + 1) / longDiv * 2.0f * GLM_PI;
+
+            vec3 v0, v1, v2, v3;
+            glm_vec3_copy((vec3){
+                center[0] + radius * sinf(theta1) * cosf(phi1),
+                center[1] + radius * cosf(theta1),
+                center[2] + radius * sinf(theta1) * sinf(phi1)
+            }, v0);
+            glm_vec3_copy((vec3){
+                center[0] + radius * sinf(theta2) * cosf(phi1),
+                center[1] + radius * cosf(theta2),
+                center[2] + radius * sinf(theta2) * sinf(phi1)
+            }, v1);
+            glm_vec3_copy((vec3){
+                center[0] + radius * sinf(theta2) * cosf(phi2),
+                center[1] + radius * cosf(theta2),
+                center[2] + radius * sinf(theta2) * sinf(phi2)
+            }, v2);
+            glm_vec3_copy((vec3){
+                center[0] + radius * sinf(theta1) * cosf(phi2),
+                center[1] + radius * cosf(theta1),
+                center[2] + radius * sinf(theta1) * sinf(phi2)
+            }, v3);
+
+            triangle(v0, v1, v2, color);
+            triangle(v0, v2, v3, color);
+        }
+    }
+}
+
+
 void renderer_upload() {
     void* data;
     vkMapMemory(device, vertexBufferMemory, 0, sizeof(vertices), 0, &data);

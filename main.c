@@ -8,8 +8,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#include "frag.spv.h"
-#include "vert.spv.h"
+#include "frag.frag.spv.h"
+#include "vert.vert.spv.h"
 
 #include <cglm/cglm.h>
 #include "camera.h"
@@ -275,9 +275,9 @@ void createSwapChain(VulkanContext* context) {
     };
 
     /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR; // Supported by all implementations, it enforces VSync */
-    /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // No VSync, low latency, but possible tearing */
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // No VSync, low latency, but possible tearing
     /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, lower latency than FIFO, no tearing, but higher GPU load. */
-    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR; */
 
     VkExtent2D extent = capabilities.currentExtent.width != UINT32_MAX ? 
         capabilities.currentExtent : 
@@ -413,8 +413,6 @@ void createRenderPass(VulkanContext* context) {
         .pDependencies = &dependency
     };
 
-
-
     if (vkCreateRenderPass(context->device, &renderPassInfo, NULL, &context->renderPass) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create render pass\n");
         exit(EXIT_FAILURE);
@@ -427,8 +425,8 @@ void createGraphicsPipeline(VulkanContext* context) {
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(vert_spv),
-            .pCode = (const uint32_t*)vert_spv
+            .codeSize = sizeof(vert_vert_spv),
+            .pCode = (const uint32_t*)vert_vert_spv
         };
 
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
@@ -442,8 +440,8 @@ void createGraphicsPipeline(VulkanContext* context) {
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(frag_spv),
-            .pCode = (const uint32_t*)frag_spv
+            .codeSize = sizeof(frag_frag_spv),
+            .pCode = (const uint32_t*)frag_frag_spv
         };
 
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule) != VK_SUCCESS) {
@@ -1420,15 +1418,15 @@ int main() {
 
 
 
-        /* vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left */
-        /* vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right */
-        /* vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right */
-        /* vec3 v3 = { -0.5f,  0.5f, 0.0f }; // Top Left */
-        /* vec3 center = { 0.0f, 0.0f, 0.0f }; // Center */
-        /* triangle(v0, center, v1, red);    // Bottom */
-        /* triangle(v1, center, v2, green);  // Right */
-        /* triangle(v2, center, v3, blue);   // Top */
-        /* triangle(v3, center, v0, yellow); // Left */
+        vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left
+        vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right
+        vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right
+        vec3 v3 = { -0.5f,  0.5f, 0.0f }; // Top Left
+        vec3 center = { 0.0f, 0.0f, 0.0f }; // Center
+        triangle(v0, center, v1, red);    // Bottom
+        triangle(v1, center, v2, green);  // Right
+        triangle(v2, center, v3, blue);   // Top
+        triangle(v3, center, v0, yellow); // Left
 
 
         /* for (int x = 0; x < WORLD_WIDTH;  ++x) */
@@ -1438,7 +1436,7 @@ int main() {
 
         /* cube((vec3){0, 0, 0}, 1.0f, red); */
 
-  
+        sphere((vec3){0,0,30}, 5, 80, 80, yellow);
 
         static float cow_rotation = 0.0f;
 

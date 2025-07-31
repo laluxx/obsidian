@@ -14,11 +14,22 @@ SOURCES = $(wildcard *.c)
 OBJECTS = $(SOURCES:.c=.o)
 
 # Shaders
-SHADERS = vert.vert frag.frag
-SPV = $(SHADERS:.vert=.spv)
-SPV := $(SPV:.frag=.spv)
+SHADER_VERTS = $(wildcard *.vert)
+SHADER_FRAGS = $(wildcard *.frag)
+SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv)
+SPV_HEADERS = $(SHADER_SPVS:.spv=.spv.h)
 
-SPV_HEADERS = $(SPV:.spv=.spv.h)
+# Compile shaders to SPIR-V
+%.vert.spv: %.vert
+	$(GLSLANG) -V $< -o $@
+
+%.frag.spv: %.frag
+	$(GLSLANG) -V $< -o $@
+
+# Convert SPIR-V to C header
+%.spv.h: %.spv
+	$(XXD) -i $< > $@
+
 
 all: $(TARGET)
 
@@ -33,9 +44,16 @@ all: $(TARGET)
 %.spv.h: %.spv
 	$(XXD) -i $< > $@
 
+# # Build executable
+# $(TARGET): $(SPV_HEADERS) $(OBJECTS)
+# 	$(CC) $(OBJECTS) -o $(TARGET) $(LIBRARIES) $(LDFLAGS)
+
+
+
 # Build executable
 $(TARGET): $(SPV_HEADERS) $(OBJECTS)
 	$(CC) $(OBJECTS) -o $(TARGET) $(LIBRARIES) $(LDFLAGS)
+
 
 # Object files
 %.o: %.c
