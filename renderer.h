@@ -6,6 +6,7 @@
 #include <cglm/cglm.h>
 
 #define MAX_VERTICES 65536
+#define MAX_TEXTURES 256  // Maximum number of textures we can handle
 
 typedef struct {
     vec3 pos;
@@ -13,27 +14,44 @@ typedef struct {
     vec3 normal;
 } Vertex;
 
-
 typedef struct {
     vec2 pos;
     Color color;
     vec2 texCoord;
+    uint32_t textureIndex;  // Which texture to use
 } Vertex2D;
 
-void renderer2D_init(VulkanContext* context);
+void renderer2D_init();
 void renderer2D_clear(void);
-void renderer2D_quad(vec2 position, vec2 size, Color color);
-void renderer2D_upload(VulkanContext* context);
-/* void renderer2D_draw(VkCommandBuffer cmd, VulkanContext *context); */
+void quad2D(vec2 position, vec2 size, Color color);
+void renderer2D_upload();
 void renderer2D_draw(VkCommandBuffer cmd);
 
+typedef struct {
+    VkImage image;
+    VkDeviceMemory memory;
+    VkImageView view;
+    VkSampler sampler;
+    VkDescriptorSet descriptorSet;  // Each texture has its own descriptor set
+    uint32_t width, height;
+    bool loaded;
+} Texture2D;
 
+// Texture management
+bool load_texture(VulkanContext* context, const char* filename, Texture2D* texture);
+void destroy_texture(VulkanContext* context, Texture2D* texture);
+void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint);
 
+// Texture pool management
+void texture_pool_init(VulkanContext* context);
+void texture_pool_cleanup(VulkanContext* context);
+int32_t texture_pool_add(VulkanContext* context, const char* filename);
+Texture2D* texture_pool_get(int32_t index);
 
 typedef struct {
     mat4 model;
     int ambientOcclusionEnabled;
-    int padding[3]; // Explicit padding for 16-byte alignment
+    int padding[3];
 } PushConstants;
 
 extern PushConstants pushConstants;
@@ -57,9 +75,7 @@ void renderer_init(
     VkCommandPool commandPool,
     VkQueue graphicsQueue
 );
-
 void renderer_shutdown(void);
-
 void renderer_upload(void);
 void renderer_draw(VkCommandBuffer cmd);
 void renderer_clear(void);
@@ -76,10 +92,8 @@ void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color);
 void mesh(VkCommandBuffer cmd, Mesh* mesh);
 void mesh_destroy(VkDevice device, Mesh* mesh);
 
-
 void meshes_init(Meshes* meshes);
 void meshes_add(Meshes* meshes, Mesh mesh);
 void meshes_remove(Meshes* meshes, size_t index);
 void meshes_destroy(VkDevice device, Meshes* meshes);
 void meshes_draw(VkCommandBuffer cmd, Meshes* meshes);
-

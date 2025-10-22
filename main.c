@@ -12,6 +12,7 @@
 #include "vert.vert.spv.h"
 #include "2D.vert.spv.h"
 #include "2D.frag.spv.h"
+#include "texture.frag.spv.h"
 
 
 #include <cglm/cglm.h>
@@ -61,9 +62,54 @@ typedef struct {
 
 Block blocks[WORLD_WIDTH][WORLD_HEIGHT][WORLD_DEPTH];
 
+/* Texture2D texture; */
+/* Texture2D texture2; */
+
+
 typedef struct {
     mat4 vp;
 } UniformBufferObject;
+
+void create2DDescriptorSetLayout(VulkanContext* context) {
+    VkDescriptorSetLayoutBinding samplerLayoutBinding = {
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .pImmutableSamplers = NULL
+    };
+    
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &samplerLayoutBinding
+    };
+    
+    if (vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout2D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create 2D descriptor set layout\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+
+void create2DDescriptorPool(VulkanContext* context) {
+    VkDescriptorPoolSize poolSize = {
+        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = MAX_TEXTURES  // Allow for maximum textures
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .poolSizeCount = 1,
+        .pPoolSizes = &poolSize,
+        .maxSets = MAX_TEXTURES  // Allow for maximum sets
+    };
+
+    if (vkCreateDescriptorPool(context->device, &poolInfo, NULL, &context->descriptorPool2D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create 2D descriptor pool\n");
+        exit(EXIT_FAILURE);
+    }
+}
 
 void createDescriptorSet(VulkanContext* context) {
     VkDescriptorSetAllocateInfo allocInfo = {
@@ -421,6 +467,194 @@ void createRenderPass(VulkanContext* context) {
 }
 
 
+void createTextured2DGraphicsPipeline(VulkanContext* context) {
+    // Load shaders from header files
+    VkShaderModule vertShaderModule2D;
+    VkShaderModule fragShaderModuleTextured;
+    
+    // Create vertex shader module (same as regular 2D)
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(__2D_vert_spv),
+            .pCode = (const uint32_t*)__2D_vert_spv
+        };
+
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create 2D vertex shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Create fragment shader module for textured rendering
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(texture_frag_spv),
+            .pCode = (const uint32_t*)texture_frag_spv
+        };
+
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create textured fragment shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vertShaderModule2D,
+        .pName = "main"
+    };
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfoTextured = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragShaderModuleTextured,
+        .pName = "main"
+    };
+
+    VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {vertShaderStageInfo2D, fragShaderStageInfoTextured};
+
+    // 2D vertex input (same as regular 2D)
+    VkVertexInputBindingDescription bindingDescription2D = {
+        .binding = 0,
+        .stride = sizeof(Vertex2D),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+
+    VkVertexInputAttributeDescription attributeDescriptions2D[3] = {
+        {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, pos)},
+        {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex2D, color)},
+        {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, texCoord)}
+    };
+    
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription2D,
+        .vertexAttributeDescriptionCount = 3,
+        .pVertexAttributeDescriptions = attributeDescriptions2D
+    };
+    
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
+    
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)context->swapChainExtent.width,
+        .height = (float)context->swapChainExtent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f
+    };
+    
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = context->swapChainExtent
+    };
+    
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor
+    };
+    
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .lineWidth = 1.0f,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE
+    };
+    
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = VK_FALSE,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+    };
+    
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+    
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment
+    };
+    
+    VkPipelineDepthStencilStateCreateInfo depthStencil2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+    
+    VkPushConstantRange pushConstantRange2D = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(mat4)
+    };
+
+    // Pipeline layout for textured 2D - uses descriptor sets for textures
+    VkPipelineLayoutCreateInfo pipelineLayoutInfoTextured2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &context->descriptorSetLayout2D,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange2D,
+    };
+    
+    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfoTextured2D, NULL, &context->pipelineLayoutTextured2D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create textured 2D pipeline layout\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    VkGraphicsPipelineCreateInfo pipelineInfoTextured2D = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = shaderStagesTextured,
+        .pVertexInputState = &vertexInputInfo2D,
+        .pInputAssemblyState = &inputAssembly2D,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pColorBlendState = &colorBlending,
+        .layout = context->pipelineLayoutTextured2D,
+        .renderPass = context->renderPass,
+        .subpass = 0,
+        .basePipelineHandle = VK_NULL_HANDLE,
+        .pDepthStencilState = &depthStencil2D,
+    };
+    
+    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoTextured2D, NULL, &context->graphicsPipelineTextured2D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create textured 2D graphics pipeline\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    vkDestroyShaderModule(context->device, fragShaderModuleTextured, NULL);
+    vkDestroyShaderModule(context->device, vertShaderModule2D, NULL);
+}
+
 void create2DGraphicsPipeline(VulkanContext* context) {
     // Load 2D shaders from header files
     VkShaderModule vertShaderModule2D;
@@ -574,10 +808,10 @@ void create2DGraphicsPipeline(VulkanContext* context) {
         .offset = 0,
         .size = sizeof(mat4) // 64 bytes - just the projection matrix
     };
-    
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 0, // No descriptor sets for 2D
+        .setLayoutCount = 0,  // NO descriptor sets for colored pipeline!
         .pSetLayouts = NULL,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstantRange2D,
@@ -1103,10 +1337,19 @@ void drawFrame(VulkanContext* context) {
 }
 
 void cleanup(VulkanContext* context) {
-    vkDeviceWaitIdle(context->device); // Wait for all operations to complete
+    vkDeviceWaitIdle(context->device);
     
     renderer_shutdown();
     meshes_destroy(context->device, &scene.meshes);
+    
+    // Texture pool is now cleaned up before this function is called
+    // (in main before cleanup() is called)
+    
+    // Clean up 2D descriptor resources
+    if (context->descriptorSetLayout2D) 
+        vkDestroyDescriptorSetLayout(context->device, context->descriptorSetLayout2D, NULL);
+    if (context->descriptorPool2D) 
+        vkDestroyDescriptorPool(context->device, context->descriptorPool2D, NULL);
     
     // SYNC OBJECTS
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -1144,13 +1387,19 @@ void cleanup(VulkanContext* context) {
     if (context->graphicsPipeline) vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
     if (context->pipelineLayout) vkDestroyPipelineLayout(context->device, context->pipelineLayout, NULL);
     
-    // 2D GRAPHICS PIPELINE - ADD THIS SECTION
+    // 2D GRAPHICS PIPELINE
     if (context->graphicsPipeline2D) vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
     if (context->pipelineLayout2D) vkDestroyPipelineLayout(context->device, context->pipelineLayout2D, NULL);
     
-    // 2D VERTEX BUFFER - ADD THIS SECTION
+    // 2D VERTEX BUFFER
     if (context->vertexBuffer2D) vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
     if (context->vertexBufferMemory2D) vkFreeMemory(context->device, context->vertexBufferMemory2D, NULL);
+    
+    // TEXTURE GRAPHICS PIPELINE
+    if (context->graphicsPipelineTextured2D) 
+        vkDestroyPipeline(context->device, context->graphicsPipelineTextured2D, NULL);
+    if (context->pipelineLayoutTextured2D) 
+        vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured2D, NULL);
     
     if (context->renderPass) vkDestroyRenderPass(context->device, context->renderPass, NULL);
     
@@ -1158,7 +1407,6 @@ void cleanup(VulkanContext* context) {
     if (context->depthImageView) vkDestroyImageView(context->device, context->depthImageView, NULL);
     if (context->depthImage) vkDestroyImage(context->device, context->depthImage, NULL);
     if (context->depthImageMemory) vkFreeMemory(context->device, context->depthImageMemory, NULL);
-    
     
     // UNIFORM BUFFER & DESCRIPTORS
     if (uniformBuffer) vkDestroyBuffer(context->device, uniformBuffer, NULL);
@@ -1217,7 +1465,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         ambientOcclusionEnabled = !ambientOcclusionEnabled;
         printf("Ambient Occlusion: %s\n", ambientOcclusionEnabled ? "ENABLED" : "DISABLED");
     }
-
+    
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         cam->active = !cam->active;
         
@@ -1523,6 +1771,8 @@ void screenshot(
 }
 
 
+
+
 int main() {
     context.currentFrame = 0;
     
@@ -1536,10 +1786,10 @@ int main() {
     vec3 camera_pos = {0.0f, 2.0f, 0.0f}; // 2 blocks up
     vec3 camera_target = {0.0f, 2.0f, 0.0f}; // looking at world center, player-eye level
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
-
+    
     camera.active = true;
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);    
-
+    
     
     glfwSetWindowUserPointer(context.window, &camera);
     glfwSetCursorPosCallback(context.window, mouse_callback);
@@ -1565,10 +1815,14 @@ int main() {
     createDescriptorSetLayout(&context);
     
     createGraphicsPipeline(&context);
-
+    
+    
+    create2DDescriptorSetLayout(&context);
+    create2DDescriptorPool(&context);
     create2DGraphicsPipeline(&context);
-    renderer2D_init(&context);
-
+    createTextured2DGraphicsPipeline(&context);
+    renderer2D_init();
+    
     createDescriptorPool(&context);
     createDescriptorSet(&context);
     
@@ -1582,11 +1836,11 @@ int main() {
                   context.commandPool,
                   context.graphicsQueue
                   );
-
+    
     createCommandBuffers(&context);
     createSyncObjects(&context);
     
-
+    
     srand((unsigned int)time(0)); // call this once at startup
     
     for (int x = 0; x < WORLD_WIDTH;  ++x)
@@ -1620,6 +1874,19 @@ int main() {
     /* Mesh teapot = */ load_obj("./assets/teapot.obj", red);
     /* Mesh cow = */ load_obj("./assets/cow.obj", blue);
     
+    Mesh first = scene.meshes.items[0];
+  
+
+    texture_pool_init(&context);
+
+    // Load textures and get their indices
+    int32_t tex1 = texture_pool_add(&context, "./assets/textures/puta.jpg");
+    int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Green/texture_01.png");
+    
+    // Get texture pointers
+    Texture2D* texture1 = texture_pool_get(tex1);
+    Texture2D* texture2 = texture_pool_get(tex2);
+    
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
         delta_time = current_frame - last_frame;
@@ -1635,10 +1902,10 @@ int main() {
         vkMapMemory(context.device, uniformBufferMemory, 0, sizeof(ubo), 0, &data);
         memcpy(data, &ubo, sizeof(ubo));
         vkUnmapMemory(context.device, uniformBufferMemory);
-
+        
         renderer_clear();
         renderer2D_clear();        
-         
+        
         vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left
         vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right
         vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right
@@ -1666,14 +1933,32 @@ int main() {
         
         glm_mat4_identity(scene.meshes.items[1].model);
         glm_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f});
+        
+        quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);  // bottom left
+        quad2D((vec2){70, 10}, (vec2){50, 50}, WHITE); // bottom right
+        quad2D((vec2){10, 70}, (vec2){50, 50}, RED);   // top left
+        quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN); // top right
+        
+        /* texture2D((vec2){100, 100}, (vec2){200, 200}, &texture, WHITE); */
+        /* texture2D((vec2){300, 300}, (vec2){600, 600}, &texture2, WHITE); */
 
-        renderer2D_quad((vec2){10, 10}, (vec2){50, 50}, BLUE);  // bottom left
-        renderer2D_quad((vec2){70, 10}, (vec2){50, 50}, WHITE); // bottom right
-        renderer2D_quad((vec2){10, 70}, (vec2){50, 50}, RED);   // top left
-        renderer2D_quad((vec2){70, 70}, (vec2){50, 50}, GREEN); // top right
-
+        if (texture1) {
+            texture2D((vec2){100, 100}, (vec2){200, 200}, texture1, WHITE);
+            texture2D((vec2){500, 100}, (vec2){150, 150}, texture1, WHITE);
+        }
+        
+        if (texture2) {
+            texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE);
+        }
+        
+        
+        
+        
+        
+        
+        
         renderer_upload();
-        renderer2D_upload(&context);
+        renderer2D_upload();
         
         // --- Draw frame (split into acquire, record, present) ---
         uint32_t frameIndex = context.currentFrame;
@@ -1743,6 +2028,8 @@ int main() {
     }
     
     vkDeviceWaitIdle(context.device);
+
+    texture_pool_cleanup(&context);
     cleanup(&context);
     
     return EXIT_SUCCESS;
