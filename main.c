@@ -10,6 +10,9 @@
 
 #include "frag.frag.spv.h"
 #include "vert.vert.spv.h"
+#include "2D.vert.spv.h"
+#include "2D.frag.spv.h"
+
 
 #include <cglm/cglm.h>
 #include "camera.h"
@@ -61,11 +64,6 @@ Block blocks[WORLD_WIDTH][WORLD_HEIGHT][WORLD_DEPTH];
 typedef struct {
     mat4 vp;
 } UniformBufferObject;
-
-/* typedef struct { */
-/*     mat4 model; */
-/*     int ambientOcclusionEnabled; */
-/* } PushConstants; */
 
 void createDescriptorSet(VulkanContext* context) {
     VkDescriptorSetAllocateInfo allocInfo = {
@@ -422,6 +420,202 @@ void createRenderPass(VulkanContext* context) {
     }
 }
 
+
+void create2DGraphicsPipeline(VulkanContext* context) {
+    // Load 2D shaders from header files
+    VkShaderModule vertShaderModule2D;
+    VkShaderModule fragShaderModule2D;
+    
+    // Create vertex shader module from header
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(__2D_vert_spv),
+            .pCode = (const uint32_t*)__2D_vert_spv
+        };
+
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create 2D vertex shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Create fragment shader module from header  
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(__2D_frag_spv),
+            .pCode = (const uint32_t*)__2D_frag_spv
+        };
+
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule2D) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create 2D fragment shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vertShaderModule2D,
+        .pName = "main"
+    };
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragShaderModule2D,
+        .pName = "main"
+    };
+
+    VkPipelineShaderStageCreateInfo shaderStages2D[] = {vertShaderStageInfo2D, fragShaderStageInfo2D};
+
+    // 2D vertex input
+    VkVertexInputBindingDescription bindingDescription2D = {
+        .binding = 0,
+        .stride = sizeof(Vertex2D),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+
+    VkVertexInputAttributeDescription attributeDescriptions2D[3] = {
+        {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, pos)},
+        {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex2D, color)},
+        {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, texCoord)}
+    };
+    
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription2D,
+        .vertexAttributeDescriptionCount = 3,
+        .pVertexAttributeDescriptions = attributeDescriptions2D
+    };
+    
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
+    
+    // Viewport and scissor
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)context->swapChainExtent.width,
+        .height = (float)context->swapChainExtent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f
+    };
+    
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = context->swapChainExtent
+    };
+    
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor
+    };
+    
+    // Rasterizer
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .lineWidth = 1.0f,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE
+    };
+    
+    // Multisampling
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = VK_FALSE,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+    };
+    
+    // Color blending
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+    
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment
+    };
+    
+    // Disable depth testing for 2D
+    VkPipelineDepthStencilStateCreateInfo depthStencil2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+    
+    // 2D push constants - ONLY projection matrix (64 bytes)
+    VkPushConstantRange pushConstantRange2D = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(mat4) // 64 bytes - just the projection matrix
+    };
+    
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 0, // No descriptor sets for 2D
+        .pSetLayouts = NULL,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange2D,
+    };
+    
+    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo2D, NULL, &context->pipelineLayout2D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create 2D pipeline layout\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    VkGraphicsPipelineCreateInfo pipelineInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = shaderStages2D,
+        .pVertexInputState = &vertexInputInfo2D,
+        .pInputAssemblyState = &inputAssembly2D,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pColorBlendState = &colorBlending,
+        .layout = context->pipelineLayout2D,
+        .renderPass = context->renderPass,
+        .subpass = 0,
+        .basePipelineHandle = VK_NULL_HANDLE,
+        .pDepthStencilState = &depthStencil2D,
+    };
+    
+    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfo2D, NULL, &context->graphicsPipeline2D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create 2D graphics pipeline\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    vkDestroyShaderModule(context->device, fragShaderModule2D, NULL);
+    vkDestroyShaderModule(context->device, vertShaderModule2D, NULL);
+}
+
+
+
 void createGraphicsPipeline(VulkanContext* context) {
     // Vertex shader
     VkShaderModule vertShaderModule;
@@ -431,13 +625,13 @@ void createGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(vert_vert_spv),
             .pCode = (const uint32_t*)vert_vert_spv
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create vertex shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     // Fragment shader
     VkShaderModule fragShaderModule;
     {
@@ -446,13 +640,13 @@ void createGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(frag_frag_spv),
             .pCode = (const uint32_t*)frag_frag_spv
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create fragment shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     // Pipeline stages
     VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -460,22 +654,22 @@ void createGraphicsPipeline(VulkanContext* context) {
         .module = vertShaderModule,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
         .module = fragShaderModule,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
-
+    
     VkVertexInputBindingDescription bindingDescription = {
         .binding = 0,
         .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-
+    
     // ATTRIBUTE DESCRIPTOR
     VkVertexInputAttributeDescription attributeDescriptions[3] = {
         {
@@ -578,14 +772,7 @@ void createGraphicsPipeline(VulkanContext* context) {
     };
     
     
-    
     // Pipeline layout
-    /* VkPipelineLayoutCreateInfo pipelineLayoutInfo = { */
-    /*     .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, */
-    /*     .setLayoutCount = 1, */
-    /*     .pSetLayouts = &context->descriptorSetLayout */
-    /* }; */
-
     VkPushConstantRange pushConstantRange = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
@@ -956,6 +1143,15 @@ void cleanup(VulkanContext* context) {
     // GRAPHICS PIPELINE
     if (context->graphicsPipeline) vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
     if (context->pipelineLayout) vkDestroyPipelineLayout(context->device, context->pipelineLayout, NULL);
+    
+    // 2D GRAPHICS PIPELINE - ADD THIS SECTION
+    if (context->graphicsPipeline2D) vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
+    if (context->pipelineLayout2D) vkDestroyPipelineLayout(context->device, context->pipelineLayout2D, NULL);
+    
+    // 2D VERTEX BUFFER - ADD THIS SECTION
+    if (context->vertexBuffer2D) vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
+    if (context->vertexBufferMemory2D) vkFreeMemory(context->device, context->vertexBufferMemory2D, NULL);
+    
     if (context->renderPass) vkDestroyRenderPass(context->device, context->renderPass, NULL);
     
     // DEPTH
@@ -983,14 +1179,10 @@ void cleanup(VulkanContext* context) {
     glfwTerminate();
 }
 
-
-
-
 double lastX = WIDTH / 2.0f, lastY = HEIGHT / 2.0f;
 bool firstMouse = true;
 float delta_time;
 float last_frame = 0.0f;
-
 
 
 bool shiftPressed;
@@ -1013,8 +1205,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                    context.physicalDevice,
                    context.commandPool,
                    context.graphicsQueue,
-                   context.swapChainImages[0], // or whichever image you want
-                   VK_FORMAT_B8G8R8A8_SRGB,    // or your swapchain format
+                   context.swapChainImages[0], // or whichever image
+                   VK_FORMAT_B8G8R8A8_SRGB,    // or another swapchain format
                    context.swapChainExtent.width,
                    context.swapChainExtent.height,
                    "screenshot.png"
@@ -1039,8 +1231,6 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
             printf("Camera control DISABLED - Editor mode\n");
         }
     }
-    
-    
 }
 
 
@@ -1051,15 +1241,13 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
         firstMouse = false;
     }
     double xoffset = xpos - lastX;
-    double yoffset = lastY - ypos; // reversed for natural feel
+    double yoffset = lastY - ypos; // reversed
     lastX = xpos;
     lastY = ypos;
     
     Camera* cam = glfwGetWindowUserPointer(window);
     camera_process_mouse(cam, xoffset, yoffset);
 }
-
-
 
 
 
@@ -1081,10 +1269,9 @@ void createUniformBuffer(VulkanContext* context) {
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
-        .memoryTypeIndex = 0 // you'll need a function to find this
+        .memoryTypeIndex = 0
     };
     
-    // Find suitable memory type (implement your own findMemoryType)
     allocInfo.memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     
@@ -1139,6 +1326,7 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     
+    // RENDER 3D Content First
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
     
@@ -1148,11 +1336,15 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     // Draw scene meshes
     for (size_t i = 0; i < scene.meshes.count; i++) {
         Mesh* mesh_ptr = &scene.meshes.items[i];
-        mesh(cmd, mesh_ptr); // mesh() will use the global pushConstants
+        mesh(cmd, mesh_ptr);
     }
     
     // Draw renderer content
-    renderer_draw(cmd); // renderer_draw() will use the global pushConstants
+    renderer_draw(cmd);
+    
+    // RENDER 2D Content On Top
+    // NO descriptor sets bound for 2D pipeline!
+    renderer2D_draw(cmd);
     
     vkCmdEndRenderPass(cmd);
     
@@ -1373,6 +1565,10 @@ int main() {
     createDescriptorSetLayout(&context);
     
     createGraphicsPipeline(&context);
+
+    create2DGraphicsPipeline(&context);
+    renderer2D_init(&context);
+
     createDescriptorPool(&context);
     createDescriptorSet(&context);
     
@@ -1439,8 +1635,9 @@ int main() {
         vkMapMemory(context.device, uniformBufferMemory, 0, sizeof(ubo), 0, &data);
         memcpy(data, &ubo, sizeof(ubo));
         vkUnmapMemory(context.device, uniformBufferMemory);
-        
+
         renderer_clear();
+        renderer2D_clear();        
          
         vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left
         vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right
@@ -1469,10 +1666,14 @@ int main() {
         
         glm_mat4_identity(scene.meshes.items[1].model);
         glm_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f});
-        
-        
-        
+
+        renderer2D_quad((vec2){10, 10}, (vec2){50, 50}, BLUE);  // bottom left
+        renderer2D_quad((vec2){70, 10}, (vec2){50, 50}, WHITE); // bottom right
+        renderer2D_quad((vec2){10, 70}, (vec2){50, 50}, RED);   // top left
+        renderer2D_quad((vec2){70, 70}, (vec2){50, 50}, GREEN); // top right
+
         renderer_upload();
+        renderer2D_upload(&context);
         
         // --- Draw frame (split into acquire, record, present) ---
         uint32_t frameIndex = context.currentFrame;

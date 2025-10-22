@@ -1,8 +1,8 @@
-#include "renderer.h"
-#include "context.h"
-
 #include <stdlib.h>
 #include <string.h>
+#include "renderer.h"
+#include "context.h"
+#include "common.h"
 
 static Vertex vertices[MAX_VERTICES];
 static uint32_t vertex_count = 0;
@@ -327,4 +327,96 @@ void meshes_destroy(VkDevice device, Meshes* meshes) {
     meshes->items = NULL;
     meshes->count = 0;
     meshes->capacity = 0;
+}
+
+
+/// 2D
+
+static Vertex2D vertices2D[MAX_VERTICES];
+static uint32_t vertexCount2D = 0;
+
+void renderer2D_init(VulkanContext* context) {
+    // Create 2D vertex buffer
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = sizeof(vertices2D),
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    vkCreateBuffer(context->device, &bufferInfo, NULL, &context->vertexBuffer2D);
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(context->device, context->vertexBuffer2D, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
+                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+
+    vkAllocateMemory(context->device, &allocInfo, NULL, &context->vertexBufferMemory2D);
+    vkBindBufferMemory(context->device, context->vertexBuffer2D, context->vertexBufferMemory2D, 0);
+}
+
+void renderer2D_quad(vec2 position, vec2 size, Color color) {
+    if (vertexCount2D + 6 > MAX_VERTICES) return;
+
+    float x = position[0], y = position[1];
+    float w = size[0], h = size[1];
+
+    // Two triangles to form a quad
+    Vertex2D quad[6] = {
+        {{x, y}, color, {0.0f, 0.0f}},
+        {{x + w, y}, color, {1.0f, 0.0f}},
+        {{x + w, y + h}, color, {1.0f, 1.0f}},
+        
+        {{x, y}, color, {0.0f, 0.0f}},
+        {{x + w, y + h}, color, {1.0f, 1.0f}},
+        {{x, y + h}, color, {0.0f, 1.0f}}
+    };
+
+    memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+    vertexCount2D += 6;
+}
+
+void renderer2D_upload(VulkanContext* context) {
+    if (vertexCount2D == 0) return;
+    
+    void* data;
+    vkMapMemory(context->device, context->vertexBufferMemory2D, 0, sizeof(vertices2D), 0, &data);
+    memcpy(data, vertices2D, vertexCount2D * sizeof(Vertex2D));
+    vkUnmapMemory(context->device, context->vertexBufferMemory2D);
+}
+
+void renderer2D_draw(VkCommandBuffer cmd) {
+    if (vertexCount2D == 0) return;
+
+    // Create orthographic projection for 2D
+    mat4 projection;
+    glm_ortho(0.0f, (float)context.swapChainExtent.width, 
+              (float)context.swapChainExtent.height, 0.0f, 
+              -1.0f, 1.0f, projection);
+    
+    // Push constants for 2D pipeline
+    vkCmdPushConstants(
+        cmd,
+        context.pipelineLayout2D,  // Use 2D pipeline layout!
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(mat4),
+        &projection
+    );
+    
+    // Bind 2D pipeline
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline2D);
+    
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D, offsets);
+    vkCmdDraw(cmd, vertexCount2D, 1, 0, 0);
+}
+
+void renderer2D_clear(void) {
+    vertexCount2D = 0;
 }

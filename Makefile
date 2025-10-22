@@ -44,12 +44,6 @@ all: $(TARGET)
 %.spv.h: %.spv
 	$(XXD) -i $< > $@
 
-# # Build executable
-# $(TARGET): $(SPV_HEADERS) $(OBJECTS)
-# 	$(CC) $(OBJECTS) -o $(TARGET) $(LIBRARIES) $(LDFLAGS)
-
-
-
 # Build executable
 $(TARGET): $(SPV_HEADERS) $(OBJECTS)
 	$(CC) $(OBJECTS) -o $(TARGET) $(LIBRARIES) $(LDFLAGS)

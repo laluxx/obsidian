@@ -1,5 +1,7 @@
 #pragma once
 
+#include "context.h"
+#include "common.h"
 #include <vulkan/vulkan.h>
 #include <cglm/cglm.h>
 
@@ -10,6 +12,23 @@ typedef struct {
     vec4 color;
     vec3 normal;
 } Vertex;
+
+
+typedef struct {
+    vec2 pos;
+    Color color;
+    vec2 texCoord;
+} Vertex2D;
+
+void renderer2D_init(VulkanContext* context);
+void renderer2D_clear(void);
+void renderer2D_quad(vec2 position, vec2 size, Color color);
+void renderer2D_upload(VulkanContext* context);
+/* void renderer2D_draw(VkCommandBuffer cmd, VulkanContext *context); */
+void renderer2D_draw(VkCommandBuffer cmd);
+
+
+
 
 typedef struct {
     mat4 model;
