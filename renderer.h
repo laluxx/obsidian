@@ -8,10 +8,14 @@
 #define MAX_VERTICES 65536
 #define MAX_TEXTURES 256  // Maximum number of textures we can handle
 
+extern VkDescriptorSet descriptorSet;
+
 typedef struct {
     vec3 pos;
     vec4 color;
     vec3 normal;
+    vec2 texCoord;           // NEW: Texture coordinates for 3D    
+    uint32_t textureIndex;  // 0 = no texture, >0 = texture index
 } Vertex;
 
 typedef struct {
@@ -37,10 +41,33 @@ typedef struct {
     bool loaded;
 } Texture2D;
 
+
+typedef struct {
+    Texture2D* texture;
+    uint32_t startVertex;
+    uint32_t vertexCount;
+} Texture3DBatch;
+
+static Vertex vertices3D_textured[MAX_VERTICES];
+static uint32_t vertex_count_3D_textured = 0;
+
+static Texture3DBatch texture3DBatches[MAX_TEXTURES];
+static uint32_t texture3DBatchCount = 0;
+
+static VkBuffer vertexBuffer3D_textured;
+static VkDeviceMemory vertexBufferMemory3D_textured;
+
+
+void renderer_init_textured3D();
+void renderer_upload_textured3D();
+void renderer_draw_textured3D(VkCommandBuffer cmd);
+void renderer_clear_textured3D();
+
 // Texture management
 bool load_texture(VulkanContext* context, const char* filename, Texture2D* texture);
 void destroy_texture(VulkanContext* context, Texture2D* texture);
 void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint);
+void texture3D(vec3 position, vec2 size, Texture2D* texture, Color tint);
 
 // Texture pool management
 void texture_pool_init(VulkanContext* context);
@@ -87,6 +114,7 @@ void line(vec3 a, vec3 b, vec4 color);
 void triangle(vec3 a, vec3 b, vec3 c, vec4 color);
 void plane(vec3 origin, vec2 size, vec4 color);
 void cube(vec3 origin, float size, vec4 color);
+void texturedCube(vec3 position, float size, Texture2D* texture, Color tint);
 void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color);
 
 void mesh(VkCommandBuffer cmd, Mesh* mesh);

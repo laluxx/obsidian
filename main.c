@@ -13,6 +13,7 @@
 #include "2D.vert.spv.h"
 #include "2D.frag.spv.h"
 #include "texture.frag.spv.h"
+#include "texture3D.frag.spv.h"
 
 
 #include <cglm/cglm.h>
@@ -25,6 +26,7 @@
 
 #include <time.h>  
 
+// TODO textured cubes and texture3D don’t seem to be effected by ambientOcclusion
 
 #define WIDTH 800
 #define HEIGHT 600
@@ -62,10 +64,6 @@ typedef struct {
 
 Block blocks[WORLD_WIDTH][WORLD_HEIGHT][WORLD_DEPTH];
 
-/* Texture2D texture; */
-/* Texture2D texture2; */
-
-
 typedef struct {
     mat4 vp;
 } UniformBufferObject;
@@ -90,7 +88,6 @@ void create2DDescriptorSetLayout(VulkanContext* context) {
         exit(EXIT_FAILURE);
     }
 }
-
 
 void create2DDescriptorPool(VulkanContext* context) {
     VkDescriptorPoolSize poolSize = {
@@ -848,7 +845,197 @@ void create2DGraphicsPipeline(VulkanContext* context) {
     vkDestroyShaderModule(context->device, vertShaderModule2D, NULL);
 }
 
+void create3DTexturedGraphicsPipeline(VulkanContext* context) {
+    VkShaderModule vertShaderModule;
+    VkShaderModule fragShaderModuleTextured;
+    
+    // Create vertex shader module
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(vert_vert_spv),
+            .pCode = (const uint32_t*)vert_vert_spv
+        };
 
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create 3D textured vertex shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Create fragment shader module - USE THE NEW TEXTURE3D SHADER!
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(texture3D_frag_spv),  // CHANGED!
+            .pCode = (const uint32_t*)texture3D_frag_spv  // CHANGED!
+        };
+
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create 3D textured fragment shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vertShaderModule,
+        .pName = "main"
+    };
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfoTextured = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragShaderModuleTextured,
+        .pName = "main"
+    };
+
+    VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {vertShaderStageInfo, fragShaderStageInfoTextured};
+
+    VkVertexInputBindingDescription bindingDescription = {
+        .binding = 0,
+        .stride = sizeof(Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+
+    VkVertexInputAttributeDescription attributeDescriptions[4] = {
+        {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
+        {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color)},
+        {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
+        {.binding = 0, .location = 3, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texCoord)}
+    };
+    
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription,
+        .vertexAttributeDescriptionCount = 4,
+        .pVertexAttributeDescriptions = attributeDescriptions
+    };
+    
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
+    
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)context->swapChainExtent.width,
+        .height = (float)context->swapChainExtent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f
+    };
+    
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = context->swapChainExtent
+    };
+    
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor
+    };
+    
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .lineWidth = 1.0f,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE
+    };
+    
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = VK_FALSE,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+    };
+    
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+    
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment
+    };
+    
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+    
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(PushConstants)
+    };
+
+    // Pipeline layout uses both descriptor sets
+    VkDescriptorSetLayout layouts[2] = {
+        context->descriptorSetLayout,    // Set 0: UBO for camera
+        context->descriptorSetLayout2D   // Set 1: Texture sampler (now with FRAGMENT_BIT!)
+    };
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfoTextured3D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 2,
+        .pSetLayouts = layouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange,
+    };
+    
+    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfoTextured3D, NULL, &context->pipelineLayoutTextured3D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create 3D textured pipeline layout\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    VkGraphicsPipelineCreateInfo pipelineInfoTextured3D = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = shaderStagesTextured,
+        .pVertexInputState = &vertexInputInfo,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pColorBlendState = &colorBlending,
+        .layout = context->pipelineLayoutTextured3D,
+        .renderPass = context->renderPass,
+        .subpass = 0,
+        .basePipelineHandle = VK_NULL_HANDLE,
+        .pDepthStencilState = &depthStencil,
+    };
+    
+    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoTextured3D, NULL, &context->graphicsPipelineTextured3D) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create 3D textured graphics pipeline\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    vkDestroyShaderModule(context->device, fragShaderModuleTextured, NULL);
+    vkDestroyShaderModule(context->device, vertShaderModule, NULL);
+}
 
 void createGraphicsPipeline(VulkanContext* context) {
     // Vertex shader
@@ -905,35 +1092,34 @@ void createGraphicsPipeline(VulkanContext* context) {
     };
     
     // ATTRIBUTE DESCRIPTOR
-    VkVertexInputAttributeDescription attributeDescriptions[3] = {
-        {
-            .binding = 0,
-            .location = 0,
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = offsetof(Vertex, pos)
-        },
-        {
-            .binding = 0,
-            .location = 1,
-            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
-            .offset = offsetof(Vertex, color)
-        },
-        {
-            .binding = 0,
-            .location = 2,  // NEW: Normal attribute
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = offsetof(Vertex, normal)
-        }
+
+    VkVertexInputAttributeDescription attributeDescriptions[4] = {
+        {.binding = 0,
+         .location = 0,
+         .format = VK_FORMAT_R32G32B32_SFLOAT,
+         .offset = offsetof(Vertex, pos)},
+        {.binding = 0,
+         .location = 1,
+         .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+         .offset = offsetof(Vertex, color)},
+        {.binding = 0,
+         .location = 2,
+         .format = VK_FORMAT_R32G32B32_SFLOAT,
+         .offset = offsetof(Vertex, normal)},
+        {.binding = 0,
+         .location = 3,
+         .format = VK_FORMAT_R32G32_SFLOAT,
+         .offset = offsetof(Vertex, texCoord)} // Texture coordinates
     };
-    
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &bindingDescription,
-        .vertexAttributeDescriptionCount = 3,  // Changed from 2 to 3
+        .vertexAttributeDescriptionCount = 4, // Must be 4 now
         .pVertexAttributeDescriptions = attributeDescriptions
     };
-    
+
     // Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1391,6 +1577,13 @@ void cleanup(VulkanContext* context) {
     if (context->graphicsPipeline2D) vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
     if (context->pipelineLayout2D) vkDestroyPipelineLayout(context->device, context->pipelineLayout2D, NULL);
     
+    // 3D TEXTURED PIPELINE:
+    if (context->graphicsPipelineTextured3D) 
+        vkDestroyPipeline(context->device, context->graphicsPipelineTextured3D, NULL);
+    if (context->pipelineLayoutTextured3D) 
+        vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured3D, NULL);
+    
+
     // 2D VERTEX BUFFER
     if (context->vertexBuffer2D) vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
     if (context->vertexBufferMemory2D) vkFreeMemory(context->device, context->vertexBufferMemory2D, NULL);
@@ -1481,7 +1674,6 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
 }
 
-
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     if (firstMouse) {
         lastX = xpos;
@@ -1496,8 +1688,6 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     Camera* cam = glfwGetWindowUserPointer(window);
     camera_process_mouse(cam, xoffset, yoffset);
 }
-
-
 
 void createUniformBuffer(VulkanContext* context) {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
@@ -1574,28 +1764,30 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     
-    // RENDER 3D Content First
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
-    
-    // Set AO state once globally
+    // Set AO state once globally for all 3D rendering
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
     
-    // Draw scene meshes
+    // RENDER 3D COLORED CONTENT
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 
+                           0, 1, &descriptorSet, 0, NULL);
+    
+    // Draw scene meshes (OBJ models)
     for (size_t i = 0; i < scene.meshes.count; i++) {
         Mesh* mesh_ptr = &scene.meshes.items[i];
         mesh(cmd, mesh_ptr);
     }
     
-    // Draw renderer content
+    // Draw immediate mode 3D content (cubes, spheres, lines, etc.)
     renderer_draw(cmd);
     
-    // RENDER 2D Content On Top
-    // NO descriptor sets bound for 2D pipeline!
+    // RENDER 3D TEXTURED CONTENT
+    renderer_draw_textured3D(cmd);
+    
+    // RENDER 2D CONTENT ON TOP
     renderer2D_draw(cmd);
     
     vkCmdEndRenderPass(cmd);
-    
     vkEndCommandBuffer(cmd);
 }
 
@@ -1770,12 +1962,8 @@ void screenshot(
     printf("took screenshot");
 }
 
-
-
-
 int main() {
     context.currentFrame = 0;
-    
     
     initWindow(&context);
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -1783,19 +1971,16 @@ int main() {
     createInstance(&context);
     
     Camera camera;
-    vec3 camera_pos = {0.0f, 2.0f, 0.0f}; // 2 blocks up
-    vec3 camera_target = {0.0f, 2.0f, 0.0f}; // looking at world center, player-eye level
+    vec3 camera_pos = {0.0f, 2.0f, 0.0f};
+    vec3 camera_target = {0.0f, 2.0f, 0.0f};
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
     
     camera.active = true;
-    glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);    
-    
+    glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     
     glfwSetWindowUserPointer(context.window, &camera);
     glfwSetCursorPosCallback(context.window, mouse_callback);
     glfwSetKeyCallback(context.window, key_callback);
-    
-    
     
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface\n");
@@ -1808,7 +1993,6 @@ int main() {
     createImageViews(&context);
     createDepthResources(&context);
     
-    
     createRenderPass(&context);
     
     createUniformBuffer(&context);
@@ -1816,9 +2000,14 @@ int main() {
     
     createGraphicsPipeline(&context);
     
-    
+    // 2D descriptor stuff FIRST (before 3D textured pipeline)
     create2DDescriptorSetLayout(&context);
     create2DDescriptorPool(&context);
+
+    // THEN 3D textured pipeline (needs 2D descriptor layout)
+    create3DTexturedGraphicsPipeline(&context);
+
+    // THEN rest of 2D
     create2DGraphicsPipeline(&context);
     createTextured2DGraphicsPipeline(&context);
     renderer2D_init();
@@ -1826,67 +2015,63 @@ int main() {
     createDescriptorPool(&context);
     createDescriptorSet(&context);
     
-    
     createFramebuffers(&context);
     createCommandPool(&context);
     
+    // Initialize both 3D renderers
     renderer_init(
-                  context.device,
-                  context.physicalDevice,
-                  context.commandPool,
-                  context.graphicsQueue
-                  );
+        context.device,
+        context.physicalDevice,
+        context.commandPool,
+        context.graphicsQueue
+    );
+    renderer_init_textured3D();  // ADD THIS - Initialize 3D textured renderer
     
     createCommandBuffers(&context);
     createSyncObjects(&context);
     
+    srand((unsigned int)time(0));
     
-    srand((unsigned int)time(0)); // call this once at startup
-    
-    for (int x = 0; x < WORLD_WIDTH;  ++x)
+    // Initialize blocks (your existing code)
+    for (int x = 0; x < WORLD_WIDTH; ++x)
         for (int y = 0; y < WORLD_HEIGHT; ++y)
             for (int z = 0; z < WORLD_DEPTH; ++z) {
-                blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2) /* + 0.5f */;
-                blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2) /* + 0.5f */;
-                blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2) /* + 0.5f */;
+                blocks[x][y][z].pos[0] = (x - WORLD_WIDTH / 2);
+                blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2);
+                blocks[x][y][z].pos[2] = (z - WORLD_DEPTH / 2);
                 blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
                 blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
                 blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
                 blocks[x][y][z].color[3] = 1.0f;
             }
     
-    for (int x = 0; x < WORLD_WIDTH;  ++x)
+    for (int x = 0; x < WORLD_WIDTH; ++x)
         for (int z = 0; z < WORLD_DEPTH; ++z) {
-            int y = 0; // ground level
-            blocks[x][y][z].pos[0] = (x - WORLD_WIDTH  / 2);
+            int y = 0;
+            blocks[x][y][z].pos[0] = (x - WORLD_WIDTH / 2);
             blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2);
-            blocks[x][y][z].pos[2] = (z - WORLD_DEPTH  / 2);
+            blocks[x][y][z].pos[2] = (z - WORLD_DEPTH / 2);
             blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
             blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
             blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
             blocks[x][y][z].color[3] = 1.0f;
         }
     
+    scene_init(&scene);
     
+    load_obj("./assets/teapot.obj", red);
+    load_obj("./assets/cow.obj", blue);
     
-    scene_init(&scene); // Initialize the scene before loading meshes
-    
-    /* Mesh teapot = */ load_obj("./assets/teapot.obj", red);
-    /* Mesh cow = */ load_obj("./assets/cow.obj", blue);
-    
-    Mesh first = scene.meshes.items[0];
-  
-
     texture_pool_init(&context);
-
-    // Load textures and get their indices
+    
+    // Load textures
     int32_t tex1 = texture_pool_add(&context, "./assets/textures/puta.jpg");
     int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Green/texture_01.png");
     
-    // Get texture pointers
     Texture2D* texture1 = texture_pool_get(tex1);
     Texture2D* texture2 = texture_pool_get(tex2);
     
+    // ===== MAIN LOOP =====
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
         delta_time = current_frame - last_frame;
@@ -1896,6 +2081,7 @@ int main() {
         camera_process_keyboard(&camera, context.window, delta_time);
         camera_update(&camera);
         
+        // Update camera uniform buffer
         UniformBufferObject ubo;
         glm_mat4_mul(camera.projection_matrix, camera.view_matrix, ubo.vp);
         void* data;
@@ -1903,64 +2089,55 @@ int main() {
         memcpy(data, &ubo, sizeof(ubo));
         vkUnmapMemory(context.device, uniformBufferMemory);
         
+        // Clear all render buffers
         renderer_clear();
-        renderer2D_clear();        
+        renderer_clear_textured3D();  // ADD THIS
+        renderer2D_clear();
         
-        vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left
-        vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right
-        vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right
-        vec3 v3 = { -0.5f,  0.5f, 0.0f }; // Top Left
-        vec3 center = { 0.0f, 0.0f, 0.0f }; // Center
-        triangle(v0, center, v1, red);    // Bottom
-        triangle(v1, center, v2, green);  // Right
-        triangle(v2, center, v3, blue);   // Top
-        triangle(v3, center, v0, yellow); // Left
+        // ===== ADD 3D GEOMETRY =====
+        vec3 v0 = { -0.5f, -0.5f, 0.0f };
+        vec3 v1 = {  0.5f, -0.5f, 0.0f };
+        vec3 v2 = {  0.5f,  0.5f, 0.0f };
+        vec3 v3 = { -0.5f,  0.5f, 0.0f };
+        vec3 center = { 0.0f, 0.0f, 0.0f };
+        triangle(v0, center, v1, red);
+        triangle(v1, center, v2, green);
+        triangle(v2, center, v3, blue);
+        triangle(v3, center, v0, yellow);
         
+        sphere((vec3){0, 0, 30}, 5, 80, 80, yellow);
         
-        /* for (int x = 0; x < WORLD_WIDTH;  ++x) */
-        /* for (int y = 0; y < WORLD_HEIGHT; ++y) */
-        /* for (int z = 0; z < WORLD_DEPTH; ++z) */
-        /*     cube(blocks[x][y][z].pos, 1.0f, blocks[x][y][z].color); */
-        
-        
-        /* cube((vec3){0, 0, 0}, 1.0f, red); */
-        
-        sphere((vec3){0,0,30}, 5, 80, 80, yellow);
-        
+        // Rotate the cow
         static float cow_rotation = 0.0f;
-        
-        cow_rotation += delta_time; // radians per frame
-        
+        cow_rotation += delta_time;
         glm_mat4_identity(scene.meshes.items[1].model);
         glm_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f});
         
-        quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);  // bottom left
-        quad2D((vec2){70, 10}, (vec2){50, 50}, WHITE); // bottom right
-        quad2D((vec2){10, 70}, (vec2){50, 50}, RED);   // top left
-        quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN); // top right
+        // 2D GEOMETRY
+        quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);
+        quad2D((vec2){70, 10}, (vec2){50, 50}, WHITE);
+        quad2D((vec2){10, 70}, (vec2){50, 50}, RED);
+        quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN);
         
-        /* texture2D((vec2){100, 100}, (vec2){200, 200}, &texture, WHITE); */
-        /* texture2D((vec2){300, 300}, (vec2){600, 600}, &texture2, WHITE); */
+        texture2D((vec2){100, 100}, (vec2){200, 200}, texture1, WHITE);
+        texture2D((vec2){500, 100}, (vec2){150, 150}, texture1, WHITE);
+        texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE);
+        
+        // 3D TEXTURED GEOMETRY
+        texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE);
+        texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f},texture1, WHITE);
+        texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE);
+        vec3 cubePos = {0.0f, 2.0f, 5.0f};
+        float cubeSize = 2.0f;
+        texturedCube(cubePos, cubeSize, texture2, WHITE);
 
-        if (texture1) {
-            texture2D((vec2){100, 100}, (vec2){200, 200}, texture1, WHITE);
-            texture2D((vec2){500, 100}, (vec2){150, 150}, texture1, WHITE);
-        }
-        
-        if (texture2) {
-            texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE);
-        }
-        
-        
-        
-        
-        
-        
-        
+
+        // Upload all geometry to GPU
         renderer_upload();
+        renderer_upload_textured3D();  // ADD THIS
         renderer2D_upload();
         
-        // --- Draw frame (split into acquire, record, present) ---
+        // RENDER FRAME
         uint32_t frameIndex = context.currentFrame;
         VkFence inFlightFence = context.inFlightFences[frameIndex];
         vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
@@ -1970,8 +2147,8 @@ int main() {
                                                 context.device, context.swapChain, UINT64_MAX,
                                                 context.imageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex
                                                 );
+        
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-            // Handle swapchain recreation
             continue;
         } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
             fprintf(stderr, "Failed to acquire swap chain image\n");
@@ -1984,12 +2161,13 @@ int main() {
         context.imagesInFlight[imageIndex] = inFlightFence;
         vkResetFences(context.device, 1, &inFlightFence);
         
-        // --- Here! Re-record the command buffer for this swapchain image ---
+        // Re-record command buffer with new geometry
         recordCommandBuffer(&context, imageIndex);
         
         VkSemaphore waitSemaphores[] = { context.imageAvailableSemaphores[frameIndex] };
         VkSemaphore signalSemaphores[] = { context.renderFinishedSemaphores[imageIndex] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+        
         VkSubmitInfo submitInfo = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .waitSemaphoreCount = 1,
@@ -2000,6 +2178,7 @@ int main() {
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = signalSemaphores
         };
+        
         if (vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
             fprintf(stderr, "Failed to submit draw command buffer\n");
             exit(EXIT_FAILURE);
@@ -2014,6 +2193,7 @@ int main() {
             .pImageIndices = &imageIndex,
             .pResults = NULL
         };
+        
         result = vkQueuePresentKHR(context.graphicsQueue, &presentInfo);
         
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
@@ -2023,12 +2203,11 @@ int main() {
             exit(EXIT_FAILURE);
         }
         
-        
         context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
     
     vkDeviceWaitIdle(context.device);
-
+    
     texture_pool_cleanup(&context);
     cleanup(&context);
     

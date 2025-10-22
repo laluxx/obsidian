@@ -93,16 +93,12 @@ void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool
     vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
 }
 
-void renderer_shutdown() {
-    vkDestroyBuffer(device, vertexBuffer, NULL);
-    vkFreeMemory(device, vertexBufferMemory, NULL);
-}
-
 void vertex_with_normal(vec3 pos, vec4 color, vec3 normal) {
     if (vertex_count >= MAX_VERTICES) return;
     glm_vec3_copy(pos, vertices[vertex_count].pos);
     glm_vec4_copy(color, vertices[vertex_count].color);
     glm_vec3_copy(normal, vertices[vertex_count].normal);
+    glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord); // Default tex coords
     vertex_count++;
 }
 
@@ -110,6 +106,8 @@ void vertex(vec3 pos, vec4 color) {
     if (vertex_count >= MAX_VERTICES) return;
     glm_vec3_copy(pos, vertices[vertex_count].pos);
     glm_vec4_copy(color, vertices[vertex_count].color);
+    glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, vertices[vertex_count].normal); // Default normal
+    glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord); // Default tex coords
     vertex_count++;
 }
 
@@ -200,6 +198,84 @@ void cube(vec3 origin, float size, vec4 color) {
     vertex_with_normal(f, color, n_bottom);
     vertex_with_normal(b, color, n_bottom);
 }
+
+void texturedCube(vec3 position, float size, Texture2D* texture, Color tint) {
+    if (vertex_count_3D_textured + 36 >= MAX_VERTICES || !texture || !texture->loaded) {
+        return;
+    }
+
+    float s = size / 2.0f;
+    float x = position[0], y = position[1], z = position[2];
+
+    // Define cube vertices with proper normals and texture coordinates
+    // Each face is properly rotated to form a cube
+    Vertex cube[36] = {
+        // Front face (facing +Z)
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+
+        // Back face (facing -Z) - rotated 180 degrees
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
+
+        // Right face (facing +X) - rotated 90 degrees around Y
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+
+        // Left face (facing -X) - rotated -90 degrees around Y
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+
+        // Top face (facing +Y) - rotated 90 degrees around X
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+
+        // Bottom face (facing -Y) - rotated -90 degrees around X
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}}
+    };
+
+    // Find or create batch for this texture
+    int batchIndex = -1;
+    if (texture3DBatchCount > 0 && texture3DBatches[texture3DBatchCount - 1].texture == texture) {
+        batchIndex = texture3DBatchCount - 1;
+    } else {
+        if (texture3DBatchCount >= MAX_TEXTURES) return;
+        batchIndex = texture3DBatchCount++;
+        texture3DBatches[batchIndex].texture = texture;
+        texture3DBatches[batchIndex].startVertex = vertex_count_3D_textured;
+        texture3DBatches[batchIndex].vertexCount = 0;
+    }
+
+    memcpy(&vertices3D_textured[vertex_count_3D_textured], cube, sizeof(cube));
+    vertex_count_3D_textured += 36;
+    texture3DBatches[batchIndex].vertexCount += 36;
+}
+
 
 void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color) {
     for (int lat = 0; lat < latDiv; ++lat) {
@@ -739,4 +815,179 @@ void destroy_texture(VulkanContext* context, Texture2D* texture) {
     texture->memory = VK_NULL_HANDLE;
     texture->descriptorSet = VK_NULL_HANDLE;
     texture->loaded = false;
+}
+
+
+
+/// 3D TEXTURES
+
+// Initialize 3D textured vertex buffer
+void renderer_init_textured3D() {
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = sizeof(vertices3D_textured),
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    vkCreateBuffer(device, &bufferInfo, NULL, &vertexBuffer3D_textured);
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, vertexBuffer3D_textured, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
+                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+
+    vkAllocateMemory(device, &allocInfo, NULL, &vertexBufferMemory3D_textured);
+    vkBindBufferMemory(device, vertexBuffer3D_textured, vertexBufferMemory3D_textured, 0);
+}
+
+void texture3D(vec3 position, vec2 size, Texture2D* texture, Color tint) {
+    if (vertex_count_3D_textured + 6 >= MAX_VERTICES || !texture || !texture->loaded) {
+        if (!texture) printf("texture3D: NULL texture\n");
+        else if (!texture->loaded) printf("texture3D: texture not loaded\n");
+        return;
+    }
+
+    float x = position[0], y = position[1], z = position[2];
+    float w = size[0], h = size[1];
+
+    // Find or create batch for this texture
+    int batchIndex = -1;
+    if (texture3DBatchCount > 0 && texture3DBatches[texture3DBatchCount - 1].texture == texture) {
+        batchIndex = texture3DBatchCount - 1;
+    } else {
+        if (texture3DBatchCount >= MAX_TEXTURES) {
+            fprintf(stderr, "Too many texture batches in 3D!\n");
+            return;
+        }
+        batchIndex = texture3DBatchCount++;
+        texture3DBatches[batchIndex].texture = texture;
+        texture3DBatches[batchIndex].startVertex = vertex_count_3D_textured;
+        texture3DBatches[batchIndex].vertexCount = 0;
+        /* printf("Created 3D batch %d for texture %p at vertex %u\n",  */
+        /*        batchIndex, (void*)texture, vertex_count_3D_textured); */
+    }
+
+    // Create a quad facing the camera (billboard style)
+    Vertex quad[6] = {
+        // Triangle 1
+        { .pos = {x - w/2, y - h/2, z}, 
+          .color = {tint.r, tint.g, tint.b, tint.a}, 
+          .normal = {0.0f, 0.0f, 1.0f}, 
+          .texCoord = {0.0f, 1.0f} },
+        
+        { .pos = {x + w/2, y - h/2, z}, 
+          .color = {tint.r, tint.g, tint.b, tint.a}, 
+          .normal = {0.0f, 0.0f, 1.0f}, 
+          .texCoord = {1.0f, 1.0f} },
+        
+        { .pos = {x + w/2, y + h/2, z}, 
+          .color = {tint.r, tint.g, tint.b, tint.a}, 
+          .normal = {0.0f, 0.0f, 1.0f}, 
+          .texCoord = {1.0f, 0.0f} },
+        
+        // Triangle 2
+        { .pos = {x - w/2, y - h/2, z}, 
+          .color = {tint.r, tint.g, tint.b, tint.a}, 
+          .normal = {0.0f, 0.0f, 1.0f}, 
+          .texCoord = {0.0f, 1.0f} },
+        
+        { .pos = {x + w/2, y + h/2, z}, 
+          .color = {tint.r, tint.g, tint.b, tint.a}, 
+          .normal = {0.0f, 0.0f, 1.0f}, 
+          .texCoord = {1.0f, 0.0f} },
+        
+        { .pos = {x - w/2, y + h/2, z}, 
+          .color = {tint.r, tint.g, tint.b, tint.a}, 
+          .normal = {0.0f, 0.0f, 1.0f}, 
+          .texCoord = {0.0f, 0.0f} }
+    };
+
+    memcpy(&vertices3D_textured[vertex_count_3D_textured], quad, sizeof(quad));
+    vertex_count_3D_textured += 6;
+    texture3DBatches[batchIndex].vertexCount += 6;
+}
+
+
+void renderer_upload_textured3D() {
+    if (vertex_count_3D_textured == 0) return;
+    
+    void* data;
+    vkMapMemory(device, vertexBufferMemory3D_textured, 0, sizeof(vertices3D_textured), 0, &data);
+    memcpy(data, vertices3D_textured, vertex_count_3D_textured * sizeof(Vertex));
+    vkUnmapMemory(device, vertexBufferMemory3D_textured);
+}
+
+void renderer_draw_textured3D(VkCommandBuffer cmd) {
+    if (texture3DBatchCount == 0) return;
+
+    /* printf("Drawing %u 3D texture batches (%u vertices total)\n",  */
+    /*        texture3DBatchCount, vertex_count_3D_textured); */
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured3D);
+    
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer3D_textured, offsets);
+
+    // Identity model matrix for billboards
+    glm_mat4_identity(pushConstants.model);
+
+    for (uint32_t i = 0; i < texture3DBatchCount; i++) {
+        Texture3DBatch* batch = &texture3DBatches[i];
+        
+        if (batch->vertexCount == 0) continue;
+        
+        /* printf("  Batch %u: texture=%p, start=%u, count=%u\n",  */
+        /*        i, (void*)batch->texture, batch->startVertex, batch->vertexCount); */
+        
+        // Bind descriptor sets: Set 0 = UBO (camera), Set 1 = Texture
+        VkDescriptorSet descriptorSets[2] = {
+            descriptorSet,                  // Set 0: Camera UBO
+            batch->texture->descriptorSet   // Set 1: Texture sampler
+        };
+        
+        vkCmdBindDescriptorSets(
+            cmd,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            context.pipelineLayoutTextured3D,
+            0, 2,
+            descriptorSets,
+            0, NULL
+        );
+        
+        // Push constants for model matrix and AO
+        vkCmdPushConstants(
+            cmd,
+            context.pipelineLayoutTextured3D,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(PushConstants),
+            &pushConstants
+        );
+        
+        // Draw this batch
+        vkCmdDraw(cmd, batch->vertexCount, 1, batch->startVertex, 0);
+    }
+}
+
+// Clear 3D textured content
+void renderer_clear_textured3D() {
+    vertex_count_3D_textured = 0;
+    texture3DBatchCount = 0;
+}
+
+void renderer_shutdown() {
+    vkDestroyBuffer(device, vertexBuffer, NULL);
+    vkFreeMemory(device, vertexBufferMemory, NULL);
+    
+    // Add cleanup for 3D textured buffer
+    if (vertexBuffer3D_textured) {
+        vkDestroyBuffer(device, vertexBuffer3D_textured, NULL);
+        vkFreeMemory(device, vertexBufferMemory3D_textured, NULL);
+    }
 }

@@ -47,12 +47,16 @@ typedef struct {
     VkBuffer vertexBuffer2D;
     VkDeviceMemory vertexBufferMemory2D;
     VkPipelineLayout pipelineLayoutTextured2D;
-
     
     // 2D descriptor set layout for textures - ADD THESE
     VkDescriptorSetLayout descriptorSetLayout2D;
     VkDescriptorPool descriptorPool2D;
     VkDescriptorSet descriptorSet2D;
+
+
+    VkPipeline graphicsPipelineTextured3D;
+    VkPipelineLayout pipelineLayoutTextured3D;
+
 } VulkanContext;
 
 extern VulkanContext context;
