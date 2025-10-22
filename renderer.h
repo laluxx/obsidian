@@ -8,7 +8,16 @@
 typedef struct {
     vec3 pos;
     vec4 color;
+    vec3 normal;
 } Vertex;
+
+typedef struct {
+    mat4 model;
+    int ambientOcclusionEnabled;
+    int padding[3]; // Explicit padding for 16-byte alignment
+} PushConstants;
+
+extern PushConstants pushConstants;
 
 typedef struct {
     VkBuffer vertexBuffer;
@@ -22,7 +31,6 @@ typedef struct {
     size_t count;
     size_t capacity;
 } Meshes;
-
 
 void renderer_init(
     VkDevice device,
@@ -38,6 +46,7 @@ void renderer_draw(VkCommandBuffer cmd);
 void renderer_clear(void);
 
 // Primitives
+void vertex_with_normal(vec3 pos, vec4 color, vec3 normal);
 void vertex(vec3 pos, vec4 color);
 void line(vec3 a, vec3 b, vec4 color);
 void triangle(vec3 a, vec3 b, vec3 c, vec4 color);

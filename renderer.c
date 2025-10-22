@@ -15,6 +15,9 @@ static VkQueue graphicsQueue;
 static VkBuffer vertexBuffer;
 static VkDeviceMemory vertexBufferMemory;
 
+PushConstants pushConstants;
+
+
 void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool, VkQueue queue) {
     device = dev;
     physicalDevice = physDev;
@@ -59,6 +62,15 @@ void renderer_shutdown() {
     vkFreeMemory(device, vertexBufferMemory, NULL);
 }
 
+void vertex_with_normal(vec3 pos, vec4 color, vec3 normal) {
+    if (vertex_count >= MAX_VERTICES) return;
+    glm_vec3_copy(pos, vertices[vertex_count].pos);
+    glm_vec4_copy(color, vertices[vertex_count].color);
+    glm_vec3_copy(normal, vertices[vertex_count].normal);
+    vertex_count++;
+}
+
+
 void vertex(vec3 pos, vec4 color) {
     if (vertex_count >= MAX_VERTICES) return;
     glm_vec3_copy(pos, vertices[vertex_count].pos);
@@ -67,16 +79,24 @@ void vertex(vec3 pos, vec4 color) {
 }
 
 void line(vec3 a, vec3 b, vec4 color) {
-    vertex(a, color);
-    vertex(b, color);
+    vec3 normal = {0.0f, 1.0f, 0.0f}; // Lines don't need accurate normals
+    vertex_with_normal(a, color, normal);
+    vertex_with_normal(b, color, normal);
 }
 
 void triangle(vec3 a, vec3 b, vec3 c, vec4 color) {
-    vertex(a, color);
-    vertex(b, color);
-    vertex(c, color);
+    // Calculate face normal using cross product
+    vec3 edge1, edge2, normal;
+    glm_vec3_sub(b, a, edge1);
+    glm_vec3_sub(c, a, edge2);
+    glm_vec3_cross(edge1, edge2, normal);
+    glm_vec3_normalize(normal);
+    
+    // All three vertices share the same face normal
+    vertex_with_normal(a, color, normal);
+    vertex_with_normal(b, color, normal);
+    vertex_with_normal(c, color, normal);
 }
-
 
 //    h-------g
 //   /|      /|
@@ -100,19 +120,59 @@ void cube(vec3 origin, float size, vec4 color) {
     glm_vec3_add(origin, (vec3){+s, +s, +s}, g); // g
     glm_vec3_add(origin, (vec3){-s, +s, +s}, h); // h
 
-    // Now the triangles stay exactly the same!
-    // Front face (z=-s)
-    triangle(a, b, c, color); triangle(a, c, d, color);
-    // Back face (z=+s)
-    triangle(e, h, g, color); triangle(e, g, f, color);
-    // Left face (x=-s)
-    triangle(a, d, h, color); triangle(a, h, e, color);
-    // Right face (x=+s)
-    triangle(b, f, g, color); triangle(b, g, c, color);
-    // Top face (y=+s)
-    triangle(d, c, g, color); triangle(d, g, h, color);
-    // Bottom face (y=-s)
-    triangle(a, e, f, color); triangle(a, f, b, color);
+    // Front face (z=-s, normal pointing -Z)
+    vec3 n_front = {0.0f, 0.0f, -1.0f};
+    vertex_with_normal(a, color, n_front);
+    vertex_with_normal(b, color, n_front);
+    vertex_with_normal(c, color, n_front);
+    vertex_with_normal(a, color, n_front);
+    vertex_with_normal(c, color, n_front);
+    vertex_with_normal(d, color, n_front);
+
+    // Back face (z=+s, normal pointing +Z)
+    vec3 n_back = {0.0f, 0.0f, 1.0f};
+    vertex_with_normal(e, color, n_back);
+    vertex_with_normal(h, color, n_back);
+    vertex_with_normal(g, color, n_back);
+    vertex_with_normal(e, color, n_back);
+    vertex_with_normal(g, color, n_back);
+    vertex_with_normal(f, color, n_back);
+
+    // Left face (x=-s, normal pointing -X)
+    vec3 n_left = {-1.0f, 0.0f, 0.0f};
+    vertex_with_normal(a, color, n_left);
+    vertex_with_normal(d, color, n_left);
+    vertex_with_normal(h, color, n_left);
+    vertex_with_normal(a, color, n_left);
+    vertex_with_normal(h, color, n_left);
+    vertex_with_normal(e, color, n_left);
+
+    // Right face (x=+s, normal pointing +X)
+    vec3 n_right = {1.0f, 0.0f, 0.0f};
+    vertex_with_normal(b, color, n_right);
+    vertex_with_normal(f, color, n_right);
+    vertex_with_normal(g, color, n_right);
+    vertex_with_normal(b, color, n_right);
+    vertex_with_normal(g, color, n_right);
+    vertex_with_normal(c, color, n_right);
+
+    // Top face (y=+s, normal pointing +Y)
+    vec3 n_top = {0.0f, 1.0f, 0.0f};
+    vertex_with_normal(d, color, n_top);
+    vertex_with_normal(c, color, n_top);
+    vertex_with_normal(g, color, n_top);
+    vertex_with_normal(d, color, n_top);
+    vertex_with_normal(g, color, n_top);
+    vertex_with_normal(h, color, n_top);
+
+    // Bottom face (y=-s, normal pointing -Y)
+    vec3 n_bottom = {0.0f, -1.0f, 0.0f};
+    vertex_with_normal(a, color, n_bottom);
+    vertex_with_normal(e, color, n_bottom);
+    vertex_with_normal(f, color, n_bottom);
+    vertex_with_normal(a, color, n_bottom);
+    vertex_with_normal(f, color, n_bottom);
+    vertex_with_normal(b, color, n_bottom);
 }
 
 void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color) {
@@ -124,34 +184,51 @@ void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color) {
             float phi1 = (float)lon / longDiv * 2.0f * GLM_PI;
             float phi2 = (float)(lon + 1) / longDiv * 2.0f * GLM_PI;
 
-            vec3 v0, v1, v2, v3;
-            glm_vec3_copy((vec3){
+            // Calculate vertices
+            vec3 v0 = {
                 center[0] + radius * sinf(theta1) * cosf(phi1),
                 center[1] + radius * cosf(theta1),
                 center[2] + radius * sinf(theta1) * sinf(phi1)
-            }, v0);
-            glm_vec3_copy((vec3){
+            };
+            vec3 v1 = {
                 center[0] + radius * sinf(theta2) * cosf(phi1),
                 center[1] + radius * cosf(theta2),
                 center[2] + radius * sinf(theta2) * sinf(phi1)
-            }, v1);
-            glm_vec3_copy((vec3){
+            };
+            vec3 v2 = {
                 center[0] + radius * sinf(theta2) * cosf(phi2),
                 center[1] + radius * cosf(theta2),
                 center[2] + radius * sinf(theta2) * sinf(phi2)
-            }, v2);
-            glm_vec3_copy((vec3){
+            };
+            vec3 v3 = {
                 center[0] + radius * sinf(theta1) * cosf(phi2),
                 center[1] + radius * cosf(theta1),
                 center[2] + radius * sinf(theta1) * sinf(phi2)
-            }, v3);
+            };
 
-            triangle(v0, v1, v2, color);
-            triangle(v0, v2, v3, color);
+            // For sphere, normal at each vertex points from center to vertex
+            vec3 n0, n1, n2, n3;
+            glm_vec3_sub(v0, center, n0);
+            glm_vec3_normalize(n0);
+            glm_vec3_sub(v1, center, n1);
+            glm_vec3_normalize(n1);
+            glm_vec3_sub(v2, center, n2);
+            glm_vec3_normalize(n2);
+            glm_vec3_sub(v3, center, n3);
+            glm_vec3_normalize(n3);
+
+            // First triangle
+            vertex_with_normal(v0, color, n0);
+            vertex_with_normal(v1, color, n1);
+            vertex_with_normal(v2, color, n2);
+
+            // Second triangle
+            vertex_with_normal(v0, color, n0);
+            vertex_with_normal(v2, color, n2);
+            vertex_with_normal(v3, color, n3);
         }
     }
 }
-
 
 void renderer_upload() {
     void* data;
@@ -161,17 +238,18 @@ void renderer_upload() {
 }
 
 void renderer_draw(VkCommandBuffer cmd) {
-    mat4 identity;
-    glm_mat4_identity(identity);
+    glm_mat4_identity(pushConstants.model);
+    // ambientOcclusionEnabled should be set elsewhere before drawing
+    
     vkCmdPushConstants(
         cmd,
         context.pipelineLayout,
-        VK_SHADER_STAGE_VERTEX_BIT,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
-        sizeof(mat4),
-        identity
+        sizeof(PushConstants),
+        &pushConstants
     );
-
+    
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, offsets);
     vkCmdDraw(cmd, vertex_count, 1, 0, 0);
@@ -183,15 +261,18 @@ void renderer_clear() {
 
 
 void mesh(VkCommandBuffer cmd, Mesh* mesh) {
+    glm_mat4_copy(mesh->model, pushConstants.model);
+    // ambientOcclusionEnabled should be set elsewhere before drawing
+    
     vkCmdPushConstants(
         cmd,
         context.pipelineLayout,
-        VK_SHADER_STAGE_VERTEX_BIT,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
-        sizeof(mat4),
-        mesh->model
+        sizeof(PushConstants),
+        &pushConstants
     );
-
+    
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vertexBuffer, offsets);
     vkCmdDraw(cmd, mesh->vertexCount, 1, 0, 0);

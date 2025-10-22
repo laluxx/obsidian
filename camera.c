@@ -31,7 +31,11 @@ void camera_update(Camera* cam) {
     cam->projection_matrix[1][1] *= -1; // Vulkan correction
 }
 
+
 void camera_process_keyboard(Camera* cam, GLFWwindow* window, float delta_time) {
+    // Only process keyboard if camera is active
+    if (!cam->active) return;
+    
     float velocity = cam->movement_speed * delta_time;
     vec3 tmp;
 
@@ -72,6 +76,9 @@ void camera_process_keyboard(Camera* cam, GLFWwindow* window, float delta_time) 
 }
 
 void camera_process_mouse(Camera* cam, double xoffset, double yoffset) {
+    // Only process mouse if camera is active
+    if (!cam->active) return;
+    
     xoffset *= cam->mouse_sensitivity;
     yoffset *= cam->mouse_sensitivity;
 
@@ -81,9 +88,7 @@ void camera_process_mouse(Camera* cam, double xoffset, double yoffset) {
     printf("cam->pitch == %f\n", cam->pitch);
 
     if(cam->pitch > 89.0f) cam->pitch = 89.0f;
-    
     if(cam->pitch < -89.0f) cam->pitch = -89.0f;
-    
 
     camera_update(cam);
 }

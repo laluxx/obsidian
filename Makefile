@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -g3 -o3
-LDFLAGS = -lvulkan -lglfw -lcglm -lm
+CFLAGS = -std=c23 -I/usr/include/freetype2 -Wall -Wextra -g3 -o3 
+LDFLAGS = -lvulkan -lglfw -lcglm -lm -lfreetype -lfontconfig
 GLSLANG = glslangValidator
 XXD = xxd
 

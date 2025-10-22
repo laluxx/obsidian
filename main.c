@@ -17,6 +17,7 @@
 #include "scene.h"
 
 #include "context.h"
+#include "common.h"
 
 #include <time.h>  
 
@@ -61,8 +62,10 @@ typedef struct {
     mat4 vp;
 } UniformBufferObject;
 
-
-uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties);
+/* typedef struct { */
+/*     mat4 model; */
+/*     int ambientOcclusionEnabled; */
+/* } PushConstants; */
 
 void createDescriptorSet(VulkanContext* context) {
     VkDescriptorSetAllocateInfo allocInfo = {
@@ -473,7 +476,8 @@ void createGraphicsPipeline(VulkanContext* context) {
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
 
-    VkVertexInputAttributeDescription attributeDescriptions[2] = {
+    // ATTRIBUTE DESCRIPTOR
+    VkVertexInputAttributeDescription attributeDescriptions[3] = {
         {
             .binding = 0,
             .location = 0,
@@ -485,25 +489,30 @@ void createGraphicsPipeline(VulkanContext* context) {
             .location = 1,
             .format = VK_FORMAT_R32G32B32A32_SFLOAT,
             .offset = offsetof(Vertex, color)
+        },
+        {
+            .binding = 0,
+            .location = 2,  // NEW: Normal attribute
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(Vertex, normal)
         }
     };
-
+    
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &bindingDescription,
-        .vertexAttributeDescriptionCount = 2,
+        .vertexAttributeDescriptionCount = 3,  // Changed from 2 to 3
         .pVertexAttributeDescriptions = attributeDescriptions
     };
-
-
+    
     // Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE
     };
-
+    
     // Viewport and scissor
     VkViewport viewport = {
         .x = 0.0f,
@@ -513,12 +522,12 @@ void createGraphicsPipeline(VulkanContext* context) {
         .minDepth = 0.0f,
         .maxDepth = 1.0f
     };
-
+    
     VkRect2D scissor = {
         .offset = {0, 0},
         .extent = context->swapChainExtent
     };
-
+    
     VkPipelineViewportStateCreateInfo viewportState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1,
@@ -526,7 +535,7 @@ void createGraphicsPipeline(VulkanContext* context) {
         .scissorCount = 1,
         .pScissors = &scissor
     };
-
+    
     // Rasterizer
     VkPipelineRasterizationStateCreateInfo rasterizer = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -540,14 +549,14 @@ void createGraphicsPipeline(VulkanContext* context) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = VK_FALSE
     };
-
+    
     // Multisampling
     VkPipelineMultisampleStateCreateInfo multisampling = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .sampleShadingEnable = VK_FALSE,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
     };
-
+    
     // Color blending
     VkPipelineColorBlendAttachmentState colorBlendAttachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
@@ -559,17 +568,17 @@ void createGraphicsPipeline(VulkanContext* context) {
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
     };
-
-
+    
+    
     VkPipelineColorBlendStateCreateInfo colorBlending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
         .attachmentCount = 1,
         .pAttachments = &colorBlendAttachment
     };
-
-
-
+    
+    
+    
     // Pipeline layout
     /* VkPipelineLayoutCreateInfo pipelineLayoutInfo = { */
     /*     .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, */
@@ -577,13 +586,12 @@ void createGraphicsPipeline(VulkanContext* context) {
     /*     .pSetLayouts = &context->descriptorSetLayout */
     /* }; */
 
-
     VkPushConstantRange pushConstantRange = {
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = sizeof(mat4),
+        .size = sizeof(PushConstants), // Now includes both model matrix and AO state
     };
-
+    
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
@@ -591,18 +599,18 @@ void createGraphicsPipeline(VulkanContext* context) {
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstantRange,
     };
-
-
+    
+    
     pipelineLayoutInfo.pSetLayouts = &context->descriptorSetLayout;
     pipelineLayoutInfo.setLayoutCount = 1;
-
-
+    
+    
     if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &context->pipelineLayout) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create pipeline layout\n");
         exit(EXIT_FAILURE);
     }
-
-
+    
+    
     VkPipelineDepthStencilStateCreateInfo depthStencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
@@ -611,7 +619,7 @@ void createGraphicsPipeline(VulkanContext* context) {
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
     };
-
+    
     // Create graphics pipeline
     VkGraphicsPipelineCreateInfo pipelineInfo = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -629,12 +637,12 @@ void createGraphicsPipeline(VulkanContext* context) {
         .basePipelineHandle = VK_NULL_HANDLE,
         .pDepthStencilState = &depthStencil,
     };
-
+    
     if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &context->graphicsPipeline) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipeline\n");
         exit(EXIT_FAILURE);
     }
-
+    
     // Clean up shader modules
     vkDestroyShaderModule(context->device, fragShaderModule, NULL);
     vkDestroyShaderModule(context->device, vertShaderModule, NULL);
@@ -642,14 +650,14 @@ void createGraphicsPipeline(VulkanContext* context) {
 
 void createFramebuffers(VulkanContext* context) {
     context->swapChainFramebuffers = malloc(context->swapChainImageCount * sizeof(VkFramebuffer));
-
+    
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         VkImageView attachments[] = {
             context->swapChainImageViews[i],
             context->depthImageView
         };
-
-
+        
+        
         VkFramebufferCreateInfo framebufferInfo = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = context->renderPass,
@@ -659,7 +667,7 @@ void createFramebuffers(VulkanContext* context) {
             .height = context->swapChainExtent.height,
             .layers = 1
         };
-
+        
         if (vkCreateFramebuffer(context->device, &framebufferInfo, NULL, &context->swapChainFramebuffers[i]) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create framebuffer\n");
             exit(EXIT_FAILURE);
@@ -673,7 +681,7 @@ void createCommandPool(VulkanContext* context) {
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = 0 // Assuming graphics queue family is 0
     };
-
+    
     if (vkCreateCommandPool(context->device, &poolInfo, NULL, &context->commandPool) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create command pool\n");
         exit(EXIT_FAILURE);
@@ -682,39 +690,39 @@ void createCommandPool(VulkanContext* context) {
 
 void createCommandBuffers(VulkanContext* context) {
     context->commandBuffers = malloc(context->swapChainImageCount * sizeof(VkCommandBuffer));
-
+    
     VkCommandBufferAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = context->commandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = context->swapChainImageCount
     };
-
+    
     if (vkAllocateCommandBuffers(context->device, &allocInfo, context->commandBuffers) != VK_SUCCESS) {
         fprintf(stderr, "Failed to allocate command buffers\n");
         exit(EXIT_FAILURE);
     }
-
+    
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         VkCommandBufferBeginInfo beginInfo = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
         };
-
+        
         if (vkBeginCommandBuffer(context->commandBuffers[i], &beginInfo) != VK_SUCCESS) {
             fprintf(stderr, "Failed to begin recording command buffer\n");
             exit(EXIT_FAILURE);
         }
-
-
+        
+        
         VkClearValue clearValues[2];
         clearValues[0].color = (VkClearColorValue){{0.0f, 0.0f, 0.0f, 1.0f}};
         clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
-
+        
         VkRenderPassBeginInfo renderPassInfo = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass = context->renderPass,
             .framebuffer = context->swapChainFramebuffers[i],
-
+            
             
             .renderArea = {
                 .offset = {0, 0},
@@ -723,19 +731,19 @@ void createCommandBuffers(VulkanContext* context) {
             .clearValueCount = 2,
             .pClearValues = clearValues,
         };
-
-
+        
+        
         vkCmdBeginRenderPass(context->commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-
+        
+        
         vkCmdBindPipeline(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
         vkCmdBindDescriptorSets(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
-
+        
         renderer_draw(context->commandBuffers[i]);
-
-
+        
+        
         vkCmdEndRenderPass(context->commandBuffers[i]);
-
+        
         if (vkEndCommandBuffer(context->commandBuffers[i]) != VK_SUCCESS) {
             fprintf(stderr, "Failed to record command buffer\n");
             exit(EXIT_FAILURE);
@@ -747,19 +755,19 @@ void createCommandBuffers(VulkanContext* context) {
 void createSyncObjects(VulkanContext* context) {
     context->imageAvailableSemaphores = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
     context->inFlightFences = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
-
+    
     context->renderFinishedSemaphores = malloc(context->swapChainImageCount * sizeof(VkSemaphore));
     context->imagesInFlight = malloc(context->swapChainImageCount * sizeof(VkFence));
-
+    
     VkSemaphoreCreateInfo semaphoreInfo = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
     };
-
+    
     VkFenceCreateInfo fenceInfo = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT
     };
-
+    
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vkCreateSemaphore(context->device, &semaphoreInfo, NULL, &context->imageAvailableSemaphores[i]) != VK_SUCCESS ||
             vkCreateFence(context->device, &fenceInfo, NULL, &context->inFlightFences[i]) != VK_SUCCESS) {
@@ -767,7 +775,7 @@ void createSyncObjects(VulkanContext* context) {
             exit(EXIT_FAILURE);
         }
     }
-
+    
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         if (vkCreateSemaphore(context->device, &semaphoreInfo, NULL, &context->renderFinishedSemaphores[i]) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create renderFinishedSemaphore for image %u\n", i);
@@ -779,7 +787,7 @@ void createSyncObjects(VulkanContext* context) {
 
 void createDepthResources(VulkanContext* context) {
     context->depthFormat = VK_FORMAT_D32_SFLOAT;
-
+    
     // Create depth image
     VkImageCreateInfo depthImageInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -800,10 +808,10 @@ void createDepthResources(VulkanContext* context) {
         fprintf(stderr, "Failed to create depth image\n");
         exit(EXIT_FAILURE);
     }
-
+    
     VkMemoryRequirements depthMemReq;
     vkGetImageMemoryRequirements(context->device, context->depthImage, &depthMemReq);
-
+    
     VkMemoryAllocateInfo depthAllocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = depthMemReq.size,
@@ -814,7 +822,7 @@ void createDepthResources(VulkanContext* context) {
         exit(EXIT_FAILURE);
     }
     vkBindImageMemory(context->device, context->depthImage, context->depthImageMemory, 0);
-
+    
     VkImageViewCreateInfo depthImageViewInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = context->depthImage,
@@ -836,19 +844,19 @@ void createDepthResources(VulkanContext* context) {
 void drawFrame(VulkanContext* context) {
     uint32_t frameIndex = context->currentFrame;
     VkFence inFlightFence = context->inFlightFences[frameIndex];
-
+    
     vkWaitForFences(context->device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-
+    
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
-        context->device,
-        context->swapChain,
-        UINT64_MAX,
-        context->imageAvailableSemaphores[frameIndex],
-        VK_NULL_HANDLE,
-        &imageIndex
-    );
-
+                                            context->device,
+                                            context->swapChain,
+                                            UINT64_MAX,
+                                            context->imageAvailableSemaphores[frameIndex],
+                                            VK_NULL_HANDLE,
+                                            &imageIndex
+                                            );
+    
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         // TODO: handle swapchain recreation
         return;
@@ -856,19 +864,19 @@ void drawFrame(VulkanContext* context) {
         fprintf(stderr, "Failed to acquire swap chain image\n");
         exit(EXIT_FAILURE);
     }
-
+    
     if (context->imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         vkWaitForFences(context->device, 1, &context->imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
     }
-
+    
     context->imagesInFlight[imageIndex] = inFlightFence;
-
+    
     vkResetFences(context->device, 1, &inFlightFence);
-
+    
     VkSemaphore waitSemaphores[] = { context->imageAvailableSemaphores[frameIndex] };
     VkSemaphore signalSemaphores[] = { context->renderFinishedSemaphores[imageIndex] };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-
+    
     VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
@@ -879,12 +887,12 @@ void drawFrame(VulkanContext* context) {
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = signalSemaphores
     };
-
+    
     if (vkQueueSubmit(context->graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
         fprintf(stderr, "Failed to submit draw command buffer\n");
         exit(EXIT_FAILURE);
     }
-
+    
     VkPresentInfoKHR presentInfo = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
@@ -894,22 +902,22 @@ void drawFrame(VulkanContext* context) {
         .pImageIndices = &imageIndex,
         .pResults = NULL
     };
-
+    
     result = vkQueuePresentKHR(context->graphicsQueue, &presentInfo);
-
+    
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         // TODO: handle swapchain recreation
     } else if (result != VK_SUCCESS) {
         fprintf(stderr, "Failed to present swap chain image\n");
         exit(EXIT_FAILURE);
     }
-
+    
     context->currentFrame = (context->currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 void cleanup(VulkanContext* context) {
     vkDeviceWaitIdle(context->device); // Wait for all operations to complete
-
+    
     renderer_shutdown();
     meshes_destroy(context->device, &scene.meshes);
     
@@ -922,18 +930,18 @@ void cleanup(VulkanContext* context) {
     }
     free(context->imageAvailableSemaphores);
     free(context->inFlightFences);
-
+    
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         if (context->renderFinishedSemaphores[i])
             vkDestroySemaphore(context->device, context->renderFinishedSemaphores[i], NULL);
     }
     free(context->renderFinishedSemaphores);
     free(context->imagesInFlight);
-
+    
     // COMMANDS
     if (context->commandPool) vkDestroyCommandPool(context->device, context->commandPool, NULL);
     free(context->commandBuffers);
-
+    
     // FRAMEBUFFERS & IMAGE VIEWS
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         if (context->swapChainFramebuffers[i])
@@ -944,32 +952,32 @@ void cleanup(VulkanContext* context) {
     free(context->swapChainFramebuffers);
     free(context->swapChainImageViews);
     free(context->swapChainImages);
-
+    
     // GRAPHICS PIPELINE
     if (context->graphicsPipeline) vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
     if (context->pipelineLayout) vkDestroyPipelineLayout(context->device, context->pipelineLayout, NULL);
     if (context->renderPass) vkDestroyRenderPass(context->device, context->renderPass, NULL);
-
+    
     // DEPTH
     if (context->depthImageView) vkDestroyImageView(context->device, context->depthImageView, NULL);
     if (context->depthImage) vkDestroyImage(context->device, context->depthImage, NULL);
     if (context->depthImageMemory) vkFreeMemory(context->device, context->depthImageMemory, NULL);
-
-
+    
+    
     // UNIFORM BUFFER & DESCRIPTORS
     if (uniformBuffer) vkDestroyBuffer(context->device, uniformBuffer, NULL);
     if (uniformBufferMemory) vkFreeMemory(context->device, uniformBufferMemory, NULL);
     if (descriptorPool) vkDestroyDescriptorPool(context->device, descriptorPool, NULL);
     if (context->descriptorSetLayout) vkDestroyDescriptorSetLayout(context->device, context->descriptorSetLayout, NULL);
-
+    
     // SWAPCHAIN & DEVICE
     if (context->swapChain) vkDestroySwapchainKHR(context->device, context->swapChain, NULL);
     if (context->device) vkDestroyDevice(context->device, NULL);
-
+    
     // SURFACE & INSTANCE
     if (context->surface) vkDestroySurfaceKHR(context->instance, context->surface, NULL);
     if (context->instance) vkDestroyInstance(context->instance, NULL);
-
+    
     // WINDOW
     if (context->window) glfwDestroyWindow(context->window);
     glfwTerminate();
@@ -988,28 +996,51 @@ float last_frame = 0.0f;
 bool shiftPressed;
 bool ctrlPressed;
 bool altPressed;
-bool lerp_minimap_on_startup;
+bool ambientOcclusionEnabled = true;
+
 
 void screenshot( VkDevice device, VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue queue, VkImage srcImage, VkFormat imageFormat, uint32_t width, uint32_t height, const char* filename);
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    Camera* cam = glfwGetWindowUserPointer(window);
     shiftPressed = mods & GLFW_MOD_SHIFT;
     ctrlPressed  = mods & GLFW_MOD_CONTROL;
     altPressed   = mods & GLFW_MOD_ALT;
-
+    
     if (key == GLFW_KEY_TAB && action == GLFW_PRESS) {
         screenshot(
-                        context.device,
-                        context.physicalDevice,
-                        context.commandPool,
-                        context.graphicsQueue,
-                        context.swapChainImages[0], // or whichever image you want
-                        VK_FORMAT_B8G8R8A8_SRGB,    // or your swapchain format
-                        context.swapChainExtent.width,
-                        context.swapChainExtent.height,
-                        "screenshot.png"
-                        );
+                   context.device,
+                   context.physicalDevice,
+                   context.commandPool,
+                   context.graphicsQueue,
+                   context.swapChainImages[0], // or whichever image you want
+                   VK_FORMAT_B8G8R8A8_SRGB,    // or your swapchain format
+                   context.swapChainExtent.width,
+                   context.swapChainExtent.height,
+                   "screenshot.png"
+                   );
     }
+    
+    if (key == GLFW_KEY_T && action == GLFW_PRESS) {
+        ambientOcclusionEnabled = !ambientOcclusionEnabled;
+        printf("Ambient Occlusion: %s\n", ambientOcclusionEnabled ? "ENABLED" : "DISABLED");
+    }
+
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+        cam->active = !cam->active;
+        
+        if (cam->active) {
+            // Enable camera control, disable cursor
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            printf("Camera control ENABLED\n");
+        } else {
+            // Disable camera control, enable cursor
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            printf("Camera control DISABLED - Editor mode\n");
+        }
+    }
+    
+    
 }
 
 
@@ -1023,7 +1054,7 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     double yoffset = lastY - ypos; // reversed for natural feel
     lastX = xpos;
     lastY = ypos;
-
+    
     Camera* cam = glfwGetWindowUserPointer(window);
     camera_process_mouse(cam, xoffset, yoffset);
 }
@@ -1031,44 +1062,32 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
 
 
 
-uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-    fprintf(stderr, "Failed to find suitable memory type!\n");
-    exit(EXIT_FAILURE);
-}
 
 void createUniformBuffer(VulkanContext* context) {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-
+    
     VkBufferCreateInfo bufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = bufferSize,
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
-
+    
     vkCreateBuffer(context->device, &bufferInfo, NULL, &uniformBuffer);
-
+    
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(context->device, uniformBuffer, &memRequirements);
-
+    
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = 0 // you'll need a function to find this
     };
-
+    
     // Find suitable memory type (implement your own findMemoryType)
     allocInfo.memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
-               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
+                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    
     vkAllocateMemory(context->device, &allocInfo, NULL, &uniformBufferMemory);
     vkBindBufferMemory(context->device, uniformBuffer, uniformBufferMemory, 0);
 }
@@ -1082,32 +1101,30 @@ void createDescriptorSetLayout(VulkanContext* context) {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .pImmutableSamplers = NULL
     };
-
+    
     VkDescriptorSetLayoutCreateInfo layoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
         .pBindings = &uboLayoutBinding
     };
-
+    
     vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout);
 }
 
 
 void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     VkCommandBuffer cmd = context->commandBuffers[imageIndex];
-
+    
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
     };
-
+    
     vkBeginCommandBuffer(cmd, &beginInfo);
-
-
-
+    
     VkClearValue clearValues[2];
     clearValues[0].color = (VkClearColorValue){{0.0f, 0.0f, 0.0f, 1.0f}};
     clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
-
+    
     VkRenderPassBeginInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = context->renderPass,
@@ -1119,17 +1136,26 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
         .clearValueCount = 2,
         .pClearValues = clearValues,
     };
-
+    
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
+    
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
-
-    meshes_draw(cmd, &scene.meshes);
-    renderer_draw(cmd);
-
+    
+    // Set AO state once globally
+    pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
+    
+    // Draw scene meshes
+    for (size_t i = 0; i < scene.meshes.count; i++) {
+        Mesh* mesh_ptr = &scene.meshes.items[i];
+        mesh(cmd, mesh_ptr); // mesh() will use the global pushConstants
+    }
+    
+    // Draw renderer content
+    renderer_draw(cmd); // renderer_draw() will use the global pushConstants
+    
     vkCmdEndRenderPass(cmd);
-
+    
     vkEndCommandBuffer(cmd);
 }
 
@@ -1143,47 +1169,47 @@ vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
 
 void screenshot(
-    VkDevice device,
-    VkPhysicalDevice physicalDevice,
-    VkCommandPool commandPool,
-    VkQueue queue,
-    VkImage srcImage,
-    VkFormat imageFormat,
-    uint32_t width,
-    uint32_t height,
-    const char* filename)
+                VkDevice device,
+                VkPhysicalDevice physicalDevice,
+                VkCommandPool commandPool,
+                VkQueue queue,
+                VkImage srcImage,
+                VkFormat imageFormat,
+                uint32_t width,
+                uint32_t height,
+                const char* filename)
 {
     VkResult err;
-
+    
     // 1. Create CPU-accessible buffer
     VkDeviceSize imageSize = width * height * 4;
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingBufferMemory;
-
+    
     VkBufferCreateInfo bufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = imageSize,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
-
+    
     err = vkCreateBuffer(device, &bufferInfo, NULL, &stagingBuffer);
     assert(err == VK_SUCCESS);
-
+    
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
-
+    
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
     };
-
+    
     err = vkAllocateMemory(device, &allocInfo, NULL, &stagingBufferMemory);
     assert(err == VK_SUCCESS);
     vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
-
+    
     // 2. Create command buffer for copy
     VkCommandBufferAllocateInfo cmdBufAllocInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1191,16 +1217,16 @@ void screenshot(
         .commandPool = commandPool,
         .commandBufferCount = 1,
     };
-
+    
     VkCommandBuffer cmdBuf;
     vkAllocateCommandBuffers(device, &cmdBufAllocInfo, &cmdBuf);
-
+    
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     vkBeginCommandBuffer(cmdBuf, &beginInfo);
-
+    
     // 3. Transition image layout if necessary (skip if already TRANSFER_SRC_OPTIMAL)
     VkImageMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -1220,14 +1246,14 @@ void screenshot(
         },
     };
     vkCmdPipelineBarrier(
-        cmdBuf,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        0, NULL,
-        0, NULL,
-        1, &barrier);
-
+                         cmdBuf,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0,
+                         0, NULL,
+                         0, NULL,
+                         1, &barrier);
+    
     // 4. Copy image to buffer
     VkBufferImageCopy region = {
         .bufferOffset = 0,
@@ -1242,9 +1268,9 @@ void screenshot(
         .imageOffset = {0, 0, 0},
         .imageExtent = {width, height, 1},
     };
-
+    
     vkCmdCopyImageToBuffer(cmdBuf, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &region);
-
+    
     // 5. Barrier to host read
     VkBufferMemoryBarrier bufBarrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -1257,16 +1283,16 @@ void screenshot(
         .size = imageSize,
     };
     vkCmdPipelineBarrier(
-        cmdBuf,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        0, NULL,
-        1, &bufBarrier,
-        0, NULL);
-
+                         cmdBuf,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT,
+                         0,
+                         0, NULL,
+                         1, &bufBarrier,
+                         0, NULL);
+    
     vkEndCommandBuffer(cmdBuf);
-
+    
     // 6. Submit and wait
     VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -1275,11 +1301,11 @@ void screenshot(
     };
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
-
+    
     // 7. Map buffer and save with stb_image_write
     void* data;
     vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-
+    
     // NOTE: Vulkan default is BGRA, convert to RGBA for PNG
     uint8_t* rgba_pixels = malloc(imageSize);
     for (uint32_t i = 0; i < width * height; ++i) {
@@ -1290,13 +1316,13 @@ void screenshot(
         dst[2] = src[0]; // B
         dst[3] = src[3]; // A
     }
-
+    
     stbi_write_png(filename, width, height, 4, rgba_pixels, width * 4);
-
+    
     free(rgba_pixels);
-
+    
     vkUnmapMemory(device, stagingBufferMemory);
-
+    
     // 8. Cleanup
     vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
     vkDestroyBuffer(device, stagingBuffer, NULL);
@@ -1306,49 +1332,51 @@ void screenshot(
 
 
 int main() {
-
     context.currentFrame = 0;
-
+    
     
     initWindow(&context);
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
+    
     createInstance(&context);
-
+    
     Camera camera;
     vec3 camera_pos = {0.0f, 2.0f, 0.0f}; // 2 blocks up
     vec3 camera_target = {0.0f, 2.0f, 0.0f}; // looking at world center, player-eye level
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
 
+    camera.active = true;
+    glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);    
 
+    
     glfwSetWindowUserPointer(context.window, &camera);
     glfwSetCursorPosCallback(context.window, mouse_callback);
     glfwSetKeyCallback(context.window, key_callback);
-
-
-
+    
+    
+    
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface\n");
         exit(EXIT_FAILURE);
     }
-
+    
     pickPhysicalDevice(&context);
     createLogicalDevice(&context);
     createSwapChain(&context);
     createImageViews(&context);
     createDepthResources(&context);
-
-
+    
+    
     createRenderPass(&context);
-
+    
     createUniformBuffer(&context);
     createDescriptorSetLayout(&context);
-
+    
     createGraphicsPipeline(&context);
     createDescriptorPool(&context);
     createDescriptorSet(&context);
-
-
+    
+    
     createFramebuffers(&context);
     createCommandPool(&context);
     
@@ -1359,14 +1387,12 @@ int main() {
                   context.graphicsQueue
                   );
 
-
     createCommandBuffers(&context);
     createSyncObjects(&context);
-
-
+    
 
     srand((unsigned int)time(0)); // call this once at startup
-
+    
     for (int x = 0; x < WORLD_WIDTH;  ++x)
         for (int y = 0; y < WORLD_HEIGHT; ++y)
             for (int z = 0; z < WORLD_DEPTH; ++z) {
@@ -1378,7 +1404,7 @@ int main() {
                 blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
                 blocks[x][y][z].color[3] = 1.0f;
             }
-
+    
     for (int x = 0; x < WORLD_WIDTH;  ++x)
         for (int z = 0; z < WORLD_DEPTH; ++z) {
             int y = 0; // ground level
@@ -1390,34 +1416,32 @@ int main() {
             blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
             blocks[x][y][z].color[3] = 1.0f;
         }
-
-
-
+    
+    
+    
     scene_init(&scene); // Initialize the scene before loading meshes
-
+    
     /* Mesh teapot = */ load_obj("./assets/teapot.obj", red);
     /* Mesh cow = */ load_obj("./assets/cow.obj", blue);
-
+    
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
         delta_time = current_frame - last_frame;
         last_frame = current_frame;
-
+        
         glfwPollEvents();
         camera_process_keyboard(&camera, context.window, delta_time);
         camera_update(&camera);
-
+        
         UniformBufferObject ubo;
         glm_mat4_mul(camera.projection_matrix, camera.view_matrix, ubo.vp);
         void* data;
         vkMapMemory(context.device, uniformBufferMemory, 0, sizeof(ubo), 0, &data);
         memcpy(data, &ubo, sizeof(ubo));
         vkUnmapMemory(context.device, uniformBufferMemory);
-
+        
         renderer_clear();
-
-
-
+         
         vec3 v0 = { -0.5f, -0.5f, 0.0f }; // Bottom Left
         vec3 v1 = {  0.5f, -0.5f, 0.0f }; // Bottom Right
         vec3 v2 = {  0.5f,  0.5f, 0.0f }; // Top Right
@@ -1427,33 +1451,34 @@ int main() {
         triangle(v1, center, v2, green);  // Right
         triangle(v2, center, v3, blue);   // Top
         triangle(v3, center, v0, yellow); // Left
-
-
+        
+        
         /* for (int x = 0; x < WORLD_WIDTH;  ++x) */
         /* for (int y = 0; y < WORLD_HEIGHT; ++y) */
         /* for (int z = 0; z < WORLD_DEPTH; ++z) */
         /*     cube(blocks[x][y][z].pos, 1.0f, blocks[x][y][z].color); */
-
+        
+        
         /* cube((vec3){0, 0, 0}, 1.0f, red); */
-
+        
         sphere((vec3){0,0,30}, 5, 80, 80, yellow);
-
+        
         static float cow_rotation = 0.0f;
-
+        
         cow_rotation += delta_time; // radians per frame
-
+        
         glm_mat4_identity(scene.meshes.items[1].model);
         glm_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f});
-
-
-
+        
+        
+        
         renderer_upload();
-
+        
         // --- Draw frame (split into acquire, record, present) ---
         uint32_t frameIndex = context.currentFrame;
         VkFence inFlightFence = context.inFlightFences[frameIndex];
         vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-
+        
         uint32_t imageIndex;
         VkResult result = vkAcquireNextImageKHR(
                                                 context.device, context.swapChain, UINT64_MAX,
@@ -1466,16 +1491,16 @@ int main() {
             fprintf(stderr, "Failed to acquire swap chain image\n");
             exit(EXIT_FAILURE);
         }
-
+        
         if (context.imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
             vkWaitForFences(context.device, 1, &context.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
         }
         context.imagesInFlight[imageIndex] = inFlightFence;
         vkResetFences(context.device, 1, &inFlightFence);
-
+        
         // --- Here! Re-record the command buffer for this swapchain image ---
         recordCommandBuffer(&context, imageIndex);
-
+        
         VkSemaphore waitSemaphores[] = { context.imageAvailableSemaphores[frameIndex] };
         VkSemaphore signalSemaphores[] = { context.renderFinishedSemaphores[imageIndex] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
@@ -1493,7 +1518,7 @@ int main() {
             fprintf(stderr, "Failed to submit draw command buffer\n");
             exit(EXIT_FAILURE);
         }
-
+        
         VkPresentInfoKHR presentInfo = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .waitSemaphoreCount = 1,
@@ -1504,15 +1529,15 @@ int main() {
             .pResults = NULL
         };
         result = vkQueuePresentKHR(context.graphicsQueue, &presentInfo);
-
+        
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
             // Handle swapchain recreation
         } else if (result != VK_SUCCESS) {
             fprintf(stderr, "Failed to present swap chain image\n");
             exit(EXIT_FAILURE);
         }
-
-
+        
+        
         context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
     

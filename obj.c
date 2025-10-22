@@ -38,6 +38,8 @@ static void file_reader(void* ctx, const char* filename, int is_mtl, const char*
     fclose(f);
 }
 
+
+
 Mesh load_obj(const char* path, vec4 color){
     Mesh mesh = {0};
     glm_mat4_identity(mesh.model);
@@ -75,12 +77,49 @@ Mesh load_obj(const char* path, vec4 color){
         const tinyobj_shape_t* shape = &shapes[s];
         size_t face_offset = shape->face_offset;
         size_t face_end = face_offset + shape->length;
+        
         for (size_t f = face_offset; f < face_end; ++f) {
+            // Get the three vertices of this triangle
+            vec3 v0, v1, v2;
+            vec3 normal;
+            
             for (size_t v = 0; v < 3; ++v) {
                 tinyobj_vertex_index_t idx = attrib.faces[3 * f + v];
                 float* vp = &attrib.vertices[3 * idx.v_idx];
-                memcpy(vertices[vert].pos, vp, sizeof(float) * 3);
-                memcpy(vertices[vert].color, color, sizeof(float) * 4);
+                
+                if (v == 0) {
+                    glm_vec3_copy(vp, v0);
+                } else if (v == 1) {
+                    glm_vec3_copy(vp, v1);
+                } else {
+                    glm_vec3_copy(vp, v2);
+                }
+            }
+            
+            // Calculate face normal using cross product
+            vec3 edge1, edge2;
+            glm_vec3_sub(v1, v0, edge1);
+            glm_vec3_sub(v2, v0, edge2);
+            glm_vec3_cross(edge1, edge2, normal);
+            
+            // Check if normal is valid (non-zero length)
+            float norm_length = glm_vec3_norm(normal);
+            if (norm_length > 0.0001f) {
+                glm_vec3_normalize(normal);
+            } else {
+                // Degenerate triangle, use default normal
+                glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, normal);
+            }
+            
+            // Now assign position, color, and normal to each vertex
+            for (size_t v = 0; v < 3; ++v) {
+                tinyobj_vertex_index_t idx = attrib.faces[3 * f + v];
+                float* vp = &attrib.vertices[3 * idx.v_idx];
+                
+                glm_vec3_copy(vp, vertices[vert].pos);
+                glm_vec4_copy(color, vertices[vert].color);
+                glm_vec3_copy(normal, vertices[vert].normal);
+                
                 vert++;
             }
         }
@@ -124,6 +163,8 @@ Mesh load_obj(const char* path, vec4 color){
     vkUnmapMemory(context.device, mesh.vertexBufferMemory);
 
     mesh.vertexCount = vertexCount;
+
+    printf("Loaded mesh '%s': %zu vertices, %zu triangles\n", path, vertexCount, vertexCount / 3);
 
     free(vertices);
 
