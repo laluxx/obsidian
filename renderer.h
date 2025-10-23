@@ -5,7 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <cglm/cglm.h>
 
-#define MAX_VERTICES 65536
+#define MAX_VERTICES 65536 * 4
 #define MAX_TEXTURES 256  // Maximum number of textures we can handle
 
 extern VkDescriptorSet descriptorSet;
@@ -14,7 +14,7 @@ typedef struct {
     vec3 pos;
     vec4 color;
     vec3 normal;
-    vec2 texCoord;           // NEW: Texture coordinates for 3D    
+    vec2 texCoord;
     uint32_t textureIndex;  // 0 = no texture, >0 = texture index
 } Vertex;
 
@@ -70,7 +70,7 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint);
 void texture3D(vec3 position, vec2 size, Texture2D* texture, Color tint);
 
 // Texture pool management
-void texture_pool_init(VulkanContext* context);
+void texture_pool_init();
 void texture_pool_cleanup(VulkanContext* context);
 int32_t texture_pool_add(VulkanContext* context, const char* filename);
 Texture2D* texture_pool_get(int32_t index);
@@ -108,14 +108,17 @@ void renderer_draw(VkCommandBuffer cmd);
 void renderer_clear(void);
 
 // Primitives
-void vertex_with_normal(vec3 pos, vec4 color, vec3 normal);
+void vertex_with_normal(vec3 pos, Color color, vec3 normal);
 void vertex(vec3 pos, vec4 color);
-void line(vec3 a, vec3 b, vec4 color);
-void triangle(vec3 a, vec3 b, vec3 c, vec4 color);
-void plane(vec3 origin, vec2 size, vec4 color);
-void cube(vec3 origin, float size, vec4 color);
+/* void line(vec3 a, vec3 b, Color color); */
+/* void line(vec3 start, vec3 end, Color color, float thickness); */
+void triangle(vec3 a, vec3 b, vec3 c, Color color);
+void plane(vec3 origin, vec2 size, Color color);
+/* void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileFactor); */
+void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileX, float tileZ);
+void cube(vec3 origin, float size, Color color);
 void texturedCube(vec3 position, float size, Texture2D* texture, Color tint);
-void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color);
+void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color);
 
 void mesh(VkCommandBuffer cmd, Mesh* mesh);
 void mesh_destroy(VkDevice device, Mesh* mesh);
@@ -125,3 +128,16 @@ void meshes_add(Meshes* meshes, Mesh mesh);
 void meshes_remove(Meshes* meshes, size_t index);
 void meshes_destroy(VkDevice device, Meshes* meshes);
 void meshes_draw(VkCommandBuffer cmd, Meshes* meshes);
+
+
+/// LINE
+
+extern uint32_t lineVertexCount;
+
+
+void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool, VkQueue queue);
+void line(vec3 start, vec3 end, Color color);
+void line_renderer_upload();
+void line_renderer_draw(VkCommandBuffer cmd);
+void line_renderer_clear();
+void line_renderer_shutdown();

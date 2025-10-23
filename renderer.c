@@ -11,7 +11,7 @@
 static Texture2D texturePool[MAX_TEXTURES];
 static uint32_t textureCount = 0;
 
-void texture_pool_init(VulkanContext* context) {
+void texture_pool_init() {
     textureCount = 0;
     memset(texturePool, 0, sizeof(texturePool));
 }
@@ -93,12 +93,18 @@ void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool
     vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
 }
 
-void vertex_with_normal(vec3 pos, vec4 color, vec3 normal) {
+void vertex_with_normal(vec3 pos, Color color, vec3 normal) {
     if (vertex_count >= MAX_VERTICES) return;
     glm_vec3_copy(pos, vertices[vertex_count].pos);
-    glm_vec4_copy(color, vertices[vertex_count].color);
+    
+    // Direct assignment instead of glm_vec4_copy
+    vertices[vertex_count].color[0] = color.r;
+    vertices[vertex_count].color[1] = color.g;
+    vertices[vertex_count].color[2] = color.b;
+    vertices[vertex_count].color[3] = color.a;
+    
     glm_vec3_copy(normal, vertices[vertex_count].normal);
-    glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord); // Default tex coords
+    glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord);
     vertex_count++;
 }
 
@@ -111,13 +117,52 @@ void vertex(vec3 pos, vec4 color) {
     vertex_count++;
 }
 
-void line(vec3 a, vec3 b, vec4 color) {
-    vec3 normal = {0.0f, 1.0f, 0.0f};
-    vertex_with_normal(a, color, normal);
-    vertex_with_normal(b, color, normal);
-}
+/* void line(vec3 start, vec3 end, Color color, float thickness) { */
+/*     if (vertex_count + 6 >= MAX_VERTICES) return; */
+    
+/*     vec3 direction; */
+/*     glm_vec3_sub(end, start, direction); */
+/*     glm_vec3_normalize(direction); */
+    
+/*     // Create a perpendicular vector for line thickness */
+/*     vec3 perpendicular; */
+/*     if (fabs(direction[1]) > 0.9f) { */
+/*         // If line is mostly vertical, use X axis for perpendicular */
+/*         glm_vec3_copy((vec3){1.0f, 0.0f, 0.0f}, perpendicular); */
+/*     } else { */
+/*         // Otherwise use cross product with up vector */
+/*         glm_vec3_cross(direction, (vec3){0.0f, 1.0f, 0.0f}, perpendicular); */
+/*     } */
+/*     glm_vec3_normalize(perpendicular); */
+/*     glm_vec3_scale(perpendicular, thickness / 2.0f, perpendicular); */
+    
+/*     vec3 normal = {0.0f, 1.0f, 0.0f}; // Default normal */
+    
+/*     // Create a thin rectangle representing the line */
+/*     vec3 a, b, c, d; */
+/*     glm_vec3_sub(start, perpendicular, a); */
+/*     glm_vec3_add(start, perpendicular, b); */
+/*     glm_vec3_sub(end, perpendicular, c); */
+/*     glm_vec3_add(end, perpendicular, d); */
+    
+/*     // First triangle */
+/*     vertex_with_normal(a, color, normal); */
+/*     vertex_with_normal(b, color, normal); */
+/*     vertex_with_normal(c, color, normal); */
+    
+/*     // Second triangle */
+/*     vertex_with_normal(b, color, normal); */
+/*     vertex_with_normal(d, color, normal); */
+/*     vertex_with_normal(c, color, normal); */
+/* } */
 
-void triangle(vec3 a, vec3 b, vec3 c, vec4 color) {
+/* void line(vec3 a, vec3 b, Color color) { */
+/*     vec3 normal = {0.0f, 1.0f, 0.0f}; */
+/*     vertex_with_normal(a, color, normal); */
+/*     vertex_with_normal(b, color, normal); */
+/* } */
+
+void triangle(vec3 a, vec3 b, vec3 c, Color color) {
     vec3 edge1, edge2, normal;
     glm_vec3_sub(b, a, edge1);
     glm_vec3_sub(c, a, edge2);
@@ -129,6 +174,109 @@ void triangle(vec3 a, vec3 b, vec3 c, vec4 color) {
     vertex_with_normal(c, color, normal);
 }
 
+void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileX, float tileZ) {
+    if (vertex_count_3D_textured + 6 >= MAX_VERTICES || !texture || !texture->loaded) {
+        return;
+    }
+
+    float w = size[0] / 2.0f;
+    float h = size[1] / 2.0f;
+    float x = origin[0], y = origin[1], z = origin[2];
+
+    Vertex plane[6] = {
+        // First triangle - use separate tileX and tileZ for UV coordinates
+        {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileZ}, 0},
+        {{x+w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileX, tileZ}, 0},
+        {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileX, 0.0f}, 0},
+        
+        // Second triangle
+        {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileZ}, 0},
+        {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileX, 0.0f}, 0},
+        {{x-w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, 0}
+    };
+
+    // Batch management (same as before)
+    int batchIndex = -1;
+    if (texture3DBatchCount > 0 && texture3DBatches[texture3DBatchCount - 1].texture == texture) {
+        batchIndex = texture3DBatchCount - 1;
+    } else {
+        if (texture3DBatchCount >= MAX_TEXTURES) return;
+        batchIndex = texture3DBatchCount++;
+        texture3DBatches[batchIndex].texture = texture;
+        texture3DBatches[batchIndex].startVertex = vertex_count_3D_textured;
+        texture3DBatches[batchIndex].vertexCount = 0;
+    }
+
+    memcpy(&vertices3D_textured[vertex_count_3D_textured], plane, sizeof(plane));
+    vertex_count_3D_textured += 6;
+    texture3DBatches[batchIndex].vertexCount += 6;
+}
+
+/* void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileFactor) { */
+/*     if (vertex_count_3D_textured + 6 >= MAX_VERTICES || !texture || !texture->loaded) { */
+/*         return; */
+/*     } */
+
+/*     float w = size[0] / 2.0f; */
+/*     float h = size[1] / 2.0f; */
+/*     float x = origin[0], y = origin[1], z = origin[2]; */
+
+/*     Vertex plane[6] = { */
+/*         // First triangle */
+/*         {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileFactor}, 0}, */
+/*         {{x+w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileFactor, tileFactor}, 0}, */
+/*         {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileFactor, 0.0f}, 0}, */
+        
+/*         // Second triangle */
+/*         {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileFactor}, 0}, */
+/*         {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileFactor, 0.0f}, 0}, */
+/*         {{x-w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, 0} */
+/*     }; */
+
+/*     // Batch management (same as your existing code) */
+/*     int batchIndex = -1; */
+/*     if (texture3DBatchCount > 0 && texture3DBatches[texture3DBatchCount - 1].texture == texture) { */
+/*         batchIndex = texture3DBatchCount - 1; */
+/*     } else { */
+/*         if (texture3DBatchCount >= MAX_TEXTURES) return; */
+/*         batchIndex = texture3DBatchCount++; */
+/*         texture3DBatches[batchIndex].texture = texture; */
+/*         texture3DBatches[batchIndex].startVertex = vertex_count_3D_textured; */
+/*         texture3DBatches[batchIndex].vertexCount = 0; */
+/*     } */
+
+/*     memcpy(&vertices3D_textured[vertex_count_3D_textured], plane, sizeof(plane)); */
+/*     vertex_count_3D_textured += 6; */
+/*     texture3DBatches[batchIndex].vertexCount += 6; */
+/* } */
+
+void plane(vec3 origin, vec2 size, Color color) {
+    float w = size[0] / 2.0f;
+    float h = size[1] / 2.0f;
+    
+    vec3 a, b, c, d;
+    
+    // Define the four corners of the plane
+    glm_vec3_add(origin, (vec3){-w, 0.0f, -h}, a);
+    glm_vec3_add(origin, (vec3){+w, 0.0f, -h}, b);
+    glm_vec3_add(origin, (vec3){+w, 0.0f, +h}, c);
+    glm_vec3_add(origin, (vec3){-w, 0.0f, +h}, d);
+    
+    // Normal pointing up (Y-axis)
+    vec3 normal = {0.0f, 1.0f, 0.0f};
+    
+    // Create two triangles to form the plane
+    // First triangle
+    vertex_with_normal(a, color, normal);
+    vertex_with_normal(b, color, normal);
+    vertex_with_normal(c, color, normal);
+    
+    // Second triangle
+    vertex_with_normal(a, color, normal);
+    vertex_with_normal(c, color, normal);
+    vertex_with_normal(d, color, normal);
+}
+
 //    h-------g
 //   /|      /|
 //  d-------c |
@@ -137,7 +285,7 @@ void triangle(vec3 a, vec3 b, vec3 c, vec4 color) {
 //  |/      |/
 //  a-------b
 
-void cube(vec3 origin, float size, vec4 color) {
+void cube(vec3 origin, float size, Color color) {
     float s = size / 2.0f;
     vec3 a, b, c, d, e, f, g, h;
 
@@ -211,52 +359,52 @@ void texturedCube(vec3 position, float size, Texture2D* texture, Color tint) {
     // Each face is properly rotated to form a cube
     Vertex cube[36] = {
         // Front face (facing +Z)
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, 0},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, 0},
 
         // Back face (facing -Z) - rotated 180 degrees
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, 0},
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}, 0},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, 0},
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, 0},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, 0},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}, 0},
 
         // Right face (facing +X) - rotated 90 degrees around Y
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, 0},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, 0},
 
         // Left face (facing -X) - rotated -90 degrees around Y
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, 0},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, 0},
 
         // Top face (facing +Y) - rotated 90 degrees around X
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}, 0},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, 0},
 
         // Bottom face (facing -Y) - rotated -90 degrees around X
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}}
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, 0},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, 0},
+        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, 0},
+        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, 0}
     };
 
     // Find or create batch for this texture
@@ -276,8 +424,7 @@ void texturedCube(vec3 position, float size, Texture2D* texture, Color tint) {
     texture3DBatches[batchIndex].vertexCount += 36;
 }
 
-
-void sphere(vec3 center, float radius, int latDiv, int longDiv, vec4 color) {
+void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
     for (int lat = 0; lat < latDiv; ++lat) {
         float theta1 = (float)lat / latDiv * GLM_PI;
         float theta2 = (float)(lat + 1) / latDiv * GLM_PI;
@@ -989,5 +1136,93 @@ void renderer_shutdown() {
     if (vertexBuffer3D_textured) {
         vkDestroyBuffer(device, vertexBuffer3D_textured, NULL);
         vkFreeMemory(device, vertexBufferMemory3D_textured, NULL);
+    }
+}
+
+
+/// LINE
+
+// --- Line Renderer ---
+static Vertex lineVertices[MAX_VERTICES];
+uint32_t lineVertexCount = 0;
+static VkBuffer lineVertexBuffer;
+static VkDeviceMemory lineVertexBufferMemory;
+
+void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool, VkQueue queue) {
+    device = dev;
+    physicalDevice = physDev;
+    commandPool = cmdPool;
+    graphicsQueue = queue;
+
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = sizeof(lineVertices),
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    vkCreateBuffer(device, &bufferInfo, NULL, &lineVertexBuffer);
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, lineVertexBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
+                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+
+    vkAllocateMemory(device, &allocInfo, NULL, &lineVertexBufferMemory);
+    vkBindBufferMemory(device, lineVertexBuffer, lineVertexBufferMemory, 0);
+}
+
+void line(vec3 start, vec3 end, Color color) {
+    if (lineVertexCount + 2 >= MAX_VERTICES) return;
+    
+    vec4 colorVec4 = {color.r, color.g, color.b, color.a};
+    vec3 normal = {0.0f, 1.0f, 0.0f}; // Default normal
+    
+    // Add to line vertex buffer
+    glm_vec3_copy(start, lineVertices[lineVertexCount].pos);
+    glm_vec4_copy(colorVec4, lineVertices[lineVertexCount].color);
+    glm_vec3_copy(normal, lineVertices[lineVertexCount].normal);
+    glm_vec2_copy((vec2){0.0f, 0.0f}, lineVertices[lineVertexCount].texCoord);
+    lineVertexCount++;
+    
+    glm_vec3_copy(end, lineVertices[lineVertexCount].pos);
+    glm_vec4_copy(colorVec4, lineVertices[lineVertexCount].color);
+    glm_vec3_copy(normal, lineVertices[lineVertexCount].normal);
+    glm_vec2_copy((vec2){0.0f, 0.0f}, lineVertices[lineVertexCount].texCoord);
+    lineVertexCount++;
+}
+
+void line_renderer_upload() {
+    if (lineVertexCount == 0) return;
+    
+    void* data;
+    vkMapMemory(device, lineVertexBufferMemory, 0, sizeof(lineVertices), 0, &data);
+    memcpy(data, lineVertices, lineVertexCount * sizeof(Vertex));
+    vkUnmapMemory(device, lineVertexBufferMemory);
+}
+
+void line_renderer_draw(VkCommandBuffer cmd) {
+    if (lineVertexCount == 0) return;
+    
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, &lineVertexBuffer, offsets);
+    vkCmdDraw(cmd, lineVertexCount, 1, 0, 0);
+}
+
+void line_renderer_clear() {
+    lineVertexCount = 0;
+}
+
+void line_renderer_shutdown() {
+    if (lineVertexBuffer) {
+        vkDestroyBuffer(device, lineVertexBuffer, NULL);
+        vkFreeMemory(device, lineVertexBufferMemory, NULL);
+        lineVertexBuffer = VK_NULL_HANDLE;
+        lineVertexBufferMemory = VK_NULL_HANDLE;
     }
 }

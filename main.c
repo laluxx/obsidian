@@ -15,18 +15,14 @@
 #include "texture.frag.spv.h"
 #include "texture3D.frag.spv.h"
 
-
 #include <cglm/cglm.h>
 #include "camera.h"
 #include "renderer.h"
 #include "scene.h"
-
 #include "context.h"
 #include "common.h"
 
 #include <time.h>  
-
-// TODO textured cubes and texture3D don’t seem to be effected by ambientOcclusion
 
 #define WIDTH 800
 #define HEIGHT 600
@@ -61,6 +57,8 @@ typedef struct {
 #define WORLD_WIDTH  10
 #define WORLD_HEIGHT 10
 #define WORLD_DEPTH  10
+
+int lineWidth = 2.0f;
 
 Block blocks[WORLD_WIDTH][WORLD_HEIGHT][WORLD_DEPTH];
 
@@ -287,8 +285,11 @@ void createLogicalDevice(VulkanContext* context) {
     };
 
 
-    VkPhysicalDeviceFeatures deviceFeatures = {0};
-
+    /* VkPhysicalDeviceFeatures deviceFeatures = {0}; */
+    VkPhysicalDeviceFeatures deviceFeatures = {
+        .wideLines = VK_TRUE
+    };
+    
     VkDeviceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
@@ -300,39 +301,39 @@ void createLogicalDevice(VulkanContext* context) {
         .enabledLayerCount = VALIDATION_LAYERS_COUNT,
         .ppEnabledLayerNames = validationLayers
     };
-
+    
     if (vkCreateDevice(context->physicalDevice, &createInfo, NULL, &context->device) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create logical device\n");
         exit(EXIT_FAILURE);
     }
-
+    
     vkGetDeviceQueue(context->device, 0, 0, &context->graphicsQueue);
 }
 
 void createSwapChain(VulkanContext* context) {
     VkSurfaceCapabilitiesKHR capabilities;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context->physicalDevice, context->surface, &capabilities);
-
+    
     VkSurfaceFormatKHR surfaceFormat = {
         .format = VK_FORMAT_B8G8R8A8_SRGB,
         .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
     };
-
+    
     /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR; // Supported by all implementations, it enforces VSync */
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // No VSync, low latency, but possible tearing
     /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, lower latency than FIFO, no tearing, but higher GPU load. */
     /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR; */
-
+    
     VkExtent2D extent = capabilities.currentExtent.width != UINT32_MAX ? 
         capabilities.currentExtent : 
         (VkExtent2D){WIDTH, HEIGHT};
-
+    
     // Ensure we stay within bounds
     uint32_t imageCount = capabilities.minImageCount + 1;
     if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount) {
         imageCount = capabilities.maxImageCount;
     }
-
+    
     VkSwapchainCreateInfoKHR createInfo = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = context->surface,
@@ -349,23 +350,23 @@ void createSwapChain(VulkanContext* context) {
         .clipped = VK_TRUE,
         .oldSwapchain = VK_NULL_HANDLE
     };
-
+    
     if (vkCreateSwapchainKHR(context->device, &createInfo, NULL, &context->swapChain) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create swap chain\n");
         exit(EXIT_FAILURE);
     }
-
+    
     vkGetSwapchainImagesKHR(context->device, context->swapChain, &context->swapChainImageCount, NULL);
     context->swapChainImages = malloc(context->swapChainImageCount * sizeof(VkImage));
     vkGetSwapchainImagesKHR(context->device, context->swapChain, &context->swapChainImageCount, context->swapChainImages);
-
+    
     context->swapChainImageFormat = surfaceFormat.format;
     context->swapChainExtent = extent;
 }
 
 void createImageViews(VulkanContext* context) {
     context->swapChainImageViews = malloc(context->swapChainImageCount * sizeof(VkImageView));
-
+    
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         VkImageViewCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -386,7 +387,7 @@ void createImageViews(VulkanContext* context) {
                 .layerCount = 1
             }
         };
-
+        
         if (vkCreateImageView(context->device, &createInfo, NULL, &context->swapChainImageViews[i]) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create image views\n");
             exit(EXIT_FAILURE);
@@ -405,7 +406,7 @@ void createRenderPass(VulkanContext* context) {
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
-
+    
     VkAttachmentDescription depthAttachment = {
         .format = context->depthFormat,
         .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -416,26 +417,26 @@ void createRenderPass(VulkanContext* context) {
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     };
-
-
+    
+    
     VkAttachmentReference colorAttachmentRef = {
         .attachment = 0,
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
     };
-
+    
     VkAttachmentReference depthAttachmentRef = {
         .attachment = 1,
         .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     };
-
+    
     VkSubpassDescription subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &colorAttachmentRef,
         .pDepthStencilAttachment = &depthAttachmentRef,
     };
-
-
+    
+    
     // Add subpass dependency for layout transitions
     VkSubpassDependency dependency = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
@@ -445,7 +446,7 @@ void createRenderPass(VulkanContext* context) {
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
     };
-
+    
     VkRenderPassCreateInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = 2,
@@ -456,7 +457,7 @@ void createRenderPass(VulkanContext* context) {
         .dependencyCount = 1,
         .pDependencies = &dependency
     };
-
+    
     if (vkCreateRenderPass(context->device, &renderPassInfo, NULL, &context->renderPass) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create render pass\n");
         exit(EXIT_FAILURE);
@@ -476,13 +477,13 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(__2D_vert_spv),
             .pCode = (const uint32_t*)__2D_vert_spv
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create 2D vertex shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     // Create fragment shader module for textured rendering
     {
         VkShaderModuleCreateInfo createInfo = {
@@ -490,36 +491,36 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(texture_frag_spv),
             .pCode = (const uint32_t*)texture_frag_spv
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create textured fragment shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     VkPipelineShaderStageCreateInfo vertShaderStageInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_VERTEX_BIT,
         .module = vertShaderModule2D,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo fragShaderStageInfoTextured = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
         .module = fragShaderModuleTextured,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {vertShaderStageInfo2D, fragShaderStageInfoTextured};
-
+    
     // 2D vertex input (same as regular 2D)
     VkVertexInputBindingDescription bindingDescription2D = {
         .binding = 0,
         .stride = sizeof(Vertex2D),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-
+    
     VkVertexInputAttributeDescription attributeDescriptions2D[3] = {
         {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, pos)},
         {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex2D, color)},
@@ -537,6 +538,13 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
     VkPipelineInputAssemblyStateCreateInfo inputAssembly2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
+    
+    // LINE
+    VkPipelineInputAssemblyStateCreateInfo inputAssemblyLine = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
         .primitiveRestartEnable = VK_FALSE
     };
     
@@ -611,7 +619,7 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .offset = 0,
         .size = sizeof(mat4)
     };
-
+    
     // Pipeline layout for textured 2D - uses descriptor sets for textures
     VkPipelineLayoutCreateInfo pipelineLayoutInfoTextured2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -664,13 +672,13 @@ void create2DGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(__2D_vert_spv),
             .pCode = (const uint32_t*)__2D_vert_spv
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create 2D vertex shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     // Create fragment shader module from header  
     {
         VkShaderModuleCreateInfo createInfo = {
@@ -678,36 +686,36 @@ void create2DGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(__2D_frag_spv),
             .pCode = (const uint32_t*)__2D_frag_spv
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule2D) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create 2D fragment shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     VkPipelineShaderStageCreateInfo vertShaderStageInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_VERTEX_BIT,
         .module = vertShaderModule2D,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo fragShaderStageInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
         .module = fragShaderModule2D,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo shaderStages2D[] = {vertShaderStageInfo2D, fragShaderStageInfo2D};
-
+    
     // 2D vertex input
     VkVertexInputBindingDescription bindingDescription2D = {
         .binding = 0,
         .stride = sizeof(Vertex2D),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-
+    
     VkVertexInputAttributeDescription attributeDescriptions2D[3] = {
         {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, pos)},
         {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex2D, color)},
@@ -805,7 +813,7 @@ void create2DGraphicsPipeline(VulkanContext* context) {
         .offset = 0,
         .size = sizeof(mat4) // 64 bytes - just the projection matrix
     };
-
+    
     VkPipelineLayoutCreateInfo pipelineLayoutInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 0,  // NO descriptor sets for colored pipeline!
@@ -856,13 +864,13 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(vert_vert_spv),
             .pCode = (const uint32_t*)vert_vert_spv
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create 3D textured vertex shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     // Create fragment shader module - USE THE NEW TEXTURE3D SHADER!
     {
         VkShaderModuleCreateInfo createInfo = {
@@ -870,35 +878,35 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(texture3D_frag_spv),  // CHANGED!
             .pCode = (const uint32_t*)texture3D_frag_spv  // CHANGED!
         };
-
+        
         if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create 3D textured fragment shader module\n");
             exit(EXIT_FAILURE);
         }
     }
-
+    
     VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_VERTEX_BIT,
         .module = vertShaderModule,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo fragShaderStageInfoTextured = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
         .module = fragShaderModuleTextured,
         .pName = "main"
     };
-
+    
     VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {vertShaderStageInfo, fragShaderStageInfoTextured};
-
+    
     VkVertexInputBindingDescription bindingDescription = {
         .binding = 0,
         .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-
+    
     VkVertexInputAttributeDescription attributeDescriptions[4] = {
         {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
         {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color)},
@@ -991,13 +999,13 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .offset = 0,
         .size = sizeof(PushConstants)
     };
-
+    
     // Pipeline layout uses both descriptor sets
     VkDescriptorSetLayout layouts[2] = {
         context->descriptorSetLayout,    // Set 0: UBO for camera
         context->descriptorSetLayout2D   // Set 1: Texture sampler (now with FRAGMENT_BIT!)
     };
-
+    
     VkPipelineLayoutCreateInfo pipelineLayoutInfoTextured3D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 2,
@@ -1035,6 +1043,200 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
     
     vkDestroyShaderModule(context->device, fragShaderModuleTextured, NULL);
     vkDestroyShaderModule(context->device, vertShaderModule, NULL);
+}
+
+
+void createLineGraphicsPipeline(VulkanContext* context) {
+    // Load shaders from header files (use the same as regular 3D)
+    VkShaderModule vertShaderModule;
+    VkShaderModule fragShaderModule;
+    
+    // Create vertex shader module
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(vert_vert_spv),
+            .pCode = (const uint32_t*)vert_vert_spv
+        };
+        
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create line vertex shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    // Create fragment shader module
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(frag_frag_spv),
+            .pCode = (const uint32_t*)frag_frag_spv
+        };
+        
+        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create line fragment shader module\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vertShaderModule,
+        .pName = "main"
+    };
+    
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragShaderModule,
+        .pName = "main"
+    };
+    
+    VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+    
+    // Vertex input (same as regular 3D)
+    VkVertexInputBindingDescription bindingDescription = {
+        .binding = 0,
+        .stride = sizeof(Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+    
+    VkVertexInputAttributeDescription attributeDescriptions[4] = {
+        {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
+        {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color)},
+        {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
+        {.binding = 0, .location = 3, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texCoord)}
+    };
+    
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription,
+        .vertexAttributeDescriptionCount = 4,
+        .pVertexAttributeDescriptions = attributeDescriptions
+    };
+    
+    // KEY DIFFERENCE: Use LINE_LIST topology
+    VkPipelineInputAssemblyStateCreateInfo inputAssemblyLine = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,  // This is the key!
+        .primitiveRestartEnable = VK_FALSE
+    };
+    
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)context->swapChainExtent.width,
+        .height = (float)context->swapChainExtent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f
+    };
+
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = context->swapChainExtent
+    };
+    
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor
+    };
+    
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .lineWidth = lineWidth,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE
+    };
+    
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = VK_FALSE,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+    };
+    
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+    
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment
+    };
+    
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+    
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(PushConstants)
+    };
+
+    // Use the same pipeline layout as regular 3D (or create a separate one if needed)
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &context->descriptorSetLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange,
+    };
+    
+    VkPipelineLayout pipelineLayoutLine;
+    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &pipelineLayoutLine) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create line pipeline layout\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    VkGraphicsPipelineCreateInfo pipelineInfoLine = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = shaderStages,
+        .pVertexInputState = &vertexInputInfo,
+        .pInputAssemblyState = &inputAssemblyLine,  // Use line assembly state
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pColorBlendState = &colorBlending,
+        .layout = pipelineLayoutLine,
+        .renderPass = context->renderPass,
+        .subpass = 0,
+        .basePipelineHandle = VK_NULL_HANDLE,
+        .pDepthStencilState = &depthStencil,
+    };
+    
+    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoLine, NULL, &context->graphicsPipelineLine) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create line graphics pipeline\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Cleanup shader modules
+    vkDestroyShaderModule(context->device, fragShaderModule, NULL);
+    vkDestroyShaderModule(context->device, vertShaderModule, NULL);
+    // NOTE: We're not destroying pipelineLayoutLine since it's used by the pipeline
 }
 
 void createGraphicsPipeline(VulkanContext* context) {
@@ -1524,8 +1726,9 @@ void drawFrame(VulkanContext* context) {
 
 void cleanup(VulkanContext* context) {
     vkDeviceWaitIdle(context->device);
-    
+
     renderer_shutdown();
+    line_renderer_shutdown();
     meshes_destroy(context->device, &scene.meshes);
     
     // Texture pool is now cleaned up before this function is called
@@ -1583,6 +1786,11 @@ void cleanup(VulkanContext* context) {
     if (context->pipelineLayoutTextured3D) 
         vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured3D, NULL);
     
+    // LINE PIPELINE
+    if (context->graphicsPipelineLine) 
+        vkDestroyPipeline(context->device, context->graphicsPipelineLine, NULL);
+    
+
 
     // 2D VERTEX BUFFER
     if (context->vertexBuffer2D) vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
@@ -1634,6 +1842,16 @@ bool ambientOcclusionEnabled = true;
 
 void screenshot( VkDevice device, VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue queue, VkImage srcImage, VkFormat imageFormat, uint32_t width, uint32_t height, const char* filename);
 
+
+bool middleMousePressed = false;
+bool rightMousePressed = false;
+bool shiftMiddleMousePressed = false;
+double lastPanX = 0.0, lastPanY = 0.0;
+double lastOrbitX = 0.0, lastOrbitY = 0.0;
+vec3 orbitPivot = {0.0f, 0.0f, 0.0f};  // The point we're orbiting around
+float orbitDistance = 10.0f;           // Distance from pivot
+
+
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     Camera* cam = glfwGetWindowUserPointer(window);
     shiftPressed = mods & GLFW_MOD_SHIFT;
@@ -1646,8 +1864,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                    context.physicalDevice,
                    context.commandPool,
                    context.graphicsQueue,
-                   context.swapChainImages[0], // or whichever image
-                   VK_FORMAT_B8G8R8A8_SRGB,    // or another swapchain format
+                   context.swapChainImages[0],
+                   VK_FORMAT_B8G8R8A8_SRGB,
                    context.swapChainExtent.width,
                    context.swapChainExtent.height,
                    "screenshot.png"
@@ -1663,30 +1881,244 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         cam->active = !cam->active;
         
         if (cam->active) {
-            // Enable camera control, disable cursor
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             printf("Camera control ENABLED\n");
         } else {
-            // Disable camera control, enable cursor
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             printf("Camera control DISABLED - Editor mode\n");
         }
     }
+    
+
+    if (key == GLFW_KEY_F && action == GLFW_PRESS) {
+        vec3 world_origin = {0.0f, 0.0f, 0.0f};
+        camera_set_look_at(cam, world_origin);
+        printf("Looking at world origin (0, 0, 0)\n");
+    }
+
+
+    
+    // WASD movement when right mouse is pressed in editor mode
+    if (!cam->active && rightMousePressed) {
+        float speed = 0.1f;
+        
+        vec3 forward, right;
+        glm_vec3_copy(cam->front, forward);
+        forward[1] = 0.0f;  // Keep movement horizontal
+        glm_vec3_normalize(forward);
+        
+        glm_vec3_cross(forward, cam->up, right);
+        glm_vec3_normalize(right);
+        
+        if (key == GLFW_KEY_W && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            vec3 movement;
+            glm_vec3_scale(forward, speed, movement);
+            glm_vec3_add(cam->position, movement, cam->position);
+        }
+        if (key == GLFW_KEY_S && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            vec3 movement;
+            glm_vec3_scale(forward, -speed, movement);
+            glm_vec3_add(cam->position, movement, cam->position);
+        }
+        if (key == GLFW_KEY_A && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            vec3 movement;
+            glm_vec3_scale(right, -speed, movement);
+            glm_vec3_add(cam->position, movement, cam->position);
+        }
+        if (key == GLFW_KEY_D && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            vec3 movement;
+            glm_vec3_scale(right, speed, movement);
+            glm_vec3_add(cam->position, movement, cam->position);
+        }
+        if (key == GLFW_KEY_E && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            cam->position[1] += speed;  // Move up
+        }
+        if (key == GLFW_KEY_Q && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            cam->position[1] -= speed;  // Move down
+        }
+        
+        if (key == GLFW_KEY_SPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            cam->position[1] += speed;
+            printf("Camera UP - pos: (%.2f, %.2f, %.2f)\n", cam->position[0], cam->position[1], cam->position[2]);
+        }
+        if (key == GLFW_KEY_LEFT_SHIFT && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+            cam->position[1] -= speed;
+            printf("Camera DOWN - pos: (%.2f, %.2f, %.2f)\n", cam->position[0], cam->position[1], cam->position[2]);
+        }
+    }
+}
+
+bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
+    vec3 rayOrigin, rayDir;
+    glm_vec3_copy(cam->position, rayOrigin);
+    glm_vec3_copy(cam->front, rayDir);
+    glm_vec3_normalize(rayDir);
+    
+    printf("=== RAYCAST DEBUG ===\n");
+    printf("Camera pos: (%.2f, %.2f, %.2f)\n", rayOrigin[0], rayOrigin[1], rayOrigin[2]);
+    printf("Camera dir: (%.2f, %.2f, %.2f)\n", rayDir[0], rayDir[1], rayDir[2]);
+    
+    // Check if ray is parallel to ground (no Y component)
+    if (fabs(rayDir[1]) < 0.0001f) {
+        printf("Ray parallel to ground - using camera XZ position\n");
+        hitPoint[0] = rayOrigin[0];
+        hitPoint[1] = 0.0f;
+        hitPoint[2] = rayOrigin[2];
+        return false;
+    }
+    
+    // Calculate intersection with plane y = 0
+    // t = -rayOrigin.y / rayDir.y
+    float t = -rayOrigin[1] / rayDir[1];
+    
+    printf("t parameter: %.2f\n", t);
+    
+    if (t < 0.0f) {
+        printf("Intersection behind camera\n");
+        // Project camera position onto ground plane
+        hitPoint[0] = rayOrigin[0];
+        hitPoint[1] = 0.0f;
+        hitPoint[2] = rayOrigin[2];
+        return false;
+    }
+    
+    // Calculate hit point
+    hitPoint[0] = rayOrigin[0] + rayDir[0] * t;
+    hitPoint[1] = 0.0f;
+    hitPoint[2] = rayOrigin[2] + rayDir[2] * t;
+    
+    printf("Ground intersection: (%.2f, %.2f, %.2f), Distance: %.2f\n", 
+           hitPoint[0], hitPoint[1], hitPoint[2], t);
+    
+    return true;
+}
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    Camera* cam = glfwGetWindowUserPointer(window);
+    
+    // Only handle mouse buttons in editor mode (camera inactive)
+    if (!cam->active) {
+        // Middle mouse button - orbit/pan
+        if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
+            if (action == GLFW_PRESS) {
+                middleMousePressed = true;
+                glfwGetCursorPos(window, &lastPanX, &lastPanY);
+                glfwGetCursorPos(window, &lastOrbitX, &lastOrbitY);
+                
+                shiftMiddleMousePressed = (mods & GLFW_MOD_SHIFT);
+                
+                // If not panning, calculate the pivot point for orbiting
+                if (!shiftMiddleMousePressed) {
+                    vec3 hitPoint;
+                    bool hitGround = raycast_to_ground(cam, hitPoint);
+                    glm_vec3_copy(hitPoint, orbitPivot);
+                    
+                    // Calculate distance from camera to pivot
+                    vec3 toPivot;
+                    glm_vec3_sub(orbitPivot, cam->position, toPivot);
+                    orbitDistance = glm_vec3_norm(toPivot);
+                    
+                    printf("Orbit pivot set to: (%.2f, %.2f, %.2f)\n", orbitPivot[0], orbitPivot[1], orbitPivot[2]);
+                    printf("Orbit distance: %.2f\n", orbitDistance);
+                }
+                
+            } else if (action == GLFW_RELEASE) {
+                middleMousePressed = false;
+                shiftMiddleMousePressed = false;
+                
+                // ADD THIS LINE: Disable look-at mode when releasing middle mouse
+                cam->use_look_at = false;
+                printf("Orbit mode disabled - returning to normal camera control\n");
+            }
+        }
+        
+        // Right mouse button - freelook with WASD
+        if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+            if (action == GLFW_PRESS) {
+                rightMousePressed = true;
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                glfwGetCursorPos(window, &lastX, &lastY);
+            } else if (action == GLFW_RELEASE) {
+                rightMousePressed = false;
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            }
+        }
+    }
+}
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    Camera* cam = glfwGetWindowUserPointer(window);
+    
+    if (!cam->active) {
+        float zoomSpeed = 0.5f;
+        
+        vec3 forward;
+        glm_vec3_copy(cam->front, forward);
+        glm_vec3_scale(forward, yoffset * zoomSpeed, forward);
+        glm_vec3_add(cam->position, forward, cam->position);
+    }
 }
 
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+    Camera* cam = glfwGetWindowUserPointer(window);
+    
     if (firstMouse) {
         lastX = xpos;
         lastY = ypos;
         firstMouse = false;
     }
+    
     double xoffset = xpos - lastX;
-    double yoffset = lastY - ypos; // reversed
+    double yoffset = lastY - ypos;
     lastX = xpos;
     lastY = ypos;
     
-    Camera* cam = glfwGetWindowUserPointer(window);
-    camera_process_mouse(cam, xoffset, yoffset);
+    if (cam->active) {
+        // Normal FPS camera control
+        camera_process_mouse(cam, xoffset, yoffset);
+    }
+    else if (rightMousePressed) {
+        // Right mouse: freelook + WASD movement in editor mode
+        camera_process_mouse(cam, xoffset, yoffset);
+    }
+    else if (middleMousePressed) {
+        if (shiftMiddleMousePressed) {
+            // SHIFT + MIDDLE MOUSE: PAN (Godot-style)
+            float panSpeed = 0.005f;
+            
+            // Calculate camera-relative vectors
+            vec3 right, up;
+            glm_vec3_cross(cam->front, cam->up, right);
+            glm_vec3_normalize(right);
+            glm_vec3_copy(cam->up, up);
+            glm_vec3_normalize(up);
+            
+            // Pan opposite to mouse direction (intuitive dragging)
+            vec3 panMovement = {0.0f, 0.0f, 0.0f};
+            
+            vec3 rightMove;
+            glm_vec3_scale(right, (float)-xoffset * panSpeed, rightMove);
+            glm_vec3_add(panMovement, rightMove, panMovement);
+            
+            vec3 upMove;
+            glm_vec3_scale(up, (float)-yoffset * panSpeed, upMove);
+            glm_vec3_add(panMovement, upMove, panMovement);
+            
+            glm_vec3_add(cam->position, panMovement, cam->position);
+            
+        } else {
+            // MIDDLE MOUSE ONLY: ORBIT AROUND GROUND INTERSECTION POINT
+            float orbitSpeed = 0.01f;
+            
+            // Use the new orbit function
+            camera_orbit_around_point(cam, orbitPivot,
+                                      (float)(xoffset * orbitSpeed),
+                                      (float)(yoffset * orbitSpeed));
+            
+            printf("Orbiting around: (%.2f, %.2f, %.2f)\n",
+                   orbitPivot[0], orbitPivot[1], orbitPivot[2]);
+        }
+    }
 }
 
 void createUniformBuffer(VulkanContext* context) {
@@ -1736,7 +2168,6 @@ void createDescriptorSetLayout(VulkanContext* context) {
     vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout);
 }
 
-
 void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     VkCommandBuffer cmd = context->commandBuffers[imageIndex];
     
@@ -1767,10 +2198,10 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     // Set AO state once globally for all 3D rendering
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
     
-    // RENDER 3D COLORED CONTENT
+    // --- RENDER 3D SOLID GEOMETRY (TRIANGLES) ---
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 
-                           0, 1, &descriptorSet, 0, NULL);
+                            0, 1, &descriptorSet, 0, NULL);
     
     // Draw scene meshes (OBJ models)
     for (size_t i = 0; i < scene.meshes.count; i++) {
@@ -1778,13 +2209,21 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
         mesh(cmd, mesh_ptr);
     }
     
-    // Draw immediate mode 3D content (cubes, spheres, lines, etc.)
+    // Draw immediate mode 3D triangle content (cubes, spheres, etc.)
     renderer_draw(cmd);
     
-    // RENDER 3D TEXTURED CONTENT
+    // --- RENDER 3D TEXTURED GEOMETRY ---
     renderer_draw_textured3D(cmd);
     
-    // RENDER 2D CONTENT ON TOP
+    // --- RENDER LINES WITH LINE PIPELINE ---
+    if (context->graphicsPipelineLine && lineVertexCount > 0) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipelineLine);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 
+                                0, 1, &descriptorSet, 0, NULL);
+        line_renderer_draw(cmd);  // Use the dedicated line renderer
+    }
+    
+    // --- RENDER 2D CONTENT ON TOP (NO DEPTH TEST) ---
     renderer2D_draw(cmd);
     
     vkCmdEndRenderPass(cmd);
@@ -1971,7 +2410,7 @@ int main() {
     createInstance(&context);
     
     Camera camera;
-    vec3 camera_pos = {0.0f, 2.0f, 0.0f};
+    vec3 camera_pos = {0.0f, 3.0f, 0.0f}; // 2.0f
     vec3 camera_target = {0.0f, 2.0f, 0.0f};
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
     
@@ -1981,6 +2420,10 @@ int main() {
     glfwSetWindowUserPointer(context.window, &camera);
     glfwSetCursorPosCallback(context.window, mouse_callback);
     glfwSetKeyCallback(context.window, key_callback);
+    glfwSetMouseButtonCallback(context.window, mouse_button_callback);  // ADD
+    glfwSetScrollCallback(context.window, scroll_callback);             // ADD
+    
+    
     
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface\n");
@@ -2003,13 +2446,14 @@ int main() {
     // 2D descriptor stuff FIRST (before 3D textured pipeline)
     create2DDescriptorSetLayout(&context);
     create2DDescriptorPool(&context);
-
+    
     // THEN 3D textured pipeline (needs 2D descriptor layout)
     create3DTexturedGraphicsPipeline(&context);
-
+    
     // THEN rest of 2D
     create2DGraphicsPipeline(&context);
     createTextured2DGraphicsPipeline(&context);
+    createLineGraphicsPipeline(&context);
     renderer2D_init();
     
     createDescriptorPool(&context);
@@ -2020,12 +2464,20 @@ int main() {
     
     // Initialize both 3D renderers
     renderer_init(
-        context.device,
-        context.physicalDevice,
-        context.commandPool,
-        context.graphicsQueue
-    );
-    renderer_init_textured3D();  // ADD THIS - Initialize 3D textured renderer
+                  context.device,
+                  context.physicalDevice,
+                  context.commandPool,
+                  context.graphicsQueue
+                  );
+    
+    renderer_init_textured3D();
+    
+    line_renderer_init(
+                       context.device,
+                       context.physicalDevice, 
+                       context.commandPool,
+                       context.graphicsQueue
+                       );
     
     createCommandBuffers(&context);
     createSyncObjects(&context);
@@ -2062,16 +2514,24 @@ int main() {
     load_obj("./assets/teapot.obj", red);
     load_obj("./assets/cow.obj", blue);
     
-    texture_pool_init(&context);
+    texture_pool_init();
     
     // Load textures
     int32_t tex1 = texture_pool_add(&context, "./assets/textures/puta.jpg");
-    int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Green/texture_01.png");
+    int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_01.png");
+    int32_t tex3 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_05.png");
+    int32_t tex4 = texture_pool_add(&context, "./assets/textures/prototype/Dark/texture_03.png");
     
     Texture2D* texture1 = texture_pool_get(tex1);
     Texture2D* texture2 = texture_pool_get(tex2);
+    Texture2D* texture3 = texture_pool_get(tex3);
+    Texture2D* texture4 = texture_pool_get(tex4);
     
-    // ===== MAIN LOOP =====
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
+    float maxLineWidth = properties.limits.lineWidthRange[1];
+    printf("MAX supported line width: %f\n", maxLineWidth);
+    
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
         delta_time = current_frame - last_frame;
@@ -2080,6 +2540,7 @@ int main() {
         glfwPollEvents();
         camera_process_keyboard(&camera, context.window, delta_time);
         camera_update(&camera);
+
         
         // Update camera uniform buffer
         UniformBufferObject ubo;
@@ -2092,20 +2553,21 @@ int main() {
         // Clear all render buffers
         renderer_clear();
         renderer_clear_textured3D();  // ADD THIS
+        line_renderer_clear();
         renderer2D_clear();
         
-        // ===== ADD 3D GEOMETRY =====
+        // 3D GEOMETRY
         vec3 v0 = { -0.5f, -0.5f, 0.0f };
         vec3 v1 = {  0.5f, -0.5f, 0.0f };
         vec3 v2 = {  0.5f,  0.5f, 0.0f };
         vec3 v3 = { -0.5f,  0.5f, 0.0f };
         vec3 center = { 0.0f, 0.0f, 0.0f };
-        triangle(v0, center, v1, red);
-        triangle(v1, center, v2, green);
-        triangle(v2, center, v3, blue);
-        triangle(v3, center, v0, yellow);
+        triangle(v0, center, v1, RED);
+        triangle(v1, center, v2, GREEN);
+        triangle(v2, center, v3, BLUE);
+        triangle(v3, center, v0, YELLOW);
         
-        sphere((vec3){0, 0, 30}, 5, 80, 80, yellow);
+        sphere((vec3){0, 0, 30}, 5, 80, 80, YELLOW);
         
         // Rotate the cow
         static float cow_rotation = 0.0f;
@@ -2123,19 +2585,65 @@ int main() {
         texture2D((vec2){500, 100}, (vec2){150, 150}, texture1, WHITE);
         texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE);
         
-        // 3D TEXTURED GEOMETRY
+        
+        // Render axes 
+        float lineLength = 1000.0f; // Very long lines to appear "infinite"
+        Color xColor = {0.937f, 0.310f, 0.420f, 1.0f}; // #EF4F6B X
+        Color yColor = {0.529f, 0.839f, 0.008f, 1.0f}; // #87D602 Y
+        Color zColor = {0.161f, 0.549f, 0.961f, 1.0f}; // #298CF5 Z
+        line((vec3){-lineLength, 0.0f, 0.0f}, (vec3){lineLength, 0.0f, 0.0f}, xColor);
+        line((vec3){0.0f, -lineLength, 0.0f}, (vec3){0.0f, lineLength, 0.0f}, yColor);
+        line((vec3){0.0f, 0.0f, -lineLength}, (vec3){0.0f, 0.0f, lineLength}, zColor);
+        
+        
+        /* // Create a properly textured plane that maintains texture aspect ratio */
+        /* float floorWidth = 400.0f;   // 40 meter wide floor */
+        /* float floorDepth = 200.0f;   // 20 meter deep floor */
+        /* float textureWorldSize = 2.0f; // Each texture covers 2x2 meters */
+        
+        /* // Calculate tiling separately for X and Z to maintain aspect ratio */
+        /* float tileX = floorWidth / textureWorldSize;  // 20 repeats in X */
+        /* float tileZ = floorDepth / textureWorldSize;  // 10 repeats in Z */
+        
+        /* texturedPlane( */
+        /*               (vec3){0.0f, 0.0f, 0.0f}, */
+        /*               (vec2){floorWidth, floorDepth}, */
+        /*               texture4, */
+        /*               WHITE, */
+        /*               tileX,  // Separate X tiling */
+        /*               tileZ   // Separate Z tiling */
+        /*               ); */
+        
+        
+        /* // 3D TEXTURED GEOMETRY - Create a centered floor of cubes */
+        int gridSize = 5;          // 5x5 grid (odd number to have center at 0,0)
+        float cubeSize = 2.0f;     // Size of each cube
+        float spacing = cubeSize;   // No padding - cubes touch each other
+        
+        for (int x = -gridSize/2; x <= gridSize/2; x++) {
+            for (int z = -gridSize/2; z <= gridSize/2; z++) {
+                vec3 cubePos = {
+                    x * spacing,    // This will give positions like: -4, -2, 0, 2, 4
+                    0.0f,          // All cubes on the ground
+                    z * spacing     // Same for Z direction
+                };
+                texturedCube(cubePos, cubeSize, texture3, WHITE);
+            }
+        }
+        
+        // Billboards
         texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE);
-        texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f},texture1, WHITE);
+        texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE);
         texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE);
-        vec3 cubePos = {0.0f, 2.0f, 5.0f};
-        float cubeSize = 2.0f;
-        texturedCube(cubePos, cubeSize, texture2, WHITE);
-
-
+        
+        
         // Upload all geometry to GPU
         renderer_upload();
         renderer_upload_textured3D();  // ADD THIS
+        line_renderer_upload();
         renderer2D_upload();
+        
+        
         
         // RENDER FRAME
         uint32_t frameIndex = context.currentFrame;

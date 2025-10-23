@@ -20,6 +20,9 @@ typedef struct {
 #define GRAY    ((Color){0.5f, 0.5f, 0.5f, 1.0f})
 
 
+Color hexToColor(const char *hex);
+
+
 
 uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties);
 

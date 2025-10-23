@@ -111,3 +111,21 @@ void copyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage i
 
     vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
+
+
+#include <string.h>
+
+Color hexToColor(const char *hex) {
+    int r, g, b, a = 255;
+    size_t len = strlen(hex);
+    
+    if (len == 9) { // #RRGGBBAA
+        sscanf(hex, "#%02x%02x%02x%02x", &r, &g, &b, &a);
+    } else if (len == 7) { // #RRGGBB
+        sscanf(hex, "#%02x%02x%02x", &r, &g, &b);
+    } else { // Default to red if invalid ERROR
+        return (Color){255, 0, 0, 255};
+    }
+    
+    return (Color){r, g, b, a};
+}

@@ -11,6 +11,15 @@ layout(location = 0) out vec4 outColor;
 // Change to set 1, binding 0
 layout(set = 1, binding = 0) uniform sampler2D texSampler;
 
+// Simple directional-based AO approximation
+float cheapAO(vec3 normal) {
+    // Surfaces facing up are brighter, down are darker
+    float upFactor = dot(normal, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
+    
+    // Map to AO range (0.2 = very dark, 1.0 = no occlusion)
+    return mix(0.2, 1.0, upFactor);
+}
+
 void main() {
     // Sample the texture
     vec4 texColor = texture(texSampler, fragTexCoord);
@@ -27,7 +36,10 @@ void main() {
     vec3 groundColor = vec3(0.2, 0.15, 0.1);
     
     float hemiBlend = dot(N, vec3(0, 1, 0)) * 0.5 + 0.5;
-    vec3 ambient = mix(groundColor, skyColor, hemiBlend);
+    
+    // APPLY AMBIENT OCCLUSION HERE - THIS IS WHAT'S MISSING!
+    float ao = fragAmbientOcclusionEnabled != 0 ? cheapAO(N) : 1.0;
+    vec3 ambient = mix(groundColor, skyColor, hemiBlend) * ao;
     
     vec3 sunColor = vec3(1.0, 0.95, 0.8);
     vec3 direct = sunColor * diff;
