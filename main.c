@@ -1791,7 +1791,6 @@ void cleanup(VulkanContext* context) {
         vkDestroyPipeline(context->device, context->graphicsPipelineLine, NULL);
     
 
-
     // 2D VERTEX BUFFER
     if (context->vertexBuffer2D) vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
     if (context->vertexBufferMemory2D) vkFreeMemory(context->device, context->vertexBufferMemory2D, NULL);
@@ -1852,6 +1851,12 @@ vec3 orbitPivot = {0.0f, 0.0f, 0.0f};  // The point we're orbiting around
 float orbitDistance = 10.0f;           // Distance from pivot
 
 
+// Add these global variables at the top with your other globals
+bool keyW = false, keyA = false, keyS = false, keyD = false;
+bool keyQ = false, keyE = false;
+bool keySpace = false, keyShift = false;
+
+
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     Camera* cam = glfwGetWindowUserPointer(window);
     shiftPressed = mods & GLFW_MOD_SHIFT;
@@ -1889,63 +1894,78 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         }
     }
     
-
     if (key == GLFW_KEY_F && action == GLFW_PRESS) {
         vec3 world_origin = {0.0f, 0.0f, 0.0f};
         camera_set_look_at(cam, world_origin);
         printf("Looking at world origin (0, 0, 0)\n");
     }
-
-
     
-    // WASD movement when right mouse is pressed in editor mode
-    if (!cam->active && rightMousePressed) {
-        float speed = 0.1f;
-        
-        vec3 forward, right;
-        glm_vec3_copy(cam->front, forward);
-        forward[1] = 0.0f;  // Keep movement horizontal
-        glm_vec3_normalize(forward);
-        
-        glm_vec3_cross(forward, cam->up, right);
-        glm_vec3_normalize(right);
-        
-        if (key == GLFW_KEY_W && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            vec3 movement;
-            glm_vec3_scale(forward, speed, movement);
-            glm_vec3_add(cam->position, movement, cam->position);
-        }
-        if (key == GLFW_KEY_S && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            vec3 movement;
-            glm_vec3_scale(forward, -speed, movement);
-            glm_vec3_add(cam->position, movement, cam->position);
-        }
-        if (key == GLFW_KEY_A && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            vec3 movement;
-            glm_vec3_scale(right, -speed, movement);
-            glm_vec3_add(cam->position, movement, cam->position);
-        }
-        if (key == GLFW_KEY_D && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            vec3 movement;
-            glm_vec3_scale(right, speed, movement);
-            glm_vec3_add(cam->position, movement, cam->position);
-        }
-        if (key == GLFW_KEY_E && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            cam->position[1] += speed;  // Move up
-        }
-        if (key == GLFW_KEY_Q && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            cam->position[1] -= speed;  // Move down
-        }
-        
-        if (key == GLFW_KEY_SPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            cam->position[1] += speed;
-            printf("Camera UP - pos: (%.2f, %.2f, %.2f)\n", cam->position[0], cam->position[1], cam->position[2]);
-        }
-        if (key == GLFW_KEY_LEFT_SHIFT && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-            cam->position[1] -= speed;
-            printf("Camera DOWN - pos: (%.2f, %.2f, %.2f)\n", cam->position[0], cam->position[1], cam->position[2]);
-        }
+    // Track WASD key states
+    if (key == GLFW_KEY_W) keyW = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_A) keyA = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_S) keyS = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_D) keyD = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_Q) keyQ = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_E) keyE = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_SPACE) keySpace = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_LEFT_SHIFT) keyShift = (action != GLFW_RELEASE);
+}
+
+void process_editor_movement(Camera* cam, float deltaTime) {
+    if (!rightMousePressed) return;
+    
+    float speed = 5.0f * deltaTime;  // Adjust speed as needed
+    
+    vec3 forward, right;
+    
+    // Use the actual camera forward direction (don't zero out Y)
+    glm_vec3_copy(cam->front, forward);
+    glm_vec3_normalize(forward);
+    
+    glm_vec3_cross(forward, cam->up, right);
+    glm_vec3_normalize(right);
+    
+    vec3 movement = {0.0f, 0.0f, 0.0f};
+    
+    // Forward/backward - now uses actual facing direction
+    if (keyW) {
+        vec3 temp;
+        glm_vec3_scale(forward, speed, temp);
+        glm_vec3_add(movement, temp, movement);
     }
+    if (keyS) {
+        vec3 temp;
+        glm_vec3_scale(forward, -speed, temp);
+        glm_vec3_add(movement, temp, movement);
+    }
+    
+    // Left/right
+    if (keyA) {
+        vec3 temp;
+        glm_vec3_scale(right, -speed, temp);
+        glm_vec3_add(movement, temp, movement);
+    }
+    if (keyD) {
+        vec3 temp;
+        glm_vec3_scale(right, speed, temp);
+        glm_vec3_add(movement, temp, movement);
+    }
+    
+    // Up/down - use world up direction
+    if (keyE || keySpace) {
+        vec3 worldUp = {0.0f, 1.0f, 0.0f};
+        vec3 temp;
+        glm_vec3_scale(worldUp, speed, temp);
+        glm_vec3_add(movement, temp, movement);
+    }
+    if (keyQ || keyShift) {
+        vec3 worldUp = {0.0f, 1.0f, 0.0f};
+        vec3 temp;
+        glm_vec3_scale(worldUp, speed, temp);
+        glm_vec3_sub(movement, temp, movement);
+    }
+    
+    glm_vec3_add(cam->position, movement, cam->position);
 }
 
 bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
@@ -2026,7 +2046,6 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 middleMousePressed = false;
                 shiftMiddleMousePressed = false;
                 
-                // ADD THIS LINE: Disable look-at mode when releasing middle mouse
                 cam->use_look_at = false;
                 printf("Orbit mode disabled - returning to normal camera control\n");
             }
@@ -2036,8 +2055,9 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         if (button == GLFW_MOUSE_BUTTON_RIGHT) {
             if (action == GLFW_PRESS) {
                 rightMousePressed = true;
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                // Get initial position BEFORE disabling cursor
                 glfwGetCursorPos(window, &lastX, &lastY);
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             } else if (action == GLFW_RELEASE) {
                 rightMousePressed = false;
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
@@ -2066,34 +2086,35 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
         lastX = xpos;
         lastY = ypos;
         firstMouse = false;
+        return;  // Skip first frame to avoid jump
     }
     
     double xoffset = xpos - lastX;
     double yoffset = lastY - ypos;
-    lastX = xpos;
-    lastY = ypos;
     
     if (cam->active) {
-        // Normal FPS camera control
+        // Normal FPS camera control - always update lastX/lastY
+        lastX = xpos;
+        lastY = ypos;
         camera_process_mouse(cam, xoffset, yoffset);
     }
     else if (rightMousePressed) {
-        // Right mouse: freelook + WASD movement in editor mode
+        // Right mouse: freelook in editor mode - always update lastX/lastY
+        lastX = xpos;
+        lastY = ypos;
         camera_process_mouse(cam, xoffset, yoffset);
     }
     else if (middleMousePressed) {
         if (shiftMiddleMousePressed) {
-            // SHIFT + MIDDLE MOUSE: PAN (Godot-style)
+            // SHIFT + MIDDLE MOUSE: PAN
             float panSpeed = 0.005f;
             
-            // Calculate camera-relative vectors
             vec3 right, up;
             glm_vec3_cross(cam->front, cam->up, right);
             glm_vec3_normalize(right);
             glm_vec3_copy(cam->up, up);
             glm_vec3_normalize(up);
             
-            // Pan opposite to mouse direction (intuitive dragging)
             vec3 panMovement = {0.0f, 0.0f, 0.0f};
             
             vec3 rightMove;
@@ -2107,17 +2128,20 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
             glm_vec3_add(cam->position, panMovement, cam->position);
             
         } else {
-            // MIDDLE MOUSE ONLY: ORBIT AROUND GROUND INTERSECTION POINT
+            // MIDDLE MOUSE ONLY: ORBIT
             float orbitSpeed = 0.01f;
-            
-            // Use the new orbit function
             camera_orbit_around_point(cam, orbitPivot,
                                       (float)(xoffset * orbitSpeed),
                                       (float)(yoffset * orbitSpeed));
-            
-            printf("Orbiting around: (%.2f, %.2f, %.2f)\n",
-                   orbitPivot[0], orbitPivot[1], orbitPivot[2]);
         }
+        
+        lastX = xpos;
+        lastY = ypos;
+    }
+    else {
+        // Not doing anything - just update last position to avoid jumps
+        lastX = xpos;
+        lastY = ypos;
     }
 }
 
@@ -2541,6 +2565,11 @@ int main() {
         camera_process_keyboard(&camera, context.window, delta_time);
         camera_update(&camera);
 
+        if (!camera.active) {
+            process_editor_movement(&camera, delta_time);
+        }
+
+
         
         // Update camera uniform buffer
         UniformBufferObject ubo;
@@ -2587,7 +2616,7 @@ int main() {
         
         
         // Render axes 
-        float lineLength = 1000.0f; // Very long lines to appear "infinite"
+        float lineLength = 10000.0f; // Very long lines to appear "infinite"
         Color xColor = {0.937f, 0.310f, 0.420f, 1.0f}; // #EF4F6B X
         Color yColor = {0.529f, 0.839f, 0.008f, 1.0f}; // #87D602 Y
         Color zColor = {0.161f, 0.549f, 0.961f, 1.0f}; // #298CF5 Z

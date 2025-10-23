@@ -45,9 +45,9 @@ void main() {
     vec3 finalColor = fragColor.rgb * (ambient + direct);
     
     // Simple distance fog
-    float dist = length(fragWorldPos);
-    float fogFactor = exp(-dist * 0.01);
-    finalColor = mix(skyColor * 0.5, finalColor, fogFactor);
+    // float dist = length(fragWorldPos);
+    // float fogFactor = exp(-dist * 0.01);
+    // finalColor = mix(skyColor * 0.5, finalColor, fogFactor);
     
     outColor = vec4(finalColor, fragColor.a);
 }

@@ -198,7 +198,7 @@ void camera_process_keyboard(Camera* cam, GLFWwindow* window, float delta_time) 
 
 void camera_process_mouse(Camera* cam, double xoffset, double yoffset) {
     // Only process mouse if camera is active
-    if (!cam->active) return;
+    /* if (!cam->active) return; */
     
     xoffset *= cam->mouse_sensitivity;
     yoffset *= cam->mouse_sensitivity;
