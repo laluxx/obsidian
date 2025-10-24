@@ -9,7 +9,7 @@ INCLUDES = -I/usr/include
 LIBRARIES = -L/usr/lib/x86_64-linux-gnu
 
 # Project settings
-TARGET = revox
+TARGET = obsidian
 SOURCES = $(wildcard *.c)
 OBJECTS = $(SOURCES:.c=.o)
 

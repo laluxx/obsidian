@@ -117,51 +117,6 @@ void vertex(vec3 pos, vec4 color) {
     vertex_count++;
 }
 
-/* void line(vec3 start, vec3 end, Color color, float thickness) { */
-/*     if (vertex_count + 6 >= MAX_VERTICES) return; */
-    
-/*     vec3 direction; */
-/*     glm_vec3_sub(end, start, direction); */
-/*     glm_vec3_normalize(direction); */
-    
-/*     // Create a perpendicular vector for line thickness */
-/*     vec3 perpendicular; */
-/*     if (fabs(direction[1]) > 0.9f) { */
-/*         // If line is mostly vertical, use X axis for perpendicular */
-/*         glm_vec3_copy((vec3){1.0f, 0.0f, 0.0f}, perpendicular); */
-/*     } else { */
-/*         // Otherwise use cross product with up vector */
-/*         glm_vec3_cross(direction, (vec3){0.0f, 1.0f, 0.0f}, perpendicular); */
-/*     } */
-/*     glm_vec3_normalize(perpendicular); */
-/*     glm_vec3_scale(perpendicular, thickness / 2.0f, perpendicular); */
-    
-/*     vec3 normal = {0.0f, 1.0f, 0.0f}; // Default normal */
-    
-/*     // Create a thin rectangle representing the line */
-/*     vec3 a, b, c, d; */
-/*     glm_vec3_sub(start, perpendicular, a); */
-/*     glm_vec3_add(start, perpendicular, b); */
-/*     glm_vec3_sub(end, perpendicular, c); */
-/*     glm_vec3_add(end, perpendicular, d); */
-    
-/*     // First triangle */
-/*     vertex_with_normal(a, color, normal); */
-/*     vertex_with_normal(b, color, normal); */
-/*     vertex_with_normal(c, color, normal); */
-    
-/*     // Second triangle */
-/*     vertex_with_normal(b, color, normal); */
-/*     vertex_with_normal(d, color, normal); */
-/*     vertex_with_normal(c, color, normal); */
-/* } */
-
-/* void line(vec3 a, vec3 b, Color color) { */
-/*     vec3 normal = {0.0f, 1.0f, 0.0f}; */
-/*     vertex_with_normal(a, color, normal); */
-/*     vertex_with_normal(b, color, normal); */
-/* } */
-
 void triangle(vec3 a, vec3 b, vec3 c, Color color) {
     vec3 edge1, edge2, normal;
     glm_vec3_sub(b, a, edge1);
@@ -211,44 +166,6 @@ void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float
     vertex_count_3D_textured += 6;
     texture3DBatches[batchIndex].vertexCount += 6;
 }
-
-/* void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileFactor) { */
-/*     if (vertex_count_3D_textured + 6 >= MAX_VERTICES || !texture || !texture->loaded) { */
-/*         return; */
-/*     } */
-
-/*     float w = size[0] / 2.0f; */
-/*     float h = size[1] / 2.0f; */
-/*     float x = origin[0], y = origin[1], z = origin[2]; */
-
-/*     Vertex plane[6] = { */
-/*         // First triangle */
-/*         {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileFactor}, 0}, */
-/*         {{x+w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileFactor, tileFactor}, 0}, */
-/*         {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileFactor, 0.0f}, 0}, */
-        
-/*         // Second triangle */
-/*         {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileFactor}, 0}, */
-/*         {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileFactor, 0.0f}, 0}, */
-/*         {{x-w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, 0} */
-/*     }; */
-
-/*     // Batch management (same as your existing code) */
-/*     int batchIndex = -1; */
-/*     if (texture3DBatchCount > 0 && texture3DBatches[texture3DBatchCount - 1].texture == texture) { */
-/*         batchIndex = texture3DBatchCount - 1; */
-/*     } else { */
-/*         if (texture3DBatchCount >= MAX_TEXTURES) return; */
-/*         batchIndex = texture3DBatchCount++; */
-/*         texture3DBatches[batchIndex].texture = texture; */
-/*         texture3DBatches[batchIndex].startVertex = vertex_count_3D_textured; */
-/*         texture3DBatches[batchIndex].vertexCount = 0; */
-/*     } */
-
-/*     memcpy(&vertices3D_textured[vertex_count_3D_textured], plane, sizeof(plane)); */
-/*     vertex_count_3D_textured += 6; */
-/*     texture3DBatches[batchIndex].vertexCount += 6; */
-/* } */
 
 void plane(vec3 origin, vec2 size, Color color) {
     float w = size[0] / 2.0f;
