@@ -1,25 +1,14 @@
 #include "renderer.h"
 #include "scene.h"
 #include "context.h"
+#include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define TINYOBJ_LOADER_C_IMPLEMENTATION
 #include "tinyobj_loader_c.h"
 
-
-uint32_t find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-    fprintf(stderr, "Failed to find suitable memory type!\n");
-    exit(EXIT_FAILURE);
-}
 
 static void file_reader(void* ctx, const char* filename, int is_mtl, const char* obj_filename, char** out_buf, size_t* out_len) {
     FILE* f = fopen(filename, "rb");
@@ -40,8 +29,9 @@ static void file_reader(void* ctx, const char* filename, int is_mtl, const char*
 
 
 
-Mesh load_obj(const char* path, vec4 color){
+Mesh load_obj(const char* path, char* name, vec4 color){
     Mesh mesh = {0};
+    mesh.name = name;
     glm_mat4_identity(mesh.model);
     tinyobj_attrib_t attrib;
     tinyobj_shape_t* shapes = NULL;
@@ -144,7 +134,7 @@ Mesh load_obj(const char* path, vec4 color){
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
-        .memoryTypeIndex = find_memory_type(context.physicalDevice,
+        .memoryTypeIndex = findMemoryType(context.physicalDevice,
             memRequirements.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
     };
@@ -164,7 +154,7 @@ Mesh load_obj(const char* path, vec4 color){
 
     mesh.vertexCount = vertexCount;
 
-    printf("Loaded mesh '%s': %zu vertices, %zu triangles\n", path, vertexCount, vertexCount / 3);
+    printf("Loaded mesh '%s': %zu vertices, %zu triangles, named: %s\n", path, vertexCount, vertexCount / 3, mesh.name);
 
     free(vertices);
 

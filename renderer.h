@@ -5,7 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <cglm/cglm.h>
 
-#define MAX_VERTICES 65536 * 4
+#define MAX_VERTICES 65536 * 32
 #define MAX_TEXTURES 256  // Maximum number of textures we can handle
 
 extern VkDescriptorSet descriptorSet;
@@ -40,7 +40,6 @@ typedef struct {
     uint32_t width, height;
     bool loaded;
 } Texture2D;
-
 
 typedef struct {
     Texture2D* texture;
@@ -81,14 +80,22 @@ typedef struct {
     int padding[3];
 } PushConstants;
 
+
 extern PushConstants pushConstants;
 
 typedef struct {
     VkBuffer vertexBuffer;
     VkDeviceMemory vertexBufferMemory;
     uint32_t vertexCount;
-    mat4 model; 
+    mat4 model;              // World transform
+    mat4 local_transform;    // Local transform (for animation)
+    void* node;              // cgltf_node* (stored as void* to avoid header dependency)
+    char *name;
+    int32_t textureIndex;    // Index into texture pool (-1 = no texture)
+    Texture2D* texture;      // Direct pointer for convenience
+    int32_t materialIndex;   // Index into material pool (-1 = no material)
 } Mesh;
+
 
 typedef struct {
     Mesh* items;
@@ -110,11 +117,8 @@ void renderer_clear(void);
 // Primitives
 void vertex_with_normal(vec3 pos, Color color, vec3 normal);
 void vertex(vec3 pos, vec4 color);
-/* void line(vec3 a, vec3 b, Color color); */
-/* void line(vec3 start, vec3 end, Color color, float thickness); */
 void triangle(vec3 a, vec3 b, vec3 c, Color color);
 void plane(vec3 origin, vec2 size, Color color);
-/* void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileFactor); */
 void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileX, float tileZ);
 void cube(vec3 origin, float size, Color color);
 void texturedCube(vec3 position, float size, Texture2D* texture, Color tint);
@@ -128,7 +132,7 @@ void meshes_add(Meshes* meshes, Mesh mesh);
 void meshes_remove(Meshes* meshes, size_t index);
 void meshes_destroy(VkDevice device, Meshes* meshes);
 void meshes_draw(VkCommandBuffer cmd, Meshes* meshes);
-
+Mesh* get_mesh(const char* name);
 
 /// LINE
 

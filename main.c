@@ -3,6 +3,9 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include "gltf_loader.h"
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +43,8 @@ const char* validationLayers[VALIDATION_LAYERS_COUNT] = {
 const char** validationLayers = NULL;
 #endif
 
+
+// TODO FIX panning up and wown when loooking from upside down 
 
 VkDescriptorPool descriptorPool;
 VkDescriptorSet descriptorSet;
@@ -1842,6 +1847,7 @@ bool ambientOcclusionEnabled = true;
 void screenshot( VkDevice device, VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue queue, VkImage srcImage, VkFormat imageFormat, uint32_t width, uint32_t height, const char* filename);
 
 
+
 bool middleMousePressed = false;
 bool rightMousePressed = false;
 bool shiftMiddleMousePressed = false;
@@ -1877,6 +1883,20 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                    );
     }
     
+    // Arrow keys for camera snapping
+    if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
+        camera_snap_to_next_angle(cam, true, false);  // Counter-clockwise
+    }
+    if (key == GLFW_KEY_RIGHT && action == GLFW_PRESS) {
+        camera_snap_to_next_angle(cam, false, false);   // Clockwise
+    }
+    if (key == GLFW_KEY_UP && action == GLFW_PRESS) {
+        camera_snap_to_next_angle(cam, true, true);   // Pitch up (more negative)
+    }
+    if (key == GLFW_KEY_DOWN && action == GLFW_PRESS) {
+        camera_snap_to_next_angle(cam, false, true);    // Pitch down (more positive)
+    }
+    
     if (key == GLFW_KEY_T && action == GLFW_PRESS) {
         ambientOcclusionEnabled = !ambientOcclusionEnabled;
         printf("Ambient Occlusion: %s\n", ambientOcclusionEnabled ? "ENABLED" : "DISABLED");
@@ -1887,7 +1907,14 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         
         if (cam->active) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            printf("Camera control ENABLED\n");
+            
+            // When entering FPS mode, disable orbit mode and sync angles
+            if (cam->use_look_at) {
+                camera_disable_orbit_mode(cam);
+                printf("Entered FPS mode - orbit disabled, angles synced\n");
+            } else {
+                printf("Camera control ENABLED\n");
+            }
         } else {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             printf("Camera control DISABLED - Editor mode\n");
@@ -2027,7 +2054,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 
                 shiftMiddleMousePressed = (mods & GLFW_MOD_SHIFT);
                 
-                // If not panning, calculate the pivot point for orbiting
+                // 1If not panning, calculate the pivot point for orbiting
                 if (!shiftMiddleMousePressed) {
                     vec3 hitPoint;
                     bool hitGround = raycast_to_ground(cam, hitPoint);
@@ -2081,17 +2108,17 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
 
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     Camera* cam = glfwGetWindowUserPointer(window);
-    
+
     if (firstMouse) {
         lastX = xpos;
         lastY = ypos;
         firstMouse = false;
         return;  // Skip first frame to avoid jump
     }
-    
+
     double xoffset = xpos - lastX;
     double yoffset = lastY - ypos;
-    
+
     if (cam->active) {
         // Normal FPS camera control - always update lastX/lastY
         lastX = xpos;
@@ -2106,27 +2133,32 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     }
     else if (middleMousePressed) {
         if (shiftMiddleMousePressed) {
+            if (cam->use_look_at) {
+                camera_disable_orbit_mode(cam);
+                printf("Panning - orbit mode disabled\n");
+            }
             // SHIFT + MIDDLE MOUSE: PAN
+  
             float panSpeed = 0.005f;
-            
+
             vec3 right, up;
             glm_vec3_cross(cam->front, cam->up, right);
             glm_vec3_normalize(right);
             glm_vec3_copy(cam->up, up);
             glm_vec3_normalize(up);
-            
+
             vec3 panMovement = {0.0f, 0.0f, 0.0f};
-            
+
             vec3 rightMove;
             glm_vec3_scale(right, (float)-xoffset * panSpeed, rightMove);
             glm_vec3_add(panMovement, rightMove, panMovement);
-            
+
             vec3 upMove;
             glm_vec3_scale(up, (float)-yoffset * panSpeed, upMove);
             glm_vec3_add(panMovement, upMove, panMovement);
-            
+
             glm_vec3_add(cam->position, panMovement, cam->position);
-            
+
         } else {
             // MIDDLE MOUSE ONLY: ORBIT
             float orbitSpeed = 0.01f;
@@ -2134,7 +2166,7 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
                                       (float)(xoffset * orbitSpeed),
                                       (float)(yoffset * orbitSpeed));
         }
-        
+
         lastX = xpos;
         lastY = ypos;
     }
@@ -2145,30 +2177,32 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     }
 }
 
+
+
 void createUniformBuffer(VulkanContext* context) {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-    
+
     VkBufferCreateInfo bufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = bufferSize,
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
-    
+
     vkCreateBuffer(context->device, &bufferInfo, NULL, &uniformBuffer);
-    
+
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(context->device, uniformBuffer, &memRequirements);
-    
+
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = 0
     };
-    
+
     allocInfo.memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    
+
     vkAllocateMemory(context->device, &allocInfo, NULL, &uniformBufferMemory);
     vkBindBufferMemory(context->device, uniformBuffer, uniformBufferMemory, 0);
 }
@@ -2182,29 +2216,29 @@ void createDescriptorSetLayout(VulkanContext* context) {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .pImmutableSamplers = NULL
     };
-    
+
     VkDescriptorSetLayoutCreateInfo layoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
         .pBindings = &uboLayoutBinding
     };
-    
+
     vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout);
 }
 
 void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     VkCommandBuffer cmd = context->commandBuffers[imageIndex];
-    
+
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
     };
-    
+
     vkBeginCommandBuffer(cmd, &beginInfo);
-    
+
     VkClearValue clearValues[2];
     clearValues[0].color = (VkClearColorValue){{0.0f, 0.0f, 0.0f, 1.0f}};
     clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
-    
+
     VkRenderPassBeginInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = context->renderPass,
@@ -2216,29 +2250,33 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
         .clearValueCount = 2,
         .pClearValues = clearValues,
     };
-    
+
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    
+
     // Set AO state once globally for all 3D rendering
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
-    
+
     // --- RENDER 3D SOLID GEOMETRY (TRIANGLES) ---
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 
                             0, 1, &descriptorSet, 0, NULL);
-    
-    // Draw scene meshes (OBJ models)
-    for (size_t i = 0; i < scene.meshes.count; i++) {
-        Mesh* mesh_ptr = &scene.meshes.items[i];
-        mesh(cmd, mesh_ptr);
-    }
-    
+
+    // Draw all meshes
+    meshes_draw(cmd, &scene.meshes);
+
+    // Or specify each one 
+    /* Mesh *teapot = get_mesh("teapot"); */
+    /* Mesh *cow = get_mesh("cow"); */
+    /* mesh(cmd, teapot); */
+    /* mesh(cmd, cow); */
+
+
     // Draw immediate mode 3D triangle content (cubes, spheres, etc.)
     renderer_draw(cmd);
-    
+
     // --- RENDER 3D TEXTURED GEOMETRY ---
     renderer_draw_textured3D(cmd);
-    
+
     // --- RENDER LINES WITH LINE PIPELINE ---
     if (context->graphicsPipelineLine && lineVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipelineLine);
@@ -2246,18 +2284,13 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
                                 0, 1, &descriptorSet, 0, NULL);
         line_renderer_draw(cmd);  // Use the dedicated line renderer
     }
-    
+
     // --- RENDER 2D CONTENT ON TOP (NO DEPTH TEST) ---
     renderer2D_draw(cmd);
-    
+
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
 }
-
-vec4 red    = {1.0f, 0.0f, 0.0f, 1.0f};
-vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
-vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
-vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -2275,36 +2308,36 @@ void screenshot(
                 const char* filename)
 {
     VkResult err;
-    
+
     // 1. Create CPU-accessible buffer
     VkDeviceSize imageSize = width * height * 4;
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingBufferMemory;
-    
+
     VkBufferCreateInfo bufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = imageSize,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
-    
+
     err = vkCreateBuffer(device, &bufferInfo, NULL, &stagingBuffer);
     assert(err == VK_SUCCESS);
-    
+
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
-    
+
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
     };
-    
+
     err = vkAllocateMemory(device, &allocInfo, NULL, &stagingBufferMemory);
     assert(err == VK_SUCCESS);
     vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
-    
+
     // 2. Create command buffer for copy
     VkCommandBufferAllocateInfo cmdBufAllocInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -2312,16 +2345,16 @@ void screenshot(
         .commandPool = commandPool,
         .commandBufferCount = 1,
     };
-    
+
     VkCommandBuffer cmdBuf;
     vkAllocateCommandBuffers(device, &cmdBufAllocInfo, &cmdBuf);
-    
+
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     vkBeginCommandBuffer(cmdBuf, &beginInfo);
-    
+
     // 3. Transition image layout if necessary (skip if already TRANSFER_SRC_OPTIMAL)
     VkImageMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -2348,7 +2381,7 @@ void screenshot(
                          0, NULL,
                          0, NULL,
                          1, &barrier);
-    
+
     // 4. Copy image to buffer
     VkBufferImageCopy region = {
         .bufferOffset = 0,
@@ -2363,9 +2396,9 @@ void screenshot(
         .imageOffset = {0, 0, 0},
         .imageExtent = {width, height, 1},
     };
-    
+
     vkCmdCopyImageToBuffer(cmdBuf, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &region);
-    
+
     // 5. Barrier to host read
     VkBufferMemoryBarrier bufBarrier = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -2385,9 +2418,9 @@ void screenshot(
                          0, NULL,
                          1, &bufBarrier,
                          0, NULL);
-    
+
     vkEndCommandBuffer(cmdBuf);
-    
+
     // 6. Submit and wait
     VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -2396,11 +2429,11 @@ void screenshot(
     };
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
-    
+
     // 7. Map buffer and save with stb_image_write
     void* data;
     vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-    
+
     // NOTE: Vulkan default is BGRA, convert to RGBA for PNG
     uint8_t* rgba_pixels = malloc(imageSize);
     for (uint32_t i = 0; i < width * height; ++i) {
@@ -2411,13 +2444,13 @@ void screenshot(
         dst[2] = src[0]; // B
         dst[3] = src[3]; // A
     }
-    
+
     stbi_write_png(filename, width, height, 4, rgba_pixels, width * 4);
-    
+
     free(rgba_pixels);
-    
+
     vkUnmapMemory(device, stagingBufferMemory);
-    
+
     // 8. Cleanup
     vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
     vkDestroyBuffer(device, stagingBuffer, NULL);
@@ -2425,55 +2458,61 @@ void screenshot(
     printf("took screenshot");
 }
 
+                               
+
+vec4 red    = {1.0f, 0.0f, 0.0f, 1.0f};
+vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
+vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
+vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
+
 int main() {
     context.currentFrame = 0;
-    
+
     initWindow(&context);
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    
+
     createInstance(&context);
-    
+
     Camera camera;
     vec3 camera_pos = {0.0f, 3.0f, 0.0f}; // 2.0f
     vec3 camera_target = {0.0f, 2.0f, 0.0f};
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
-    
+
     camera.active = true;
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    
+
     glfwSetWindowUserPointer(context.window, &camera);
     glfwSetCursorPosCallback(context.window, mouse_callback);
     glfwSetKeyCallback(context.window, key_callback);
-    glfwSetMouseButtonCallback(context.window, mouse_button_callback);  // ADD
-    glfwSetScrollCallback(context.window, scroll_callback);             // ADD
-    
-    
-    
+    glfwSetMouseButtonCallback(context.window, mouse_button_callback);
+    glfwSetScrollCallback(context.window, scroll_callback);
+
+
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface\n");
         exit(EXIT_FAILURE);
     }
-    
+
     pickPhysicalDevice(&context);
     createLogicalDevice(&context);
     createSwapChain(&context);
     createImageViews(&context);
     createDepthResources(&context);
-    
+
     createRenderPass(&context);
-    
+
     createUniformBuffer(&context);
     createDescriptorSetLayout(&context);
-    
+
     createGraphicsPipeline(&context);
-    
+
     // 2D descriptor stuff FIRST (before 3D textured pipeline)
     create2DDescriptorSetLayout(&context);
     create2DDescriptorPool(&context);
-    
+
     // THEN 3D textured pipeline (needs 2D descriptor layout)
     create3DTexturedGraphicsPipeline(&context);
-    
+
     // THEN rest of 2D
     create2DGraphicsPipeline(&context);
     createTextured2DGraphicsPipeline(&context);
@@ -2535,11 +2574,11 @@ int main() {
     
     scene_init(&scene);
     
-    load_obj("./assets/teapot.obj", red);
-    load_obj("./assets/cow.obj", blue);
+    /* load_obj("./assets/teapot.obj", "teapot",  red); */
+    /* load_obj("./assets/cow.obj", "cow", blue); */
     
     texture_pool_init();
-    
+
     // Load textures
     int32_t tex1 = texture_pool_add(&context, "./assets/textures/puta.jpg");
     int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_01.png");
@@ -2556,20 +2595,36 @@ int main() {
     float maxLineWidth = properties.limits.lineWidthRange[1];
     printf("MAX supported line width: %f\n", maxLineWidth);
     
+
+    load_gltf_complete("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene);
+    /* load_gltf_complete("./assets/gltf/AnimatedMorphSphere.glb", &scene); */
+    /* load_gltf_complete("./assets/gltf/AnimatedMorphCube.glb", &scene); */
+    
+    
+    /* load_gltf_complete("./assets/gltf/CesiumMan.glb", &scene); */
+    /* load_gltf_complete("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); */
+    /* load_gltf_complete("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); */
+    /* load_gltf_complete("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
+    /* load_gltf_complete("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME */
+    /* load_gltf_complete("./assets/gltf/MorphStressTest.glb", &scene); */
+    // Both work the same way!
+    
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
         delta_time = current_frame - last_frame;
         last_frame = current_frame;
         
+        animate_scene(&scene, current_frame);
+        
+        
         glfwPollEvents();
         camera_process_keyboard(&camera, context.window, delta_time);
         camera_update(&camera);
-
+        
         if (!camera.active) {
             process_editor_movement(&camera, delta_time);
         }
-
-
+        
         
         // Update camera uniform buffer
         UniformBufferObject ubo;
@@ -2586,10 +2641,10 @@ int main() {
         renderer2D_clear();
         
         // 3D GEOMETRY
-        vec3 v0 = { -0.5f, -0.5f, 0.0f };
-        vec3 v1 = {  0.5f, -0.5f, 0.0f };
-        vec3 v2 = {  0.5f,  0.5f, 0.0f };
-        vec3 v3 = { -0.5f,  0.5f, 0.0f };
+        vec3 v0 = { -0.03f, -0.03f, 0.0f };
+        vec3 v1 = {  0.03f, -0.03f, 0.0f };
+        vec3 v2 = {  0.03f,  0.03f, 0.0f };
+        vec3 v3 = { -0.03f,  0.03f, 0.0f };
         vec3 center = { 0.0f, 0.0f, 0.0f };
         triangle(v0, center, v1, RED);
         triangle(v1, center, v2, GREEN);
@@ -2599,10 +2654,12 @@ int main() {
         sphere((vec3){0, 0, 30}, 5, 80, 80, YELLOW);
         
         // Rotate the cow
-        static float cow_rotation = 0.0f;
-        cow_rotation += delta_time;
-        glm_mat4_identity(scene.meshes.items[1].model);
-        glm_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f});
+        /* static float cow_rotation = 0.0f; */
+        /* cow_rotation += delta_time; */
+        /* mat4_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f}); */
+        
+        
+        
         
         // 2D GEOMETRY
         quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);
@@ -2611,8 +2668,8 @@ int main() {
         quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN);
         
         texture2D((vec2){100, 100}, (vec2){200, 200}, texture1, WHITE);
-        texture2D((vec2){500, 100}, (vec2){150, 150}, texture1, WHITE);
-        texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE);
+        texture2D((vec2){500, 100}, (vec2){150, 150}, texture2, WHITE);
+        /* texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE); */
         
         
         // Render axes 
@@ -2645,20 +2702,20 @@ int main() {
         
         
         /* // 3D TEXTURED GEOMETRY - Create a centered floor of cubes */
-        int gridSize = 5;          // 5x5 grid (odd number to have center at 0,0)
-        float cubeSize = 2.0f;     // Size of each cube
-        float spacing = cubeSize;   // No padding - cubes touch each other
+        /* int gridSize = 5;          // 5x5 grid (odd number to have center at 0,0) */
+        /* float cubeSize = 2.0f;     // Size of each cube */
+        /* float spacing = cubeSize;   // No padding - cubes touch each other */
         
-        for (int x = -gridSize/2; x <= gridSize/2; x++) {
-            for (int z = -gridSize/2; z <= gridSize/2; z++) {
-                vec3 cubePos = {
-                    x * spacing,    // This will give positions like: -4, -2, 0, 2, 4
-                    0.0f,          // All cubes on the ground
-                    z * spacing     // Same for Z direction
-                };
-                texturedCube(cubePos, cubeSize, texture3, WHITE);
-            }
-        }
+        /* for (int x = -gridSize/2; x <= gridSize/2; x++) { */
+        /*     for (int z = -gridSize/2; z <= gridSize/2; z++) { */
+        /*         vec3 cubePos = { */
+        /*             x * spacing,    // This will give positions like: -4, -2, 0, 2, 4 */
+        /*             0.0f,          // All cubes on the ground */
+        /*             z * spacing     // Same for Z direction */
+        /*         }; */
+        /*         texturedCube(cubePos, cubeSize, texture3, WHITE); */
+        /*     } */
+        /* } */
         
         // Billboards
         texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE);

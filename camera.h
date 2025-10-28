@@ -31,6 +31,11 @@ void camera_process_keyboard(Camera* cam, GLFWwindow* window, float delta_time);
 void camera_process_mouse(Camera* cam, double xoffset, double yoffset);
 void camera_set_look_at(Camera *cam, vec3 look_at);
 void camera_orbit_around_point(Camera* cam, vec3 pivot_point, float delta_yaw, float delta_pitch);
+void camera_disable_orbit_mode(Camera* cam);
 
+
+/// GIZMO SNAP
+
+void camera_snap_to_next_angle(Camera* cam, bool forward, bool vertical);
 
 #endif

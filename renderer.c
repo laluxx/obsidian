@@ -3,6 +3,7 @@
 #include "renderer.h"
 #include "context.h"
 #include "common.h"
+#include "scene.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -420,22 +421,56 @@ void renderer_clear() {
     vertex_count = 0;
 }
 
+// WITH TEXTURES
 void mesh(VkCommandBuffer cmd, Mesh* mesh) {
     glm_mat4_copy(mesh->model, pushConstants.model);
     
-    vkCmdPushConstants(
-        cmd,
-        context.pipelineLayout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0,
-        sizeof(PushConstants),
-        &pushConstants
-    );
+    if (mesh->texture && mesh->texture->loaded) {
+        // Use textured 3D pipeline
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured3D);
+        
+        // Bind descriptor sets
+        VkDescriptorSet descriptorSets[2] = {
+            descriptorSet,              // Set 0: Camera UBO
+            mesh->texture->descriptorSet // Set 1: Texture
+        };
+        
+        vkCmdBindDescriptorSets(
+            cmd,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            context.pipelineLayoutTextured3D,
+            0, 2,
+            descriptorSets,
+            0, NULL
+        );
+        
+        vkCmdPushConstants(
+            cmd,
+            context.pipelineLayoutTextured3D,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(PushConstants),
+            &pushConstants
+        );
+    } else {
+        // Use regular colored pipeline
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline);
+        
+        vkCmdPushConstants(
+            cmd,
+            context.pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(PushConstants),
+            &pushConstants
+        );
+    }
     
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vertexBuffer, offsets);
     vkCmdDraw(cmd, mesh->vertexCount, 1, 0, 0);
 }
+
 
 void mesh_destroy(VkDevice device, Mesh* mesh) {
     if (mesh->vertexBuffer) vkDestroyBuffer(device, mesh->vertexBuffer, NULL);
@@ -482,6 +517,18 @@ void meshes_destroy(VkDevice device, Meshes* meshes) {
     meshes->items = NULL;
     meshes->count = 0;
     meshes->capacity = 0;
+}
+
+Mesh* get_mesh(const char* name) {
+    if (!name) return NULL;
+    
+    for (size_t i = 0; i < scene.meshes.count; i++) {
+        if (scene.meshes.items[i].name && 
+            strcmp(scene.meshes.items[i].name, name) == 0) {
+            return &scene.meshes.items[i];
+        }
+    }
+    return NULL;
 }
 
 // --- 2D Renderer ---
