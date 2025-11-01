@@ -10,6 +10,7 @@ typedef struct {
     vec3* translations;
     versor* rotations;
     vec3* scales;
+    float* weights;   // For morph
 } AnimationChannel;
 
 typedef struct {
@@ -20,13 +21,23 @@ typedef struct {
 } Animation;
 
 typedef struct {
-    Meshes meshes;
     Animation* animations;
     size_t animation_count;
-    void* gltf_data;  // Store cgltf_data for runtime
+    cgltf_data* gltf_data;
+    size_t mesh_start_index;  // First mesh from this glTF
+    size_t mesh_count;        // Number of meshes from this glTF
+} GLTFInstance;
+
+typedef struct {
+    Meshes meshes;
+    GLTFInstance* gltf_instances;
+    size_t gltf_instance_count;
+    size_t gltf_instance_capacity;
 } Scene;
 
 extern Scene scene;
 
 void scene_init(Scene *s);
 void scene_cleanup(Scene *s);
+
+void print_scene_meshes();

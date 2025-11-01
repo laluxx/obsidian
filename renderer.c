@@ -65,6 +65,12 @@ static VkDeviceMemory vertexBufferMemory;
 
 PushConstants pushConstants;
 
+Vertex vertices3D_textured[MAX_VERTICES];
+uint32_t vertex_count_3D_textured = 0;
+Texture3DBatch texture3DBatches[MAX_TEXTURES];
+uint32_t texture3DBatchCount = 0;
+
+
 void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool, VkQueue queue) {
     device = dev;
     physicalDevice = physDev;
@@ -421,9 +427,69 @@ void renderer_clear() {
     vertex_count = 0;
 }
 
-// WITH TEXTURES
+void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
+    if (meshes->count <= 1) return;
+    
+    // Simple two-pass approach:
+    // 1. Count how many non-blended meshes we have
+    size_t non_blended_count = 0;
+    for (size_t i = 0; i < meshes->count; i++) {
+        if (meshes->items[i].alpha_mode != 2) { // Not BLEND mode
+            non_blended_count++;
+        }
+    }
+    
+    // 2. Move all blended meshes to the end of the array
+    size_t write_idx = 0;
+    for (size_t i = 0; i < meshes->count; i++) {
+        if (meshes->items[i].alpha_mode != 2) { // Not BLEND - keep at front
+            if (i != write_idx) {
+                // Swap meshes
+                Mesh temp = meshes->items[write_idx];
+                meshes->items[write_idx] = meshes->items[i];
+                meshes->items[i] = temp;
+            }
+            write_idx++;
+        }
+    }
+    
+    // 3. Sort blended meshes by distance from camera (back-to-front)
+    for (size_t i = non_blended_count; i < meshes->count - 1; i++) {
+        for (size_t j = i + 1; j < meshes->count; j++) {
+            // Extract position from model matrix
+            vec3 pos_i = {
+                meshes->items[i].model[3][0],
+                meshes->items[i].model[3][1], 
+                meshes->items[i].model[3][2]
+            };
+            vec3 pos_j = {
+                meshes->items[j].model[3][0],
+                meshes->items[j].model[3][1],
+                meshes->items[j].model[3][2]
+            };
+            
+            // Calculate distances from camera
+            float dist_i = glm_vec3_distance(cameraPos, pos_i);
+            float dist_j = glm_vec3_distance(cameraPos, pos_j);
+            
+            // Sort back-to-front (farthest first)
+            if (dist_i < dist_j) {
+                Mesh temp = meshes->items[i];
+                meshes->items[i] = meshes->items[j];
+                meshes->items[j] = temp;
+            }
+        }
+    }
+    
+    /* printf("Sorted %zu meshes: %zu opaque/mask, %zu blended\n",  */
+    /*        meshes->count, non_blended_count, meshes->count - non_blended_count); */
+}
+
+
+// WITH TEXTURES AND UNLIT
 void mesh(VkCommandBuffer cmd, Mesh* mesh) {
     glm_mat4_copy(mesh->model, pushConstants.model);
+    pushConstants.isUnlit = mesh->is_unlit ? 1 : 0;  // NEW: Set unlit flag
     
     if (mesh->texture && mesh->texture->loaded) {
         // Use textured 3D pipeline
@@ -471,10 +537,123 @@ void mesh(VkCommandBuffer cmd, Mesh* mesh) {
     vkCmdDraw(cmd, mesh->vertexCount, 1, 0, 0);
 }
 
+void mesh_update_morph(Mesh* mesh) {
+    if (!mesh->morph_data || !mesh->morph_data->base_vertices) {
+        return;
+    }
+
+    MorphData* morph = mesh->morph_data;
+    
+    // Start with a copy of the base (unexpanded) vertices
+    Vertex* morphed_base = malloc(morph->base_vertex_count * sizeof(Vertex));
+    memcpy(morphed_base, morph->base_vertices, morph->base_vertex_count * sizeof(Vertex));
+    
+    // Track if any morph target has normal deltas
+    bool has_normal_deltas = false;
+    
+    // Apply morph targets to the base vertices
+    for (size_t t = 0; t < morph->target_count; t++) {
+        MorphTarget* target = &morph->targets[t];
+        float weight = morph->weights[t];
+        
+        if (weight == 0.0f || !target->positions) {
+            continue;
+        }
+        
+        if (target->normals) {
+            has_normal_deltas = true;
+        }
+        
+        // Apply position and normal deltas to base vertices
+        for (size_t v = 0; v < morph->base_vertex_count && v < target->vertex_count; v++) {
+            morphed_base[v].pos[0] += target->positions[v][0] * weight;
+            morphed_base[v].pos[1] += target->positions[v][1] * weight;
+            morphed_base[v].pos[2] += target->positions[v][2] * weight;
+            
+            if (target->normals) {
+                morphed_base[v].normal[0] += target->normals[v][0] * weight;
+                morphed_base[v].normal[1] += target->normals[v][1] * weight;
+                morphed_base[v].normal[2] += target->normals[v][2] * weight;
+            }
+        }
+    }
+    
+    // If no normal deltas were provided, recalculate normals for smooth surfaces
+    if (!has_normal_deltas) {
+        // For smooth surfaces like spheres, normals should point from center
+        // Calculate average center of the mesh
+        vec3 center = {0.0f, 0.0f, 0.0f};
+        for (size_t v = 0; v < morph->base_vertex_count; v++) {
+            center[0] += morphed_base[v].pos[0];
+            center[1] += morphed_base[v].pos[1];
+            center[2] += morphed_base[v].pos[2];
+        }
+        center[0] /= morph->base_vertex_count;
+        center[1] /= morph->base_vertex_count;
+        center[2] /= morph->base_vertex_count;
+        
+        // Recalculate normals as vectors from center to vertex
+        for (size_t v = 0; v < morph->base_vertex_count; v++) {
+            vec3 normal;
+            glm_vec3_sub(morphed_base[v].pos, center, normal);
+            glm_vec3_normalize(normal);
+            glm_vec3_copy(normal, morphed_base[v].normal);
+        }
+    } else {
+        // Renormalize normals if deltas were provided
+        for (size_t v = 0; v < morph->base_vertex_count; v++) {
+            vec3 normal;
+            glm_vec3_copy(morphed_base[v].normal, normal);
+            glm_vec3_normalize(normal);
+            glm_vec3_copy(normal, morphed_base[v].normal);
+        }
+    }
+    
+    // Now expand to final vertex buffer using index mapping
+    Vertex* final_vertices = malloc(mesh->vertexCount * sizeof(Vertex));
+    
+    if (morph->index_map) {
+        // Indexed mesh - use mapping
+        for (size_t i = 0; i < mesh->vertexCount; i++) {
+            uint32_t base_idx = morph->index_map[i];
+            final_vertices[i] = morphed_base[base_idx];
+        }
+    } else {
+        // Non-indexed mesh - direct copy
+        memcpy(final_vertices, morphed_base, mesh->vertexCount * sizeof(Vertex));
+    }
+    
+    // Upload to GPU
+    void* data;
+    VkDeviceSize size = mesh->vertexCount * sizeof(Vertex);
+    vkMapMemory(context.device, mesh->vertexBufferMemory, 0, size, 0, &data);
+    memcpy(data, final_vertices, size);
+    vkUnmapMemory(context.device, mesh->vertexBufferMemory);
+    
+    free(morphed_base);
+    free(final_vertices);
+}
 
 void mesh_destroy(VkDevice device, Mesh* mesh) {
     if (mesh->vertexBuffer) vkDestroyBuffer(device, mesh->vertexBuffer, NULL);
     if (mesh->vertexBufferMemory) vkFreeMemory(device, mesh->vertexBufferMemory, NULL);
+    
+    if (mesh->morph_data) {
+        for (size_t t = 0; t < mesh->morph_data->target_count; t++) {
+            if (mesh->morph_data->targets[t].positions) {
+                free(mesh->morph_data->targets[t].positions);
+            }
+            if (mesh->morph_data->targets[t].normals) {
+                free(mesh->morph_data->targets[t].normals);
+            }
+        }
+        if (mesh->morph_data->targets) free(mesh->morph_data->targets);
+        if (mesh->morph_data->weights) free(mesh->morph_data->weights);
+        if (mesh->morph_data->base_vertices) free(mesh->morph_data->base_vertices);
+        if (mesh->morph_data->index_map) free(mesh->morph_data->index_map);  // ADD THIS
+        free(mesh->morph_data);
+        mesh->morph_data = NULL;
+    }
 
     mesh->vertexBuffer = VK_NULL_HANDLE;
     mesh->vertexBufferMemory = VK_NULL_HANDLE;
@@ -534,18 +713,15 @@ Mesh* get_mesh(const char* name) {
 // --- 2D Renderer ---
 
 // Batch structure for textured quads
-typedef struct {
-    Texture2D* texture;
-    uint32_t startVertex;
-    uint32_t vertexCount;
-} TextureBatch;
 
-static Vertex2D vertices2D[MAX_VERTICES];
-static uint32_t vertexCount2D = 0;
-static uint32_t coloredVertexCount = 0;
+Vertex2D vertices2D[MAX_VERTICES];
+uint32_t vertexCount2D = 0;
+uint32_t coloredVertexCount = 0;
+TextureBatch textureBatches[MAX_TEXTURES];
+uint32_t textureBatchCount = 0;
 
-static TextureBatch textureBatches[MAX_TEXTURES];
-static uint32_t textureBatchCount = 0;
+static uint32_t texturedStartVertex = 0;
+
 
 void renderer2D_init() {
     VkBufferCreateInfo bufferInfo = {
@@ -571,6 +747,26 @@ void renderer2D_init() {
     vkBindBufferMemory(context.device, context.vertexBuffer2D, context.vertexBufferMemory2D, 0);
 }
 
+// Shift textured vertices when colored quads are added after textures
+static void shift_textured_vertices_right(uint32_t shift_amount) {
+    if (textureBatchCount == 0 || shift_amount == 0) return;
+    
+    // Calculate how many textured vertices we have
+    uint32_t textured_vertex_count = vertexCount2D - coloredVertexCount;
+    if (textured_vertex_count == 0) return;
+    
+    // Move textured vertices to the right to make room for new colored vertices
+    // Move from right to left to avoid overwriting
+    for (int i = (int)textured_vertex_count - 1; i >= 0; i--) {
+        vertices2D[coloredVertexCount + shift_amount + i] = vertices2D[coloredVertexCount + i];
+    }
+    
+    // Update all batch start vertices
+    for (uint32_t i = 0; i < textureBatchCount; i++) {
+        textureBatches[i].startVertex += shift_amount;
+    }
+}
+
 void quad2D(vec2 position, vec2 size, Color color) {
     if (vertexCount2D + 6 > MAX_VERTICES) return;
 
@@ -587,9 +783,15 @@ void quad2D(vec2 position, vec2 size, Color color) {
         {{x, y + h}, color, {0.0f, 1.0f}, 0}
     };
 
-    memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
-    vertexCount2D += 6;
+    // If we already have textured vertices, we need to shift them right
+    if (textureBatchCount > 0) {
+        shift_textured_vertices_right(6);
+    }
+
+    // Insert colored vertices at the end of the colored section
+    memcpy(&vertices2D[coloredVertexCount], quad, sizeof(quad));
     coloredVertexCount += 6;
+    vertexCount2D += 6;
 }
 
 void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
@@ -615,9 +817,9 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
         }
         batchIndex = textureBatchCount++;
         textureBatches[batchIndex].texture = texture;
-        textureBatches[batchIndex].startVertex = vertexCount2D;
+        // Textured vertices always start after colored vertices
+        textureBatches[batchIndex].startVertex = coloredVertexCount + (vertexCount2D - coloredVertexCount);
         textureBatches[batchIndex].vertexCount = 0;
-        /* printf("Created batch %d for texture %p at vertex %u\n", batchIndex, (void*)texture, vertexCount2D); */
     }
 
     Vertex2D quad[6] = {
@@ -630,6 +832,7 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
         {{x, y + h}, tint, {0.0f, 0.0f}, 0}
     };
 
+    // Add vertices at the end of the buffer
     memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
     vertexCount2D += 6;
     textureBatches[batchIndex].vertexCount += 6;
@@ -655,7 +858,7 @@ void renderer2D_draw(VkCommandBuffer cmd) {
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D, offsets);
 
-    // Draw colored content first
+    // Draw colored content first (non-textured quads)
     if (coloredVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline2D);
         
@@ -671,7 +874,7 @@ void renderer2D_draw(VkCommandBuffer cmd) {
         vkCmdDraw(cmd, coloredVertexCount, 1, 0, 0);
     }
 
-    // Draw each texture batch
+    // Draw each texture batch (text and textured quads)
     if (textureBatchCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured2D);
         
@@ -687,11 +890,7 @@ void renderer2D_draw(VkCommandBuffer cmd) {
         for (uint32_t i = 0; i < textureBatchCount; i++) {
             TextureBatch* batch = &textureBatches[i];
             
-            if (batch->vertexCount == 0) continue; // Skip empty batches
-            
-            // Debug output
-            /* printf("Drawing batch %u: texture=%p, start=%u, count=%u\n",  */
-            /*        i, (void*)batch->texture, batch->startVertex, batch->vertexCount); */
+            if (batch->vertexCount == 0) continue;
             
             // Bind this texture's descriptor set
             vkCmdBindDescriptorSets(
@@ -713,9 +912,425 @@ void renderer2D_clear(void) {
     vertexCount2D = 0;
     coloredVertexCount = 0;
     textureBatchCount = 0;
+    texturedStartVertex = 0;
 }
 
 // --- Texture Loading ---
+
+bool load_texture_from_rgba(VulkanContext* context, unsigned char* rgba_data, 
+                            uint32_t width, uint32_t height, Texture2D* texture) {
+    VkDeviceSize imageSize = width * height * 4;
+
+    // Create staging buffer
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = imageSize,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    if (vkCreateBuffer(context->device, &bufferInfo, NULL, &stagingBuffer) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create staging buffer for texture\n");
+        return false;
+    }
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(context->device, stagingBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
+                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+
+    if (vkAllocateMemory(context->device, &allocInfo, NULL, &stagingBufferMemory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate staging memory for texture\n");
+        vkDestroyBuffer(context->device, stagingBuffer, NULL);
+        return false;
+    }
+
+    vkBindBufferMemory(context->device, stagingBuffer, stagingBufferMemory, 0);
+
+    // Copy RGBA data to staging buffer
+    void* mappedData;
+    vkMapMemory(context->device, stagingBufferMemory, 0, imageSize, 0, &mappedData);
+    memcpy(mappedData, rgba_data, imageSize);
+    vkUnmapMemory(context->device, stagingBufferMemory);
+
+    // Create image
+    VkImageCreateInfo imageInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent.width = width,
+        .extent.height = height,
+        .extent.depth = 1,
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .samples = VK_SAMPLE_COUNT_1_BIT
+    };
+
+    if (vkCreateImage(context->device, &imageInfo, NULL, &texture->image) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create texture image\n");
+        vkDestroyBuffer(context->device, stagingBuffer, NULL);
+        vkFreeMemory(context->device, stagingBufferMemory, NULL);
+        return false;
+    }
+
+    vkGetImageMemoryRequirements(context->device, texture->image, &memRequirements);
+
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
+                                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(context->device, &allocInfo, NULL, &texture->memory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate texture memory\n");
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkDestroyBuffer(context->device, stagingBuffer, NULL);
+        vkFreeMemory(context->device, stagingBufferMemory, NULL);
+        return false;
+    }
+
+    vkBindImageMemory(context->device, texture->image, texture->memory, 0);
+
+    // Transition and copy
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands(context->device, context->commandPool);
+    
+    transitionImageLayout(commandBuffer, texture->image, VK_FORMAT_R8G8B8A8_SRGB, 
+                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    
+    copyBufferToImage(commandBuffer, stagingBuffer, texture->image, width, height);
+    
+    transitionImageLayout(commandBuffer, texture->image, VK_FORMAT_R8G8B8A8_SRGB,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    
+    endSingleTimeCommands(context->device, context->commandPool, context->graphicsQueue, commandBuffer);
+
+    vkDestroyBuffer(context->device, stagingBuffer, NULL);
+    vkFreeMemory(context->device, stagingBufferMemory, NULL);
+
+    // Create image view
+    VkImageViewCreateInfo viewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = texture->image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    };
+
+    if (vkCreateImageView(context->device, &viewInfo, NULL, &texture->view) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create texture image view\n");
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkFreeMemory(context->device, texture->memory, NULL);
+        return false;
+    }
+
+    // Create sampler
+    VkSamplerCreateInfo samplerInfo = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .anisotropyEnable = VK_FALSE,
+        .maxAnisotropy = 1.0f,
+        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+        .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .mipLodBias = 0.0f,
+        .minLod = 0.0f,
+        .maxLod = 0.0f
+    };
+
+    if (vkCreateSampler(context->device, &samplerInfo, NULL, &texture->sampler) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create texture sampler\n");
+        vkDestroyImageView(context->device, texture->view, NULL);
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkFreeMemory(context->device, texture->memory, NULL);
+        return false;
+    }
+
+    // Allocate and update descriptor set
+    VkDescriptorSetAllocateInfo descriptorAllocInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = context->descriptorPool2D,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &context->descriptorSetLayout2D
+    };
+
+    if (vkAllocateDescriptorSets(context->device, &descriptorAllocInfo, &texture->descriptorSet) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate descriptor set for texture\n");
+        vkDestroySampler(context->device, texture->sampler, NULL);
+        vkDestroyImageView(context->device, texture->view, NULL);
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkFreeMemory(context->device, texture->memory, NULL);
+        return false;
+    }
+
+    VkDescriptorImageInfo imageDescInfo = {
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageView = texture->view,
+        .sampler = texture->sampler
+    };
+
+    VkWriteDescriptorSet descriptorWrite = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = texture->descriptorSet,
+        .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .pImageInfo = &imageDescInfo
+    };
+
+    vkUpdateDescriptorSets(context->device, 1, &descriptorWrite, 0, NULL);
+
+    texture->width = width;
+    texture->height = height;
+    texture->loaded = true;
+
+    return true;
+}
+
+
+bool load_texture_from_memory(VulkanContext* context, unsigned char* data, size_t data_size, Texture2D* texture) {
+    int texWidth, texHeight, texChannels;
+    stbi_uc* pixels = stbi_load_from_memory(data, data_size, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    
+    if (!pixels) {
+        fprintf(stderr, "Failed to decode texture from memory\n");
+        return false;
+    }
+
+    VkDeviceSize imageSize = texWidth * texHeight * 4;
+
+    // Create staging buffer
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = imageSize,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+
+    if (vkCreateBuffer(context->device, &bufferInfo, NULL, &stagingBuffer) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create staging buffer for texture\n");
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(context->device, stagingBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
+                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+
+    if (vkAllocateMemory(context->device, &allocInfo, NULL, &stagingBufferMemory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate staging memory for texture\n");
+        vkDestroyBuffer(context->device, stagingBuffer, NULL);
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    vkBindBufferMemory(context->device, stagingBuffer, stagingBufferMemory, 0);
+
+    // Copy pixel data to staging buffer
+    void* mappedData;
+    vkMapMemory(context->device, stagingBufferMemory, 0, imageSize, 0, &mappedData);
+    memcpy(mappedData, pixels, imageSize);
+    vkUnmapMemory(context->device, stagingBufferMemory);
+
+    stbi_image_free(pixels);
+
+    // Create image
+    VkImageCreateInfo imageInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent.width = texWidth,
+        .extent.height = texHeight,
+        .extent.depth = 1,
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .samples = VK_SAMPLE_COUNT_1_BIT
+    };
+
+    if (vkCreateImage(context->device, &imageInfo, NULL, &texture->image) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create texture image\n");
+        vkDestroyBuffer(context->device, stagingBuffer, NULL);
+        vkFreeMemory(context->device, stagingBufferMemory, NULL);
+        return false;
+    }
+
+    vkGetImageMemoryRequirements(context->device, texture->image, &memRequirements);
+
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
+                                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(context->device, &allocInfo, NULL, &texture->memory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate texture memory\n");
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkDestroyBuffer(context->device, stagingBuffer, NULL);
+        vkFreeMemory(context->device, stagingBufferMemory, NULL);
+        return false;
+    }
+
+    vkBindImageMemory(context->device, texture->image, texture->memory, 0);
+
+    // Transition image layout and copy buffer to image
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands(context->device, context->commandPool);
+    
+    transitionImageLayout(commandBuffer, texture->image, VK_FORMAT_R8G8B8A8_SRGB, 
+                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    
+    copyBufferToImage(commandBuffer, stagingBuffer, texture->image, texWidth, texHeight);
+    
+    transitionImageLayout(commandBuffer, texture->image, VK_FORMAT_R8G8B8A8_SRGB,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    
+    endSingleTimeCommands(context->device, context->commandPool, context->graphicsQueue, commandBuffer);
+
+    // Cleanup staging buffer
+    vkDestroyBuffer(context->device, stagingBuffer, NULL);
+    vkFreeMemory(context->device, stagingBufferMemory, NULL);
+
+    // Create image view
+    VkImageViewCreateInfo viewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = texture->image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    };
+
+    if (vkCreateImageView(context->device, &viewInfo, NULL, &texture->view) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create texture image view\n");
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkFreeMemory(context->device, texture->memory, NULL);
+        return false;
+    }
+
+    // Create sampler
+    VkSamplerCreateInfo samplerInfo = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .anisotropyEnable = VK_FALSE,
+        .maxAnisotropy = 1.0f,
+        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+        .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .mipLodBias = 0.0f,
+        .minLod = 0.0f,
+        .maxLod = 0.0f
+    };
+
+    if (vkCreateSampler(context->device, &samplerInfo, NULL, &texture->sampler) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create texture sampler\n");
+        vkDestroyImageView(context->device, texture->view, NULL);
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkFreeMemory(context->device, texture->memory, NULL);
+        return false;
+    }
+
+    // Allocate descriptor set for this texture
+    VkDescriptorSetAllocateInfo descriptorAllocInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = context->descriptorPool2D,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &context->descriptorSetLayout2D
+    };
+
+    if (vkAllocateDescriptorSets(context->device, &descriptorAllocInfo, &texture->descriptorSet) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate descriptor set for texture\n");
+        vkDestroySampler(context->device, texture->sampler, NULL);
+        vkDestroyImageView(context->device, texture->view, NULL);
+        vkDestroyImage(context->device, texture->image, NULL);
+        vkFreeMemory(context->device, texture->memory, NULL);
+        return false;
+    }
+
+    // Update descriptor set
+    VkDescriptorImageInfo imageDescInfo = {
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageView = texture->view,
+        .sampler = texture->sampler
+    };
+
+    VkWriteDescriptorSet descriptorWrite = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = texture->descriptorSet,
+        .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .pImageInfo = &imageDescInfo
+    };
+
+    vkUpdateDescriptorSets(context->device, 1, &descriptorWrite, 0, NULL);
+
+    texture->width = texWidth;
+    texture->height = texHeight;
+
+    return true;
+}
+
+int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size) {
+    if (textureCount >= MAX_TEXTURES) {
+        fprintf(stderr, "Texture pool full! Cannot load from memory\n");
+        return -1;
+    }
+    
+    printf("Loading texture %u from memory (%zu bytes)\n", textureCount, data_size);
+    
+    if (load_texture_from_memory(&context, data, data_size, &texturePool[textureCount])) {
+        texturePool[textureCount].loaded = true;
+        printf("  -> Successfully loaded as texture #%u\n", textureCount);
+        return textureCount++;
+    }
+    
+    printf("  -> Failed to load\n");
+    return -1;
+}
 
 bool load_texture(VulkanContext* context, const char* filename, Texture2D* texture) {
     int texWidth, texHeight, texChannels;
@@ -984,41 +1599,40 @@ void texture3D(vec3 position, vec2 size, Texture2D* texture, Color tint) {
         /*        batchIndex, (void*)texture, vertex_count_3D_textured); */
     }
 
-    // Create a quad facing the camera (billboard style)
     Vertex quad[6] = {
         // Triangle 1
-        { .pos = {x - w/2, y - h/2, z}, 
-          .color = {tint.r, tint.g, tint.b, tint.a}, 
-          .normal = {0.0f, 0.0f, 1.0f}, 
-          .texCoord = {0.0f, 1.0f} },
+        { .pos = {x - w/2, y - h/2, z},
+          .color = {tint.r, tint.g, tint.b, tint.a},
+          .normal = {0.0f, 0.0f, 1.0f},
+          .texCoord = {1.0f, 1.0f} },  // Changed from 0.0f to 1.0f
         
-        { .pos = {x + w/2, y - h/2, z}, 
-          .color = {tint.r, tint.g, tint.b, tint.a}, 
-          .normal = {0.0f, 0.0f, 1.0f}, 
-          .texCoord = {1.0f, 1.0f} },
+        { .pos = {x + w/2, y - h/2, z},
+          .color = {tint.r, tint.g, tint.b, tint.a},
+          .normal = {0.0f, 0.0f, 1.0f},
+          .texCoord = {0.0f, 1.0f} },  // Changed from 1.0f to 0.0f
         
-        { .pos = {x + w/2, y + h/2, z}, 
-          .color = {tint.r, tint.g, tint.b, tint.a}, 
-          .normal = {0.0f, 0.0f, 1.0f}, 
-          .texCoord = {1.0f, 0.0f} },
+        { .pos = {x + w/2, y + h/2, z},
+          .color = {tint.r, tint.g, tint.b, tint.a},
+          .normal = {0.0f, 0.0f, 1.0f},
+          .texCoord = {0.0f, 0.0f} },  // Changed from 1.0f to 0.0f
         
         // Triangle 2
-        { .pos = {x - w/2, y - h/2, z}, 
-          .color = {tint.r, tint.g, tint.b, tint.a}, 
-          .normal = {0.0f, 0.0f, 1.0f}, 
-          .texCoord = {0.0f, 1.0f} },
+        { .pos = {x - w/2, y - h/2, z},
+          .color = {tint.r, tint.g, tint.b, tint.a},
+          .normal = {0.0f, 0.0f, 1.0f},
+          .texCoord = {1.0f, 1.0f} },  // Changed from 0.0f to 1.0f
         
-        { .pos = {x + w/2, y + h/2, z}, 
-          .color = {tint.r, tint.g, tint.b, tint.a}, 
-          .normal = {0.0f, 0.0f, 1.0f}, 
-          .texCoord = {1.0f, 0.0f} },
+        { .pos = {x + w/2, y + h/2, z},
+          .color = {tint.r, tint.g, tint.b, tint.a},
+          .normal = {0.0f, 0.0f, 1.0f},
+          .texCoord = {0.0f, 0.0f} },  // Changed from 1.0f to 0.0f
         
-        { .pos = {x - w/2, y + h/2, z}, 
-          .color = {tint.r, tint.g, tint.b, tint.a}, 
-          .normal = {0.0f, 0.0f, 1.0f}, 
-          .texCoord = {0.0f, 0.0f} }
+        { .pos = {x - w/2, y + h/2, z},
+          .color = {tint.r, tint.g, tint.b, tint.a},
+          .normal = {0.0f, 0.0f, 1.0f},
+          .texCoord = {1.0f, 0.0f} }   // Changed from 0.0f to 1.0f
     };
-
+    
     memcpy(&vertices3D_textured[vertex_count_3D_textured], quad, sizeof(quad));
     vertex_count_3D_textured += 6;
     texture3DBatches[batchIndex].vertexCount += 6;
@@ -1036,18 +1650,18 @@ void renderer_upload_textured3D() {
 
 void renderer_draw_textured3D(VkCommandBuffer cmd) {
     if (texture3DBatchCount == 0) return;
-
+    
     /* printf("Drawing %u 3D texture batches (%u vertices total)\n",  */
     /*        texture3DBatchCount, vertex_count_3D_textured); */
-
+    
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured3D);
     
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer3D_textured, offsets);
-
+    
     // Identity model matrix for billboards
     glm_mat4_identity(pushConstants.model);
-
+    
     for (uint32_t i = 0; i < texture3DBatchCount; i++) {
         Texture3DBatch* batch = &texture3DBatches[i];
         
@@ -1063,23 +1677,23 @@ void renderer_draw_textured3D(VkCommandBuffer cmd) {
         };
         
         vkCmdBindDescriptorSets(
-            cmd,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            context.pipelineLayoutTextured3D,
-            0, 2,
-            descriptorSets,
-            0, NULL
-        );
+                                cmd,
+                                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                context.pipelineLayoutTextured3D,
+                                0, 2,
+                                descriptorSets,
+                                0, NULL
+                                );
         
         // Push constants for model matrix and AO
         vkCmdPushConstants(
-            cmd,
-            context.pipelineLayoutTextured3D,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(PushConstants),
-            &pushConstants
-        );
+                           cmd,
+                           context.pipelineLayoutTextured3D,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(PushConstants),
+                           &pushConstants
+                           );
         
         // Draw this batch
         vkCmdDraw(cmd, batch->vertexCount, 1, batch->startVertex, 0);
@@ -1117,26 +1731,26 @@ void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cm
     physicalDevice = physDev;
     commandPool = cmdPool;
     graphicsQueue = queue;
-
+    
     VkBufferCreateInfo bufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = sizeof(lineVertices),
         .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
-
+    
     vkCreateBuffer(device, &bufferInfo, NULL, &lineVertexBuffer);
-
+    
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(device, lineVertexBuffer, &memRequirements);
-
+    
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
     };
-
+    
     vkAllocateMemory(device, &allocInfo, NULL, &lineVertexBufferMemory);
     vkBindBufferMemory(device, lineVertexBuffer, lineVertexBufferMemory, 0);
 }

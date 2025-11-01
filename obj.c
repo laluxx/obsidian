@@ -9,7 +9,6 @@
 #define TINYOBJ_LOADER_C_IMPLEMENTATION
 #include "tinyobj_loader_c.h"
 
-
 static void file_reader(void* ctx, const char* filename, int is_mtl, const char* obj_filename, char** out_buf, size_t* out_len) {
     FILE* f = fopen(filename, "rb");
     if (!f) {
@@ -26,8 +25,6 @@ static void file_reader(void* ctx, const char* filename, int is_mtl, const char*
     *out_len = (size_t)len;
     fclose(f);
 }
-
-
 
 Mesh load_obj(const char* path, char* name, vec4 color){
     Mesh mesh = {0};

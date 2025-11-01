@@ -198,8 +198,8 @@ void camera_process_mouse(Camera* cam, double xoffset, double yoffset) {
     cam->yaw += xoffset;
     cam->pitch += yoffset;
 
-    if(cam->pitch > 89.0f) cam->pitch = 89.0f;
-    if(cam->pitch < -89.0f) cam->pitch = -89.0f;
+    if(cam->pitch > 90.0f) cam->pitch = 90.0f;
+    if(cam->pitch < -90.0f) cam->pitch = -90.0f;
 
     camera_update(cam);
 }
@@ -219,11 +219,11 @@ static const float STANDARD_YAW_ANGLES[] = {
 };
 
 static const float STANDARD_PITCH_ANGLES[] = {
-    89.9f,    // Bottom view (looking UP at origin)
+    90.9f,    // Bottom view (looking UP at origin)
     45.0f,
     0.0f,     // Eye level with origin
     -45.0f,
-    -89.9f    // Top view (looking DOWN at origin)
+    -90.9f    // Top view (looking DOWN at origin)
 };
 
 
@@ -384,7 +384,7 @@ void camera_snap_to_top(Camera* cam) {
     
     // For top view, we want to look DOWN at the origin
     // This means the camera should be ABOVE looking DOWN
-    cam->pitch = -89.9f; // Just shy of exactly -90 to avoid gimbal lock
+    cam->pitch = -90.9f; // Just shy of exactly -90 to avoid gimbal lock
     calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
     camera_set_look_at(cam, world_origin);
     printf("Snapped to TOP view (orbiting world origin)\n");
@@ -398,7 +398,7 @@ void camera_snap_to_bottom(Camera* cam) {
     
     // For bottom view, we want to look UP at the origin
     // This means the camera should be BELOW looking UP
-    cam->pitch = 89.9f; // Just shy of exactly 90 to avoid gimbal lock
+    cam->pitch = 90.9f; // Just shy of exactly 90 to avoid gimbal lock
     calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
     camera_set_look_at(cam, world_origin);
     printf("Snapped to BOTTOM view (orbiting world origin)\n");

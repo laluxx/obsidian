@@ -1,10 +1,11 @@
-#include "obj.h"
 #include <vulkan/vulkan_core.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include "gltf_loader.h"
 
+#include "font.h"
+#include "obj.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +46,7 @@ const char** validationLayers = NULL;
 
 
 // TODO FIX panning up and wown when loooking from upside down 
+// FIXME ALL Textures are inversed
 
 VkDescriptorPool descriptorPool;
 VkDescriptorSet descriptorSet;
@@ -1863,6 +1865,10 @@ bool keyQ = false, keyE = false;
 bool keySpace = false, keyShift = false;
 
 
+#include <stdio.h>
+#include <inttypes.h>
+
+
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     Camera* cam = glfwGetWindowUserPointer(window);
     shiftPressed = mods & GLFW_MOD_SHIFT;
@@ -1882,6 +1888,11 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                    "screenshot.png"
                    );
     }
+
+    if (key == GLFW_KEY_Z && action == GLFW_PRESS) {
+        print_scene_meshes();
+    }
+
     
     // Arrow keys for camera snapping
     if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
@@ -2584,11 +2595,13 @@ int main() {
     int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_01.png");
     int32_t tex3 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_05.png");
     int32_t tex4 = texture_pool_add(&context, "./assets/textures/prototype/Dark/texture_03.png");
+    int32_t tex5 = texture_pool_add(&context, "./assets/textures/pengu.png");
     
     Texture2D* texture1 = texture_pool_get(tex1);
     Texture2D* texture2 = texture_pool_get(tex2);
     Texture2D* texture3 = texture_pool_get(tex3);
     Texture2D* texture4 = texture_pool_get(tex4);
+    Texture2D* texture5 = texture_pool_get(tex5);
     
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
@@ -2596,18 +2609,35 @@ int main() {
     printf("MAX supported line width: %f\n", maxLineWidth);
     
 
-    load_gltf_complete("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene);
-    /* load_gltf_complete("./assets/gltf/AnimatedMorphSphere.glb", &scene); */
-    /* load_gltf_complete("./assets/gltf/AnimatedMorphCube.glb", &scene); */
-    
-    
-    /* load_gltf_complete("./assets/gltf/CesiumMan.glb", &scene); */
-    /* load_gltf_complete("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); */
-    /* load_gltf_complete("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); */
-    /* load_gltf_complete("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
-    /* load_gltf_complete("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME */
-    /* load_gltf_complete("./assets/gltf/MorphStressTest.glb", &scene); */
-    // Both work the same way!
+
+
+    load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS
+    load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS
+
+    /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene); // FIXME ? */
+    /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
+    /* load_gltf("./assets/gltf/UnlitTest.glb", &scene); // PASS */
+    /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene); // PASS */
+
+    /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT */
+    /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS */
+    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME */
+    /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene); // FIXME ANIMATION CHANNELS */
+    /* load_gltf("./assets/gltf/Box.glb", &scene); // PASS */
+    /* load_gltf("./assets/gltf/Corset.glb", &scene); // PASS */
+    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene); // FIXME RIG */
+    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO Materials */
+    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS */
+    /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
+    /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */
+    /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene); // PASS FIXME FLICKER ? */
+    /* load_gltf("./assets/gltf/Fox.glb", &scene); // FIXME ANIMATIONS */
+    /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene); // FIXME */
+    /* load_gltf("./assets/gltf/TextureCoordinateTest.glb", &scene); // PASS */
+    /* load_gltf("./assets/gltf/Avocado.glb", &scene); // PASS */
+
+    init_free_type();
+    Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
     
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
@@ -2615,7 +2645,8 @@ int main() {
         last_frame = current_frame;
         
         animate_scene(&scene, current_frame);
-        
+
+
         
         glfwPollEvents();
         camera_process_keyboard(&camera, context.window, delta_time);
@@ -2624,6 +2655,8 @@ int main() {
         if (!camera.active) {
             process_editor_movement(&camera, delta_time);
         }
+        
+        sort_meshes_by_alpha(&scene.meshes, camera.position); // HERE
         
         
         // Update camera uniform buffer
@@ -2636,30 +2669,53 @@ int main() {
         
         // Clear all render buffers
         renderer_clear();
-        renderer_clear_textured3D();  // ADD THIS
+        renderer_clear_textured3D();
         line_renderer_clear();
         renderer2D_clear();
         
+        
+        
         // 3D GEOMETRY
-        vec3 v0 = { -0.03f, -0.03f, 0.0f };
-        vec3 v1 = {  0.03f, -0.03f, 0.0f };
-        vec3 v2 = {  0.03f,  0.03f, 0.0f };
-        vec3 v3 = { -0.03f,  0.03f, 0.0f };
-        vec3 center = { 0.0f, 0.0f, 0.0f };
-        triangle(v0, center, v1, RED);
-        triangle(v1, center, v2, GREEN);
-        triangle(v2, center, v3, BLUE);
-        triangle(v3, center, v0, YELLOW);
+        /* vec3 v0 = { -0.03f, -0.03f, 0.0f }; */
+        /* vec3 v1 = {  0.03f, -0.03f, 0.0f }; */
+        /* vec3 v2 = {  0.03f,  0.03f, 0.0f }; */
+        /* vec3 v3 = { -0.03f,  0.03f, 0.0f }; */
+        /* vec3 center = { 0.0f, 0.0f, 0.0f }; */
+        /* triangle(v0, center, v1, RED); */
+        /* triangle(v1, center, v2, GREEN); */
+        /* triangle(v2, center, v3, BLUE); */
+        /* triangle(v3, center, v0, YELLOW); */
+        
         
         sphere((vec3){0, 0, 30}, 5, 80, 80, YELLOW);
         
         // Rotate the cow
         /* static float cow_rotation = 0.0f; */
         /* cow_rotation += delta_time; */
-        /* mat4_rotate(scene.meshes.items[1].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f}); */
+        
+        /* glm_mat4_identity(scene.meshes.items[0].model); */
+        /* glm_rotate(scene.meshes.items[0].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f}); */
+        
+
+        
+        // For the first cube, we need to: translate THEN rotate
+        // So we need to rebuild the transform with translation first
+        mat4 offset_transform;
+        glm_mat4_identity(offset_transform);
+        glm_translate(offset_transform, (vec3){5.0f, 0.0f, 0.0f});
+        
+        // Multiply: offset * animation = translate then rotate
+        mat4 temp;
+        glm_mat4_copy(scene.meshes.items[0].model, temp);
+        glm_mat4_mul(offset_transform, temp, scene.meshes.items[0].model);
         
         
         
+        text(jetbrains, "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", 150, 50, WHITE);
+        
+        // Draw 3D text at world position
+        text3D(jetbrains, "Hello 3D!", (vec3){0.0f, 5.0f, 10.0f}, 6, WHITE);
+        text3D(jetbrains, "Press SPACE", (vec3){0.0f, 4.5f, 10.0f}, 6, RED);
         
         // 2D GEOMETRY
         quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);
@@ -2667,8 +2723,10 @@ int main() {
         quad2D((vec2){10, 70}, (vec2){50, 50}, RED);
         quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN);
         
-        texture2D((vec2){100, 100}, (vec2){200, 200}, texture1, WHITE);
-        texture2D((vec2){500, 100}, (vec2){150, 150}, texture2, WHITE);
+        
+        
+        texture2D((vec2){100, 200}, (vec2){200, 200}, texture1, WHITE);
+        texture2D((vec2){500, 200}, (vec2){150, 150}, texture2, WHITE);
         /* texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE); */
         
         
@@ -2719,7 +2777,7 @@ int main() {
         
         // Billboards
         texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE);
-        texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE);
+        texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture5, WHITE);
         texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE);
         
         

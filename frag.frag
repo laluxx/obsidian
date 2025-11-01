@@ -1,10 +1,10 @@
 #version 450
-
 layout(location = 0) in vec4 fragColor;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec3 fragWorldPos;
 layout(location = 3) in flat int fragAmbientOcclusionEnabled;
 layout(location = 4) in vec2 fragTexCoord;
+layout(location = 5) in flat int fragIsUnlit;  // NEW
 
 layout(location = 0) out vec4 outColor;
 
@@ -18,6 +18,13 @@ float cheapAO(vec3 normal) {
 }
 
 void main() {
+    // NEW: If unlit, just output the base color directly
+    if (fragIsUnlit != 0) {
+        outColor = fragColor;
+        return;
+    }
+    
+    // Original lighting code for lit materials
     vec3 N = normalize(fragNormal);
     
     // Calculate simple AO only if enabled
@@ -43,11 +50,6 @@ void main() {
     
     // Combine
     vec3 finalColor = fragColor.rgb * (ambient + direct);
-    
-    // Simple distance fog
-    // float dist = length(fragWorldPos);
-    // float fogFactor = exp(-dist * 0.01);
-    // finalColor = mix(skyColor * 0.5, finalColor, fogFactor);
     
     outColor = vec4(finalColor, fragColor.a);
 }

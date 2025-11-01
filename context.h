@@ -59,6 +59,9 @@ typedef struct {
 
     VkPipeline graphicsPipelineLine;
 
+    VkPipeline graphicsPipelineBlend;
+    VkPipeline graphicsPipelineTextured3DBlend;
+
 } VulkanContext;
 
 extern VulkanContext context;
