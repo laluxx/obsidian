@@ -1,5 +1,6 @@
 #include "input.h"
 #include "context.h"
+#include "keychords.h"
 #include <stdio.h>
 
 
@@ -215,8 +216,13 @@ void internal_key_callback(GLFWwindow* window, int key, int scancode, int action
         keys[key] = 0;
         keysReleased[key] = 1;
     }
-
-    // Then call the user's callback if it's registered
+    
+    // Process keychords - if a keychord is triggered, don't call user callback
+    if (keychord_process_key(&keymap, key, action, mods)) {
+        return;  // Keychord handled the input, stop here
+    }
+    
+    // Then call the user's callback if it's registered and keychord didn't handle it
     if (currentKeyCallback != NULL) {
         currentKeyCallback(key, action, mods);
     }

@@ -1892,7 +1892,6 @@ void key_callback(int key, int action, int mods) {
     if (key == GLFW_KEY_Z && action == GLFW_PRESS) {
         print_scene_meshes();
     }
-
     
     // Arrow keys for camera snapping
     if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
@@ -2470,6 +2469,17 @@ vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
 vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
 vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
+#include "keychords.h"
+
+
+void testFunc() {
+    printf("Pressed: C-x l\n");
+}
+
+void otherTestFunc() {
+    printf("Pressed C-x C-l\n");
+}
+
 int main() {
     context.currentFrame = 0;
 
@@ -2603,6 +2613,25 @@ int main() {
     registerScrollCallback(scroll_callback);
     registerCursorPosCallback(cursor_pos_callback);
     registerMouseButtonCallback(mouse_button_callback);
+
+    keymap_init(&keymap);
+
+    keychord_bind(&keymap, "C-x L",     testFunc,           "TestFunc description");  // FIXME
+    keychord_bind(&keymap, "L",     testFunc,           "TestFunc description");  // FIXME
+    keychord_bind(&keymap, "C-c S-l",     testFunc,           "TestFunc description");// FIXME
+    keychord_bind(&keymap, "C-x C-t c", otherTestFunc,      "TestFunc description");
+    keychord_bind(&keymap, "<left>",      otherTestFunc,      "TestFunc description");
+    /* keychord_bind(&keymap, "<right>",      otherTestFunc,      "TestFunc description"); */
+    keychord_bind(&keymap, "C-<right>",      otherTestFunc,      "TestFunc description");
+    keychord_bind(&keymap, "S-<down>",      otherTestFunc,      "TestFunc description");
+    keychord_bind(&keymap, "<up>",      otherTestFunc,      "TestFunc description");
+    /* keychord_bind(&keymap, "<down>",      otherTestFunc,      "TestFunc description"); */
+    keychord_bind(&keymap, "TAB",      otherTestFunc,      "TestFunc description");
+    keychord_bind(&keymap, "M-x n L",      otherTestFunc,      "TestFunc description");
+    keychord_bind(&keymap, "C-g",       keymap_reset_state, "TestFunc description");
+    
+    keymap_print_bindings(&keymap);
+    
 
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
