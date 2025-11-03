@@ -25,6 +25,7 @@
 #include "scene.h"
 #include "context.h"
 #include "common.h"
+#include "input.h"
 
 #include <time.h>  
 
@@ -54,20 +55,9 @@ VkDescriptorSet descriptorSet;
 VkBuffer uniformBuffer;
 VkDeviceMemory uniformBufferMemory;
 
-typedef struct {
-    vec3 pos;
-    vec4 color;
-    float scale;
-} Block;
-
-
-#define WORLD_WIDTH  10
-#define WORLD_HEIGHT 10
-#define WORLD_DEPTH  10
 
 int lineWidth = 2.0f;
 
-Block blocks[WORLD_WIDTH][WORLD_HEIGHT][WORLD_DEPTH];
 
 typedef struct {
     mat4 vp;
@@ -214,6 +204,15 @@ void initWindow(VulkanContext* context) {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     context->window = glfwCreateWindow(WIDTH, HEIGHT, "Revox", NULL, NULL);
+
+    glfwMakeContextCurrent(context->window);
+    glfwSetCharCallback(context->window, internal_char_callback);
+    glfwSetKeyCallback(context->window, internal_key_callback);
+    glfwSetMouseButtonCallback(context->window, internal_mouse_button_callback);
+    glfwSetCursorPosCallback(context->window, internal_cursor_position_callback);
+    glfwSetScrollCallback(context->window, internal_scroll_callback);
+
+    init_input();
 }
 
 
@@ -1868,9 +1867,10 @@ bool keySpace = false, keyShift = false;
 #include <stdio.h>
 #include <inttypes.h>
 
+Camera camera;
 
-void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
-    Camera* cam = glfwGetWindowUserPointer(window);
+void key_callback(int key, int action, int mods) {
+    /* Camera* cam = glfwGetWindowUserPointer(context.window); */
     shiftPressed = mods & GLFW_MOD_SHIFT;
     ctrlPressed  = mods & GLFW_MOD_CONTROL;
     altPressed   = mods & GLFW_MOD_ALT;
@@ -1896,16 +1896,16 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     
     // Arrow keys for camera snapping
     if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
-        camera_snap_to_next_angle(cam, true, false);  // Counter-clockwise
+        camera_snap_to_next_angle(&camera, true, false);  // Counter-clockwise
     }
     if (key == GLFW_KEY_RIGHT && action == GLFW_PRESS) {
-        camera_snap_to_next_angle(cam, false, false);   // Clockwise
+        camera_snap_to_next_angle(&camera, false, false);   // Clockwise
     }
     if (key == GLFW_KEY_UP && action == GLFW_PRESS) {
-        camera_snap_to_next_angle(cam, true, true);   // Pitch up (more negative)
+        camera_snap_to_next_angle(&camera, true, true);   // Pitch up (more negative)
     }
     if (key == GLFW_KEY_DOWN && action == GLFW_PRESS) {
-        camera_snap_to_next_angle(cam, false, true);    // Pitch down (more positive)
+        camera_snap_to_next_angle(&camera, false, true);    // Pitch down (more positive)
     }
     
     if (key == GLFW_KEY_T && action == GLFW_PRESS) {
@@ -1914,27 +1914,27 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
     
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        cam->active = !cam->active;
+        camera.active = !camera.active;
         
-        if (cam->active) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        if (camera.active) {
+            glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             
             // When entering FPS mode, disable orbit mode and sync angles
-            if (cam->use_look_at) {
-                camera_disable_orbit_mode(cam);
+            if (camera.use_look_at) {
+                camera_disable_orbit_mode(&camera);
                 printf("Entered FPS mode - orbit disabled, angles synced\n");
             } else {
                 printf("Camera control ENABLED\n");
             }
         } else {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             printf("Camera control DISABLED - Editor mode\n");
         }
     }
     
     if (key == GLFW_KEY_F && action == GLFW_PRESS) {
         vec3 world_origin = {0.0f, 0.0f, 0.0f};
-        camera_set_look_at(cam, world_origin);
+        camera_set_look_at(&camera, world_origin);
         printf("Looking at world origin (0, 0, 0)\n");
     }
     
@@ -2051,29 +2051,27 @@ bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
     return true;
 }
 
-void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
-    Camera* cam = glfwGetWindowUserPointer(window);
-    
+void mouse_button_callback(int button, int action, int mods) {
     // Only handle mouse buttons in editor mode (camera inactive)
-    if (!cam->active) {
+    if (!camera.active) {
         // Middle mouse button - orbit/pan
         if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
             if (action == GLFW_PRESS) {
                 middleMousePressed = true;
-                glfwGetCursorPos(window, &lastPanX, &lastPanY);
-                glfwGetCursorPos(window, &lastOrbitX, &lastOrbitY);
+                glfwGetCursorPos(context.window, &lastPanX, &lastPanY);
+                glfwGetCursorPos(context.window, &lastOrbitX, &lastOrbitY);
                 
                 shiftMiddleMousePressed = (mods & GLFW_MOD_SHIFT);
                 
                 // 1If not panning, calculate the pivot point for orbiting
                 if (!shiftMiddleMousePressed) {
                     vec3 hitPoint;
-                    bool hitGround = raycast_to_ground(cam, hitPoint);
+                    bool hitGround = raycast_to_ground(&camera, hitPoint);
                     glm_vec3_copy(hitPoint, orbitPivot);
                     
                     // Calculate distance from camera to pivot
                     vec3 toPivot;
-                    glm_vec3_sub(orbitPivot, cam->position, toPivot);
+                    glm_vec3_sub(orbitPivot, camera.position, toPivot);
                     orbitDistance = glm_vec3_norm(toPivot);
                     
                     printf("Orbit pivot set to: (%.2f, %.2f, %.2f)\n", orbitPivot[0], orbitPivot[1], orbitPivot[2]);
@@ -2084,7 +2082,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 middleMousePressed = false;
                 shiftMiddleMousePressed = false;
                 
-                cam->use_look_at = false;
+                camera.use_look_at = false;
                 printf("Orbit mode disabled - returning to normal camera control\n");
             }
         }
@@ -2094,32 +2092,28 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
             if (action == GLFW_PRESS) {
                 rightMousePressed = true;
                 // Get initial position BEFORE disabling cursor
-                glfwGetCursorPos(window, &lastX, &lastY);
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                glfwGetCursorPos(context.window, &lastX, &lastY);
+                glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             } else if (action == GLFW_RELEASE) {
                 rightMousePressed = false;
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             }
         }
     }
 }
 
-void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
-    Camera* cam = glfwGetWindowUserPointer(window);
-    
-    if (!cam->active) {
+void scroll_callback(double xoffset, double yoffset) {
+    if (!camera.active) {
         float zoomSpeed = 0.5f;
         
         vec3 forward;
-        glm_vec3_copy(cam->front, forward);
+        glm_vec3_copy(camera.front, forward);
         glm_vec3_scale(forward, yoffset * zoomSpeed, forward);
-        glm_vec3_add(cam->position, forward, cam->position);
+        glm_vec3_add(camera.position, forward, camera.position);
     }
 }
 
-void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
-    Camera* cam = glfwGetWindowUserPointer(window);
-
+void cursor_pos_callback(double xpos, double ypos) {
     if (firstMouse) {
         lastX = xpos;
         lastY = ypos;
@@ -2130,22 +2124,22 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     double xoffset = xpos - lastX;
     double yoffset = lastY - ypos;
 
-    if (cam->active) {
+    if (camera.active) {
         // Normal FPS camera control - always update lastX/lastY
         lastX = xpos;
         lastY = ypos;
-        camera_process_mouse(cam, xoffset, yoffset);
+        camera_process_mouse(&camera, xoffset, yoffset);
     }
     else if (rightMousePressed) {
         // Right mouse: freelook in editor mode - always update lastX/lastY
         lastX = xpos;
         lastY = ypos;
-        camera_process_mouse(cam, xoffset, yoffset);
+        camera_process_mouse(&camera, xoffset, yoffset);
     }
     else if (middleMousePressed) {
         if (shiftMiddleMousePressed) {
-            if (cam->use_look_at) {
-                camera_disable_orbit_mode(cam);
+            if (camera.use_look_at) {
+                camera_disable_orbit_mode(&camera);
                 printf("Panning - orbit mode disabled\n");
             }
             // SHIFT + MIDDLE MOUSE: PAN
@@ -2153,9 +2147,9 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
             float panSpeed = 0.005f;
 
             vec3 right, up;
-            glm_vec3_cross(cam->front, cam->up, right);
+            glm_vec3_cross(camera.front, camera.up, right);
             glm_vec3_normalize(right);
-            glm_vec3_copy(cam->up, up);
+            glm_vec3_copy(camera.up, up);
             glm_vec3_normalize(up);
 
             vec3 panMovement = {0.0f, 0.0f, 0.0f};
@@ -2168,12 +2162,12 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
             glm_vec3_scale(up, (float)-yoffset * panSpeed, upMove);
             glm_vec3_add(panMovement, upMove, panMovement);
 
-            glm_vec3_add(cam->position, panMovement, cam->position);
+            glm_vec3_add(camera.position, panMovement, camera.position);
 
         } else {
             // MIDDLE MOUSE ONLY: ORBIT
             float orbitSpeed = 0.01f;
-            camera_orbit_around_point(cam, orbitPivot,
+            camera_orbit_around_point(&camera, orbitPivot,
                                       (float)(xoffset * orbitSpeed),
                                       (float)(yoffset * orbitSpeed));
         }
@@ -2480,24 +2474,17 @@ int main() {
     context.currentFrame = 0;
 
     initWindow(&context);
+
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     createInstance(&context);
 
-    Camera camera;
     vec3 camera_pos = {0.0f, 3.0f, 0.0f}; // 2.0f
     vec3 camera_target = {0.0f, 2.0f, 0.0f};
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
 
     camera.active = true;
     glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
-    glfwSetWindowUserPointer(context.window, &camera);
-    glfwSetCursorPosCallback(context.window, mouse_callback);
-    glfwSetKeyCallback(context.window, key_callback);
-    glfwSetMouseButtonCallback(context.window, mouse_button_callback);
-    glfwSetScrollCallback(context.window, scroll_callback);
-
 
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface\n");
@@ -2558,30 +2545,6 @@ int main() {
     
     srand((unsigned int)time(0));
     
-    // Initialize blocks (your existing code)
-    for (int x = 0; x < WORLD_WIDTH; ++x)
-        for (int y = 0; y < WORLD_HEIGHT; ++y)
-            for (int z = 0; z < WORLD_DEPTH; ++z) {
-                blocks[x][y][z].pos[0] = (x - WORLD_WIDTH / 2);
-                blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2);
-                blocks[x][y][z].pos[2] = (z - WORLD_DEPTH / 2);
-                blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
-                blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
-                blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
-                blocks[x][y][z].color[3] = 1.0f;
-            }
-    
-    for (int x = 0; x < WORLD_WIDTH; ++x)
-        for (int z = 0; z < WORLD_DEPTH; ++z) {
-            int y = 0;
-            blocks[x][y][z].pos[0] = (x - WORLD_WIDTH / 2);
-            blocks[x][y][z].pos[1] = (y - WORLD_HEIGHT / 2);
-            blocks[x][y][z].pos[2] = (z - WORLD_DEPTH / 2);
-            blocks[x][y][z].color[0] = (float)rand() / (float)RAND_MAX;
-            blocks[x][y][z].color[1] = (float)rand() / (float)RAND_MAX;
-            blocks[x][y][z].color[2] = (float)rand() / (float)RAND_MAX;
-            blocks[x][y][z].color[3] = 1.0f;
-        }
     
     scene_init(&scene);
     
@@ -2609,8 +2572,6 @@ int main() {
     printf("MAX supported line width: %f\n", maxLineWidth);
     
 
-
-
     load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS
     load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS
 
@@ -2618,7 +2579,6 @@ int main() {
     /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/UnlitTest.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene); // PASS */
-
     /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT */
     /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME */
@@ -2639,6 +2599,11 @@ int main() {
     init_free_type();
     Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
     
+    registerKeyCallback(key_callback);
+    registerScrollCallback(scroll_callback);
+    registerCursorPosCallback(cursor_pos_callback);
+    registerMouseButtonCallback(mouse_button_callback);
+
     while (!glfwWindowShouldClose(context.window)) {
         float current_frame = glfwGetTime();
         delta_time = current_frame - last_frame;
@@ -2646,11 +2611,15 @@ int main() {
         
         animate_scene(&scene, current_frame);
 
-
         
-        glfwPollEvents();
         camera_process_keyboard(&camera, context.window, delta_time);
         camera_update(&camera);
+
+        if (isKeyReleased(KEY_V)) {
+            printf("Released KEY V\n");
+        }
+
+
         
         if (!camera.active) {
             process_editor_movement(&camera, delta_time);
@@ -2674,7 +2643,6 @@ int main() {
         renderer2D_clear();
         
         
-        
         // 3D GEOMETRY
         /* vec3 v0 = { -0.03f, -0.03f, 0.0f }; */
         /* vec3 v1 = {  0.03f, -0.03f, 0.0f }; */
@@ -2696,7 +2664,6 @@ int main() {
         /* glm_mat4_identity(scene.meshes.items[0].model); */
         /* glm_rotate(scene.meshes.items[0].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f}); */
         
-
         
         // For the first cube, we need to: translate THEN rotate
         // So we need to rebuild the transform with translation first
@@ -2855,6 +2822,9 @@ int main() {
             exit(EXIT_FAILURE);
         }
         
+        update_input();
+        glfwPollEvents();
+
         context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
     
