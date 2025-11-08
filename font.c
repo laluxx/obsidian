@@ -106,6 +106,81 @@ Font* load_font(const char* fontPath, int fontSize) {
     return font;
 }
 
+float character(Font* font, unsigned char c, float x, float y, Color color) {
+    if (!font) return 0.0f;
+    
+    // Handle newline (don't draw, just return advance)
+    if (c == '\n') {
+        return 0.0f;
+    }
+    
+    // Skip non-printable characters
+    if (c < 32 || c >= ASCII) {
+        return 0.0f;
+    }
+    
+    Character ch = font->characters[c];
+    
+    // Calculate position (align baseline)
+    float xpos = x + ch.bl;
+    float ypos = y - (ch.bh - ch.bt + font->descent);
+    
+    float w = ch.bw;
+    float h = ch.bh;
+    
+    // Skip if no visible pixels, but still return advance
+    if (w == 0 || h == 0) {
+        return ch.ax;
+    }
+    
+    // Calculate UV coordinates
+    float u1 = ch.tx;
+    float v1 = ch.ty + ch.bh / (float)font->height;
+    float u2 = ch.tx + ch.bw / (float)font->width;
+    float v2 = ch.ty;
+    
+    // Check vertex buffer space
+    if (vertexCount2D + 6 > MAX_VERTICES) {
+        fprintf(stderr, "Vertex buffer full, cannot render character\n");
+        return ch.ax;
+    }
+    
+    Vertex2D quad[6] = {
+        {{xpos, ypos + h}, color, {u1, v1}, 0},
+        {{xpos, ypos}, color, {u1, v2}, 0},
+        {{xpos + w, ypos}, color, {u2, v2}, 0},
+        
+        {{xpos, ypos + h}, color, {u1, v1}, 0},
+        {{xpos + w, ypos}, color, {u2, v2}, 0},
+        {{xpos + w, ypos + h}, color, {u2, v1}, 0}
+    };
+    
+    // Find or create batch for this texture
+    int batchIndex = -1;
+    if (textureBatchCount > 0 && textureBatches[textureBatchCount - 1].texture == &font->texture) {
+        // Continue existing batch
+        batchIndex = textureBatchCount - 1;
+    } else {
+        // Create new batch
+        if (textureBatchCount >= MAX_TEXTURES) {
+            fprintf(stderr, "Too many texture batches!\n");
+            return ch.ax;
+        }
+        batchIndex = textureBatchCount++;
+        textureBatches[batchIndex].texture = &font->texture;
+        textureBatches[batchIndex].startVertex = coloredVertexCount + (vertexCount2D - coloredVertexCount);
+        textureBatches[batchIndex].vertexCount = 0;
+    }
+    
+    // Add vertices at the end of the buffer
+    memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+    vertexCount2D += 6;
+    textureBatches[batchIndex].vertexCount += 6;
+    
+    // Return the advance width for cursor positioning
+    return ch.ax;
+}
+
 void text(Font* font, const char* text_str, float x, float y, Color color) {
     if (!font || !text_str) return;
 
@@ -116,7 +191,7 @@ void text(Font* font, const char* text_str, float x, float y, Color color) {
     for (p = (const unsigned char*)text_str; *p; p++) {
         if (*p == '\n') {
             x = initialX;
-            y += lineHeight;
+            y -= lineHeight;
             continue;
         }
 

@@ -33,6 +33,7 @@ void init_free_type(void);
 Font* load_font(const char* fontPath, int fontSize);
 void destroy_font(Font* font);
 
+float character(Font* font, unsigned char c, float x, float y, Color color);
 void text(Font* font, const char* text, float x, float y, Color color);
 void text3D(Font* font, const char* text_str, vec3 position, float size, Color color);
 

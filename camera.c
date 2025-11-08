@@ -1,6 +1,8 @@
 #include "camera.h"
 #include <stdio.h>
 
+Camera camera;
+
 void camera_init(Camera* cam, vec3 position, float yaw, float pitch, float aspect_ratio) {
     glm_vec3_copy(position, cam->position);
     cam->yaw = yaw;
@@ -247,6 +249,51 @@ static void calculate_orbit_position(vec3 position_out, float distance, float ya
     position_out[2] = distance * cosf(pitch_rad) * sinf(yaw_rad);
 }
 
+bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
+    vec3 rayOrigin, rayDir;
+    glm_vec3_copy(cam->position, rayOrigin);
+    glm_vec3_copy(cam->front, rayDir);
+    glm_vec3_normalize(rayDir);
+    
+    printf("=== RAYCAST DEBUG ===\n");
+    printf("Camera pos: (%.2f, %.2f, %.2f)\n", rayOrigin[0], rayOrigin[1], rayOrigin[2]);
+    printf("Camera dir: (%.2f, %.2f, %.2f)\n", rayDir[0], rayDir[1], rayDir[2]);
+    
+    // Check if ray is parallel to ground (no Y component)
+    if (fabs(rayDir[1]) < 0.0001f) {
+        printf("Ray parallel to ground - using camera XZ position\n");
+        hitPoint[0] = rayOrigin[0];
+        hitPoint[1] = 0.0f;
+        hitPoint[2] = rayOrigin[2];
+        return false;
+    }
+    
+    // Calculate intersection with plane y = 0
+    // t = -rayOrigin.y / rayDir.y
+    float t = -rayOrigin[1] / rayDir[1];
+    
+    printf("t parameter: %.2f\n", t);
+    
+    if (t < 0.0f) {
+        printf("Intersection behind camera\n");
+        // Project camera position onto ground plane
+        hitPoint[0] = rayOrigin[0];
+        hitPoint[1] = 0.0f;
+        hitPoint[2] = rayOrigin[2];
+        return false;
+    }
+    
+    // Calculate hit point
+    hitPoint[0] = rayOrigin[0] + rayDir[0] * t;
+    hitPoint[1] = 0.0f;
+    hitPoint[2] = rayOrigin[2] + rayDir[2] * t;
+    
+    printf("Ground intersection: (%.2f, %.2f, %.2f), Distance: %.2f\n", 
+           hitPoint[0], hitPoint[1], hitPoint[2], t);
+    
+    return true;
+}
+
 static float find_next_angle(float current_angle, const float* angles, int num_angles, bool forward) {
     current_angle = normalize_angle(current_angle);
     
@@ -303,13 +350,13 @@ void camera_snap_to_next_angle(Camera* cam, bool forward, bool vertical) {
         float next_pitch = find_next_angle(cam->pitch, STANDARD_PITCH_ANGLES, 
                                           NUM_PITCH_ANGLES, forward);
         cam->pitch = next_pitch;
-        printf("Snapped pitch to: %.1f°\n", next_pitch);
+        /* printf("Snapped pitch to: %.1f°\n", next_pitch); */
     } else {
         // Snap yaw (horizontal orbit)
         float next_yaw = find_next_angle(cam->yaw, STANDARD_YAW_ANGLES, 
                                         NUM_YAW_ANGLES, forward);
         cam->yaw = next_yaw;
-        printf("Snapped yaw to: %.1f°\n", next_yaw);
+        /* printf("Snapped yaw to: %.1f°\n", next_yaw); */
     }
     
     // Calculate new camera position at this angle, maintaining distance
@@ -318,89 +365,100 @@ void camera_snap_to_next_angle(Camera* cam, bool forward, bool vertical) {
     // Set to look at world origin
     camera_set_look_at(cam, world_origin);
     
-    printf("Camera position: (%.2f, %.2f, %.2f), distance: %.2f\n",
-           cam->position[0], cam->position[1], cam->position[2], distance);
+    /* printf("Camera position: (%.2f, %.2f, %.2f), distance: %.2f\n", */
+    /*        cam->position[0], cam->position[1], cam->position[2], distance); */
 }
 
+
+void camera_snap_left()  {camera_snap_to_next_angle(&camera, true, false);}
+void camera_snap_right() {camera_snap_to_next_angle(&camera, false, false);}
+void camera_snap_up()    {camera_snap_to_next_angle(&camera, true, true);}
+void camera_snap_down()  {camera_snap_to_next_angle(&camera, false, true);}
+
+
 // Direct snap to standard views - all orbit around world origin
-void camera_snap_to_front(Camera* cam) {
+void camera_snap_to_front() {
     vec3 world_origin = {0.0f, 0.0f, 0.0f};
     vec3 to_origin;
-    glm_vec3_sub(world_origin, cam->position, to_origin);
+    glm_vec3_sub(world_origin, camera.position, to_origin);
     float distance = glm_vec3_norm(to_origin);
     
-    cam->yaw = 0.0f;
-    cam->pitch = 0.0f;
-    calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
-    camera_set_look_at(cam, world_origin);
+    camera.yaw = 0.0f;
+    camera.pitch = 0.0f;
+    calculate_orbit_position(camera.position, distance, camera.yaw, camera.pitch);
+    camera_set_look_at(&camera, world_origin);
     printf("Snapped to FRONT view (orbiting world origin)\n");
 }
 
-void camera_snap_to_back(Camera* cam) {
+void camera_snap_to_back() {
     vec3 world_origin = {0.0f, 0.0f, 0.0f};
     vec3 to_origin;
-    glm_vec3_sub(world_origin, cam->position, to_origin);
+    glm_vec3_sub(world_origin, camera.position, to_origin);
     float distance = glm_vec3_norm(to_origin);
     
-    cam->yaw = 180.0f;
-    cam->pitch = 0.0f;
-    calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
-    camera_set_look_at(cam, world_origin);
+    camera.yaw = 180.0f;
+    camera.pitch = 0.0f;
+    calculate_orbit_position(camera.position, distance, camera.yaw, camera.pitch);
+    camera_set_look_at(&camera, world_origin);
     printf("Snapped to BACK view (orbiting world origin)\n");
 }
 
-void camera_snap_to_left(Camera* cam) {
+void camera_snap_to_left() {
     vec3 world_origin = {0.0f, 0.0f, 0.0f};
     vec3 to_origin;
-    glm_vec3_sub(world_origin, cam->position, to_origin);
+    glm_vec3_sub(world_origin, camera.position, to_origin);
     float distance = glm_vec3_norm(to_origin);
     
-    cam->yaw = -90.0f;
-    cam->pitch = 0.0f;
-    calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
-    camera_set_look_at(cam, world_origin);
+    camera.yaw = -90.0f;
+    camera.pitch = 0.0f;
+    calculate_orbit_position(camera.position, distance, camera.yaw, camera.pitch);
+    camera_set_look_at(&camera, world_origin);
     printf("Snapped to LEFT view (orbiting world origin)\n");
 }
 
-void camera_snap_to_right(Camera* cam) {
+void camera_snap_to_right() {
     vec3 world_origin = {0.0f, 0.0f, 0.0f};
     vec3 to_origin;
-    glm_vec3_sub(world_origin, cam->position, to_origin);
+    glm_vec3_sub(world_origin, camera.position, to_origin);
     float distance = glm_vec3_norm(to_origin);
     
-    cam->yaw = 90.0f;
-    cam->pitch = 0.0f;
-    calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
-    camera_set_look_at(cam, world_origin);
+    camera.yaw = 90.0f;
+    camera.pitch = 0.0f;
+    calculate_orbit_position(camera.position, distance, camera.yaw, camera.pitch);
+    camera_set_look_at(&camera, world_origin);
     printf("Snapped to RIGHT view (orbiting world origin)\n");
 }
 
-
-void camera_snap_to_top(Camera* cam) {
+void camera_snap_to_top() {
     vec3 world_origin = {0.0f, 0.0f, 0.0f};
     vec3 to_origin;
-    glm_vec3_sub(world_origin, cam->position, to_origin);
+    glm_vec3_sub(world_origin, camera.position, to_origin);
     float distance = glm_vec3_norm(to_origin);
     
     // For top view, we want to look DOWN at the origin
     // This means the camera should be ABOVE looking DOWN
-    cam->pitch = -90.9f; // Just shy of exactly -90 to avoid gimbal lock
-    calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
-    camera_set_look_at(cam, world_origin);
+    camera.pitch = -90.9f; // Just shy of exactly -90 to avoid gimbal lock
+    calculate_orbit_position(camera.position, distance, camera.yaw, camera.pitch);
+    camera_set_look_at(&camera, world_origin);
     printf("Snapped to TOP view (orbiting world origin)\n");
 }
 
-void camera_snap_to_bottom(Camera* cam) {
+void camera_snap_to_bottom() {
     vec3 world_origin = {0.0f, 0.0f, 0.0f};
     vec3 to_origin;
-    glm_vec3_sub(world_origin, cam->position, to_origin);
+    glm_vec3_sub(world_origin, camera.position, to_origin);
     float distance = glm_vec3_norm(to_origin);
     
     // For bottom view, we want to look UP at the origin
     // This means the camera should be BELOW looking UP
-    cam->pitch = 90.9f; // Just shy of exactly 90 to avoid gimbal lock
-    calculate_orbit_position(cam->position, distance, cam->yaw, cam->pitch);
-    camera_set_look_at(cam, world_origin);
+    camera.pitch = 90.9f; // Just shy of exactly 90 to avoid gimbal lock
+    calculate_orbit_position(camera.position, distance, camera.yaw, camera.pitch);
+    camera_set_look_at(&camera, world_origin);
     printf("Snapped to BOTTOM view (orbiting world origin)\n");
+}
+
+void look_at_world_origin() {
+    vec3 world_origin = {0.0f, 0.0f, 0.0f};
+    camera_set_look_at(&camera, world_origin);
 }
 

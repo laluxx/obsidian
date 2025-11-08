@@ -3,6 +3,8 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include "common.h"
+
 typedef struct {
     GLFWwindow *window;
     VkInstance instance;
@@ -61,6 +63,8 @@ typedef struct {
 
     VkPipeline graphicsPipelineBlend;
     VkPipeline graphicsPipelineTextured3DBlend;
+
+    Color clearColor;
 
 } VulkanContext;
 

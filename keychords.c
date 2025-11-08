@@ -5,11 +5,22 @@
 #include <ctype.h>
 #include <GLFW/glfw3.h>
 
-#define KEYCHORD_INIT_CAP 32
+#define KEYCHORD_INIT_CAP 64
 #define DEFAULT_CHORD_TIMEOUT 1.0  // seconds to complete a chord
 static bool should_timeout = false;
 
 KeyChordMap keymap;
+
+// NOTE if we bind let’s say <up> on RELEASE and then we bind <up> again later on PRESS
+// The RELEASE one will always take precedence.
+// But if we bind <up> on PRESS and then rebind it on PRESS again the second one will take precedence
+
+
+KeyChordCallback currentKeychordCallback = NULL;
+
+void registerKeychordCallback(KeyChordCallback callback) {
+    currentKeychordCallback = callback;
+}
 
 
 void keymap_init(KeyChordMap *map) {
@@ -130,15 +141,18 @@ bool parse_keychord_notation(const char *notation, KeyChord *chord) {
 
 bool keychord_bind(KeyChordMap *map, const char *notation,
                    KeyChordAction action,
-                   const char *description) {
+                   const char *description,
+                   int action_type) {
     if (!map || !notation || !action) return false;
     
     KeyChord chord;
     if (!parse_keychord_notation(notation, &chord)) return false;
     
-    // Check if binding already exists and update it
+    // Check if binding already exists with the exact same chord
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, &chord)) {
+            // Found existing binding for this chord, merge action types
+            map->bindings[i].action_type |= action_type;
             map->bindings[i].action = action;
             free(map->bindings[i].description);
             map->bindings[i].description = description ? strdup(description) : NULL;
@@ -157,6 +171,7 @@ bool keychord_bind(KeyChordMap *map, const char *notation,
     binding->action = action;
     binding->description = description ? strdup(description) : NULL;
     binding->notation = strdup(notation);
+    binding->action_type = action_type;
     
     map->count++;
     return true;
@@ -185,11 +200,12 @@ bool keychord_unbind(KeyChordMap *map, const char *notation) {
     return false;
 }
 
-KeyChordAction keychord_lookup(KeyChordMap *map, const KeyChord *chord) {
+KeyChordAction keychord_lookup(KeyChordMap *map, const KeyChord *chord, int action_type) {
     if (!map || !chord) return NULL;
     
     for (size_t i = 0; i < map->count; i++) {
-        if (keychord_equal(&map->bindings[i].chord, chord)) {
+        if (keychord_equal(&map->bindings[i].chord, chord) &&
+            (map->bindings[i].action_type & action_type)) {  // Bitwise check
             return map->bindings[i].action;
         }
     }
@@ -197,19 +213,63 @@ KeyChordAction keychord_lookup(KeyChordMap *map, const KeyChord *chord) {
     return NULL;
 }
 
-
+// TODO Skip also the text_callback if we bound a single key keychord
 bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
-    if (!map || action != GLFW_PRESS) return false;
+    if (!map) return false;
     
     double current_time = glfwGetTime();
     
-    // Check for timeout
-    if (should_timeout) {
+    // First, check for single-key bindings that match the current action type
+    KeyChord single_key_chord;
+    single_key_chord.keys[0] = key;
+    single_key_chord.mods[0] = mods;
+    single_key_chord.length = 1;
+    
+    // Check if this key has bindings for different action types
+    KeyChordAction press_action = keychord_lookup(map, &single_key_chord, GLFW_PRESS);
+    KeyChordAction release_action = keychord_lookup(map, &single_key_chord, GLFW_RELEASE);
+    KeyChordAction repeat_action = keychord_lookup(map, &single_key_chord, GLFW_REPEAT);
+    
+    // If we're on PRESS but this key is ONLY bound to RELEASE or REPEAT (not PRESS), consume it
+    if (action == GLFW_PRESS && !press_action && (release_action || repeat_action)) {
         if (map->current_chord.length > 0) {
-            if (current_time - map->last_key_time > map->chord_timeout) {
-                printf("Chord timeout, resetting\n");
-                keychord_reset_state(map);
+            keychord_reset_state(map);
+        }
+        return true;  // Consume it, don't let it build chords or pass through
+    }
+    
+    // Check if current action matches any binding for this single key
+    // BUT only if we're not in the middle of building a multi-key chord
+    if (map->current_chord.length == 0) {
+        KeyChordAction single_action = keychord_lookup(map, &single_key_chord, action);
+        if (single_action) {
+            // Call the keychord callback before executing the action
+            if (currentKeychordCallback != NULL) {
+                // Find the binding to pass to callback
+                for (size_t i = 0; i < map->count; i++) {
+                    if (keychord_equal(&map->bindings[i].chord, &single_key_chord) &&
+                        (map->bindings[i].action_type & action)) {
+                        currentKeychordCallback(map->bindings[i].notation, &map->bindings[i]);
+                        break;
+                    }
+                }
             }
+            
+            single_action();
+            return true;
+        }
+    }
+    
+    // Only build multi-key chords on PRESS
+    if (action != GLFW_PRESS) {
+        return false;  // Allow other action types to pass through if no single-key match
+    }
+    
+    // Check for timeout
+    if (map->current_chord.length > 0) {
+        if (current_time - map->last_key_time > map->chord_timeout) {
+            printf("Chord timeout, resetting\n");
+            keychord_reset_state(map);
         }
     }
     
@@ -221,10 +281,22 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
         map->last_key_time = current_time;
     }
     
-    // Try to find a matching binding
-    KeyChordAction action_fn = keychord_lookup(map, &map->current_chord);
+    // Try to find a matching multi-key binding (only PRESS makes sense for chords)
+    KeyChordAction action_fn = keychord_lookup(map, &map->current_chord, GLFW_PRESS);
     
     if (action_fn) {
+        // Call the keychord callback before executing the action
+        if (currentKeychordCallback != NULL) {
+            // Find the binding to pass to callback
+            for (size_t i = 0; i < map->count; i++) {
+                if (keychord_equal(&map->bindings[i].chord, &map->current_chord) &&
+                    (map->bindings[i].action_type & GLFW_PRESS)) {
+                    currentKeychordCallback(map->bindings[i].notation, &map->bindings[i]);
+                    break;
+                }
+            }
+        }
+        
         // Found a complete match - execute and reset
         action_fn();
         keychord_reset_state(map);

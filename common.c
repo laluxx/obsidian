@@ -114,6 +114,8 @@ void copyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage i
 
 
 #include <string.h>
+#include <math.h>
+
 
 Color hexToColor(const char *hex) {
     int r, g, b, a = 255;
@@ -124,8 +126,41 @@ Color hexToColor(const char *hex) {
     } else if (len == 7) { // #RRGGBB
         sscanf(hex, "#%02x%02x%02x", &r, &g, &b);
     } else { // Default to red if invalid ERROR
-        return (Color){255, 0, 0, 255};
+        return (Color){1.0f, 0.0f, 0.0f, 1.0f};
     }
     
-    return (Color){r, g, b, a};
+    // Convert from 0-255 to 0.0-1.0
+    float rf = r / 255.0f;
+    float gf = g / 255.0f;
+    float bf = b / 255.0f;
+    float af = a / 255.0f;
+    
+    // Convert sRGB to linear
+    rf = (rf <= 0.04045f) ? rf / 12.92f : powf((rf + 0.055f) / 1.055f, 2.4f);
+    gf = (gf <= 0.04045f) ? gf / 12.92f : powf((gf + 0.055f) / 1.055f, 2.4f);
+    bf = (bf <= 0.04045f) ? bf / 12.92f : powf((bf + 0.055f) / 1.055f, 2.4f);
+    
+    return (Color){rf, gf, bf, af};
 }
+
+/* Color hexToColor(const char *hex) { */
+/*     int r, g, b, a = 255; */
+/*     size_t len = strlen(hex); */
+    
+/*     if (len == 9) { // #RRGGBBAA */
+/*         sscanf(hex, "#%02x%02x%02x%02x", &r, &g, &b, &a); */
+/*     } else if (len == 7) { // #RRGGBB */
+/*         sscanf(hex, "#%02x%02x%02x", &r, &g, &b); */
+/*     } else { // Default to red if invalid ERROR */
+/*         return (Color){1.0f, 0.0f, 0.0f, 1.0f}; */
+/*     } */
+    
+/*     // Convert from 0-255 to 0.0-1.0 */
+/*     return (Color){ */
+/*         r / 255.0f, */
+/*         g / 255.0f, */
+/*         b / 255.0f, */
+/*         a / 255.0f */
+/*     }; */
+/* } */
+
