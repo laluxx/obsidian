@@ -74,6 +74,10 @@ typedef struct {
     Color orderless_match_face_2_fg;
     Color orderless_match_face_3_bg;
     Color orderless_match_face_3_fg;
+
+    Color font_lock_builtin_face_bg;
+    Color font_lock_builtin_face_fg;
+
 } Theme;
 
 

@@ -201,7 +201,15 @@ void registerCursorPosCallback(CursorPosCallback callback) {
 }
 
 
+// Add a flag to track if we should skip the next char callback
+static bool skip_next_char = false;
+
 void internal_char_callback(GLFWwindow* window, unsigned int codepoint) {
+    if (skip_next_char) {
+        skip_next_char = false;
+        return;
+    }
+    
     if (currentTextCallback != NULL) {
         currentTextCallback(codepoint);
     }
@@ -217,8 +225,10 @@ void internal_key_callback(GLFWwindow* window, int key, int scancode, int action
         keysReleased[key] = 1;
     }
     
-    // Process keychords - if a keychord is triggered, don't call user callback
-    if (keychord_process_key(&keymap, key, action, mods)) {
+    // Process keychords - if a keychord is triggered or we're building one, skip char callback
+    bool handled = keychord_process_key(&keymap, key, action, mods);
+    if (handled) {
+        skip_next_char = true;  // Skip the char callback for this key
         return;  // Keychord handled the input, stop here
     }
     

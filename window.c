@@ -252,6 +252,15 @@ double getTime() {
     return glfwGetTime();
 }
 
+const char* getClipboardString() {
+    return glfwGetClipboardString(NULL);
+}
+
+void setClipboardString(const char *text) {
+    glfwSetClipboardString(NULL, text);
+}
+
+
 
 void setInputMode(GLFWwindow* window, int mode, int value) {
     glfwSetInputMode(window, mode, value);

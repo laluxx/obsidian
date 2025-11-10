@@ -17,6 +17,9 @@ void beginFrame();
 void endFrame();
 
 double getTime();
+const char* getClipboardString();
+void setClipboardString(const char *text);
+
 void setInputMode(GLFWwindow* window, int mode, int value);
 void getCursorPos(GLFWwindow* window, double* xpos, double* ypos);
 

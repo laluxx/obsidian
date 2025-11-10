@@ -15,9 +15,6 @@ uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, Vk
     exit(EXIT_FAILURE);
 }
 
-
-///
-
 VkCommandBuffer beginSingleTimeCommands(VkDevice device, VkCommandPool commandPool) {
     VkCommandBufferAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -70,27 +67,31 @@ void transitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkForma
             .layerCount = 1
         }
     };
-
+    
     VkPipelineStageFlags sourceStage;
     VkPipelineStageFlags destinationStage;
-
+    
     if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
         sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
         sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    } else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        // Add this case for updating existing textures
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     } else {
-        fprintf(stderr, "Unsupported layout transition!\n");
+        fprintf(stderr, "Unsupported layout transition from %d to %d!\n", oldLayout, newLayout);
         return;
     }
-
+    
     vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
@@ -115,7 +116,6 @@ void copyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage i
 
 #include <string.h>
 #include <math.h>
-
 
 Color hexToColor(const char *hex) {
     int r, g, b, a = 255;
@@ -142,25 +142,3 @@ Color hexToColor(const char *hex) {
     
     return (Color){rf, gf, bf, af};
 }
-
-/* Color hexToColor(const char *hex) { */
-/*     int r, g, b, a = 255; */
-/*     size_t len = strlen(hex); */
-    
-/*     if (len == 9) { // #RRGGBBAA */
-/*         sscanf(hex, "#%02x%02x%02x%02x", &r, &g, &b, &a); */
-/*     } else if (len == 7) { // #RRGGBB */
-/*         sscanf(hex, "#%02x%02x%02x", &r, &g, &b); */
-/*     } else { // Default to red if invalid ERROR */
-/*         return (Color){1.0f, 0.0f, 0.0f, 1.0f}; */
-/*     } */
-    
-/*     // Convert from 0-255 to 0.0-1.0 */
-/*     return (Color){ */
-/*         r / 255.0f, */
-/*         g / 255.0f, */
-/*         b / 255.0f, */
-/*         a / 255.0f */
-/*     }; */
-/* } */
-

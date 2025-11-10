@@ -31,10 +31,11 @@ typedef struct {
 
 extern KeyChordMap keymap;
 
-// Keychord Callback
-typedef void (*KeyChordCallback)(const char *notation, KeyChordBinding *binding);
-extern KeyChordCallback currentKeychordCallback;
-void registerKeychordCallback(KeyChordCallback callback);
+// Keychord Hook
+typedef void (*AfterKeychordHook)(const char *notation, KeyChordBinding *binding);
+extern AfterKeychordHook internal_after_keychord_hook;
+void register_after_keychord_hook(AfterKeychordHook hook);
+
 
 void keymap_init(KeyChordMap *map);
 void keymap_free(KeyChordMap *map);

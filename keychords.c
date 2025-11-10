@@ -16,10 +16,11 @@ KeyChordMap keymap;
 // But if we bind <up> on PRESS and then rebind it on PRESS again the second one will take precedence
 
 
-KeyChordCallback currentKeychordCallback = NULL;
+// TODO internal_before_keychord_hook
+AfterKeychordHook internal_after_keychord_hook = NULL;
 
-void registerKeychordCallback(KeyChordCallback callback) {
-    currentKeychordCallback = callback;
+void register_after_keychord_hook(AfterKeychordHook hook) {
+    internal_after_keychord_hook = hook;
 }
 
 
@@ -41,6 +42,36 @@ void keymap_free(KeyChordMap *map) {
     map->bindings = NULL;
     map->count = map->capacity = 0;
 }
+
+// Map of shift characters to their base keys
+static const struct {
+    char shifted;
+    char base;
+    int glfw_key;
+} shift_char_map[] = {
+    {'!', '1', GLFW_KEY_1},
+    {'@', '2', GLFW_KEY_2},
+    {'#', '3', GLFW_KEY_3},
+    {'$', '4', GLFW_KEY_4},
+    {'%', '5', GLFW_KEY_5},
+    {'^', '6', GLFW_KEY_6},
+    {'&', '7', GLFW_KEY_7},
+    {'*', '8', GLFW_KEY_8},
+    {'(', '9', GLFW_KEY_9},
+    {')', '0', GLFW_KEY_0},
+    {'_', '-', GLFW_KEY_MINUS},
+    {'+', '=', GLFW_KEY_EQUAL},
+    {'{', '[', GLFW_KEY_LEFT_BRACKET},
+    {'}', ']', GLFW_KEY_RIGHT_BRACKET},
+    {'|', '\\', GLFW_KEY_BACKSLASH},
+    {':', ';', GLFW_KEY_SEMICOLON},
+    {'"', '\'', GLFW_KEY_APOSTROPHE},
+    {'<', ',', GLFW_KEY_COMMA},
+    {'>', '.', GLFW_KEY_PERIOD},
+    {'?', '/', GLFW_KEY_SLASH},
+    {'~', '`', GLFW_KEY_GRAVE_ACCENT},
+    {0, 0, 0}  // sentinel
+};
 
 // Parse a single key with modifiers (e.g., "C-w" or "M-x")
 static bool parse_single_key(const char *notation, int *key_out, int *mods_out) {
@@ -72,11 +103,34 @@ static bool parse_single_key(const char *notation, int *key_out, int *mods_out) 
     // Parse the base key
     if (len == 1) {
         char c = key_part[0];
+        
+        // Check if this is a shift character (like >, <, +, etc.)
+        bool found_shift_char = false;
+        for (int i = 0; shift_char_map[i].shifted != 0; i++) {
+            if (c == shift_char_map[i].shifted) {
+                *key_out = shift_char_map[i].glfw_key;
+                mods |= GLFW_MOD_SHIFT;
+                found_shift_char = true;
+                break;
+            }
+            // Also handle the base character explicitly
+            if (c == shift_char_map[i].base) {
+                *key_out = shift_char_map[i].glfw_key;
+                found_shift_char = true;
+                break;
+            }
+        }
+        
+        if (found_shift_char) {
+            *mods_out = mods;
+            return true;
+        }
+        
+        // Handle letter keys
         if (isalpha(c)) {
             *key_out = toupper(c);  // GLFW always uses uppercase for letter keys
             
             // If the character in notation is uppercase, it means Shift is required
-            // So "L" means Shift+L, "l" means just L
             if (isupper(c)) {
                 mods |= GLFW_MOD_SHIFT;
             }
@@ -213,59 +267,69 @@ KeyChordAction keychord_lookup(KeyChordMap *map, const KeyChord *chord, int acti
     return NULL;
 }
 
-// TODO Skip also the text_callback if we bound a single key keychord
+
 bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     if (!map) return false;
     
+    // Ignore standalone modifier key presses in chord building
+    // These are keys like Shift, Control, Alt themselves (not modified keys)
+    if (key == GLFW_KEY_LEFT_SHIFT   || key == GLFW_KEY_RIGHT_SHIFT   ||
+        key == GLFW_KEY_LEFT_CONTROL || key == GLFW_KEY_RIGHT_CONTROL ||
+        key == GLFW_KEY_LEFT_ALT     || key == GLFW_KEY_RIGHT_ALT     ||
+        key == GLFW_KEY_LEFT_SUPER   || key == GLFW_KEY_RIGHT_SUPER) {
+        // Don't consume these, let them pass through
+        return false;
+    }
+    
     double current_time = glfwGetTime();
     
-    // First, check for single-key bindings that match the current action type
+    // Create a chord for the current key press
     KeyChord single_key_chord;
     single_key_chord.keys[0] = key;
     single_key_chord.mods[0] = mods;
     single_key_chord.length = 1;
     
-    // Check if this key has bindings for different action types
+    // Check what action types are bound to this key
     KeyChordAction press_action = keychord_lookup(map, &single_key_chord, GLFW_PRESS);
     KeyChordAction release_action = keychord_lookup(map, &single_key_chord, GLFW_RELEASE);
     KeyChordAction repeat_action = keychord_lookup(map, &single_key_chord, GLFW_REPEAT);
     
-    // If we're on PRESS but this key is ONLY bound to RELEASE or REPEAT (not PRESS), consume it
+    // If we're on PRESS but this key is ONLY bound to RELEASE or REPEAT, consume it
     if (action == GLFW_PRESS && !press_action && (release_action || repeat_action)) {
         if (map->current_chord.length > 0) {
             keychord_reset_state(map);
         }
-        return true;  // Consume it, don't let it build chords or pass through
+        return true;
     }
     
-    // Check if current action matches any binding for this single key
-    // BUT only if we're not in the middle of building a multi-key chord
+    // Handle single-key bindings (when not building a multi-key chord)
     if (map->current_chord.length == 0) {
         KeyChordAction single_action = keychord_lookup(map, &single_key_chord, action);
         if (single_action) {
-            // Call the keychord callback before executing the action
-            if (currentKeychordCallback != NULL) {
-                // Find the binding to pass to callback
+            // Execute the action first
+            single_action();
+            
+            // Then call the callback after execution
+            if (internal_after_keychord_hook != NULL) {
                 for (size_t i = 0; i < map->count; i++) {
                     if (keychord_equal(&map->bindings[i].chord, &single_key_chord) &&
                         (map->bindings[i].action_type & action)) {
-                        currentKeychordCallback(map->bindings[i].notation, &map->bindings[i]);
+                        internal_after_keychord_hook(map->bindings[i].notation, &map->bindings[i]);
                         break;
                     }
                 }
             }
             
-            single_action();
             return true;
         }
     }
     
     // Only build multi-key chords on PRESS
     if (action != GLFW_PRESS) {
-        return false;  // Allow other action types to pass through if no single-key match
+        return false;
     }
     
-    // Check for timeout
+    // Check for chord timeout
     if (map->current_chord.length > 0) {
         if (current_time - map->last_key_time > map->chord_timeout) {
             printf("Chord timeout, resetting\n");
@@ -281,57 +345,63 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
         map->last_key_time = current_time;
     }
     
-    // Try to find a matching multi-key binding (only PRESS makes sense for chords)
-    KeyChordAction action_fn = keychord_lookup(map, &map->current_chord, GLFW_PRESS);
+    // Try to find a matching multi-key binding
+    KeyChordAction multi_action = keychord_lookup(map, &map->current_chord, GLFW_PRESS);
     
-    if (action_fn) {
-        // Call the keychord callback before executing the action
-        if (currentKeychordCallback != NULL) {
-            // Find the binding to pass to callback
+    if (multi_action) {
+        // Execute the action first
+        multi_action();
+        
+        // Then call the callback after execution
+        if (internal_after_keychord_hook != NULL) {
             for (size_t i = 0; i < map->count; i++) {
                 if (keychord_equal(&map->bindings[i].chord, &map->current_chord) &&
                     (map->bindings[i].action_type & GLFW_PRESS)) {
-                    currentKeychordCallback(map->bindings[i].notation, &map->bindings[i]);
+                    internal_after_keychord_hook(map->bindings[i].notation, &map->bindings[i]);
                     break;
                 }
             }
         }
         
-        // Found a complete match - execute and reset
-        action_fn();
+        // Reset chord state
         keychord_reset_state(map);
-        return true;  // Consumed - don't call user callback
+        return true;
     }
     
     // Check if this could be a prefix for a longer chord
     bool is_prefix = false;
     for (size_t i = 0; i < map->count; i++) {
         KeyChord *bound = &map->bindings[i].chord;
-        if (bound->length > map->current_chord.length) {
-            // Check if current chord matches the beginning of this binding
-            bool matches = true;
-            for (size_t j = 0; j < map->current_chord.length; j++) {
-                if (bound->keys[j] != map->current_chord.keys[j] ||
-                    bound->mods[j] != map->current_chord.mods[j]) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (matches) {
-                is_prefix = true;
+        
+        // Check if bound chord is longer than current
+        if (bound->length <= map->current_chord.length) {
+            continue;
+        }
+        
+        // Check if current chord matches the beginning of this binding
+        bool matches = true;
+        for (size_t j = 0; j < map->current_chord.length; j++) {
+            if (bound->keys[j] != map->current_chord.keys[j] ||
+                bound->mods[j] != map->current_chord.mods[j]) {
+                matches = false;
                 break;
             }
+        }
+        
+        if (matches) {
+            is_prefix = true;
+            break;
         }
     }
     
     if (is_prefix) {
         // We're in the middle of a chord - consume the key
-        return true;  // Don't call user callback
+        return true;
     }
     
     // Not a match and not a prefix - reset and allow normal handling
     keychord_reset_state(map);
-    return false;  // Allow user callback to handle it
+    return false;
 }
 
 KeyChordBinding *keychord_find_binding(KeyChordMap *map, const char *notation) {

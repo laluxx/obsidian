@@ -78,6 +78,7 @@ void renderer_clear_textured3D();
 
 // Texture management
 bool load_texture_from_rgba(VulkanContext* context, unsigned char* rgba_data, uint32_t width, uint32_t height, Texture2D* texture);
+bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture, unsigned char* rgba_data, int width, int height);
 bool load_texture_from_memory(VulkanContext* context, unsigned char* data, size_t data_size, Texture2D* texture);
 int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size);
 
