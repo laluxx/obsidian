@@ -62,3 +62,5 @@ float character_width(Font* font, uint32_t codepoint);
 // Internal: Get or load a character
 Character* font_get_character(Font* font, uint32_t codepoint);
 void font_flush_updates(Font* font);
+
+bool save_font_atlas_png(Font* font, const char* filename);

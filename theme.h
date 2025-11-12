@@ -7,19 +7,14 @@ typedef struct {
     char *name;
     Color bg;
     Color cursor;
-    Color marked_cursor;
     Color text;
     Color minibuffer;
-    Color modeline;
-    Color modeline_inactive;
-    Color modeline_highlight;
     Color modeline_border;
     Color show_paren_match;
     Color isearch_highlight;
     Color minibuffer_prompt;
-    Color region;
     Color region_fg;
-    Color message;
+    Color region_bg;
     Color type;
     Color string;
     Color number;
@@ -33,14 +28,14 @@ typedef struct {
     Color success;
     Color warning;
     Color error;
-    Color fringe;
     Color diff_hl_change;
     Color diff_hl_insert;
     Color diff_hl_change_cursor;
     Color diff_hl_insert_cursor;
     Color diff_hl_bg;
     Color diff_hl_change_bg;
-    Color clock;
+    Color fringe_bg;
+    Color fringe_fg;
     Color header_line;
     Color rainbow_delimiters_base_face;
     Color rainbow_delimiters_depth_1_face;
@@ -63,6 +58,13 @@ typedef struct {
 
     Color button_fg;
     Color button_bg;
+
+    Color window_divider;
+
+    Color mode_line_active_fg;
+    Color mode_line_active_bg;
+    Color mode_line_inactive_fg;
+    Color mode_line_inactive_bg;
 
     Color vertico_current;
 

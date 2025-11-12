@@ -216,6 +216,9 @@ void internal_char_callback(GLFWwindow* window, unsigned int codepoint) {
 }
 
 void internal_key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    // Reset the skip flag at the start of each key event
+    skip_next_char = false;
+    
     // Update the internal state first
     if (action == GLFW_PRESS) {
         keys[key] = 1;
@@ -228,7 +231,8 @@ void internal_key_callback(GLFWwindow* window, int key, int scancode, int action
     // Process keychords - if a keychord is triggered or we're building one, skip char callback
     bool handled = keychord_process_key(&keymap, key, action, mods);
     if (handled) {
-        skip_next_char = true;  // Skip the char callback for this key
+        // If keychord consumed the key (either executed or building), skip the char callback
+        skip_next_char = true;
         return;  // Keychord handled the input, stop here
     }
     

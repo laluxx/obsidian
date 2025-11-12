@@ -317,6 +317,7 @@ float character(Font* font, uint32_t codepoint, float x, float y, Color color) {
     // Calculate position (align baseline)
     float xpos = x + ch->bl;
     float ypos = y - (ch->bh - ch->bt + font->descent);
+
     
     float w = ch->bw;
     float h = ch->bh;

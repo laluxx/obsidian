@@ -847,6 +847,8 @@ void renderer2D_upload() {
     vkUnmapMemory(context.device, context.vertexBufferMemory2D);
 }
 
+
+
 void renderer2D_draw(VkCommandBuffer cmd) {
     if (vertexCount2D == 0) return;
 
@@ -854,6 +856,16 @@ void renderer2D_draw(VkCommandBuffer cmd) {
     glm_ortho(0.0f, (float)context.swapChainExtent.width,
               (float)context.swapChainExtent.height, 0.0f,
               -1.0f, 1.0f, projection);
+
+
+    // NOTE This fixes quad2D positioning but makes the font blurry and rendered in subpixels
+    /* float margin_x = 1.0f; // IDK why */
+    /* float margin_y = 2.0f; // But like this it’s perfect */
+    /* mat4 projection; */
+    /* glm_ortho(0.0f - margin_x, (float)context.swapChainExtent.width + margin_x, */
+    /*           (float)context.swapChainExtent.height + margin_y, 0.0f - margin_y, */
+    /*           -1.0f, 1.0f, projection); */
+
 
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D, offsets);
