@@ -566,6 +566,41 @@ void text3D(Font* font, const char* text_str, vec3 position, float size, Color c
     update_texture_if_needed(font);
 }
 
+// Static variables for FPS calculation
+static double last_fps_time = 0.0;
+static uint32_t frame_count = 0;
+static float current_fps = 0.0f;
+static char fps_text[32] = "FPS: 0";
+
+void fps(Font* font, float x, float y, Color color) {
+    if (!font) return;
+    
+    double current_time = glfwGetTime();
+    
+    // Initialize on first call
+    if (last_fps_time == 0.0) {
+        last_fps_time = current_time;
+        return;
+    }
+    
+    frame_count++;
+    
+    // Calculate FPS every second
+    double elapsed = current_time - last_fps_time;
+    if (elapsed >= 1.0) {
+        current_fps = (float)frame_count / (float)elapsed;
+        frame_count = 0;
+        last_fps_time = current_time;
+        
+        // Only update string when FPS changes
+        snprintf(fps_text, sizeof(fps_text), "FPS: %.0f", current_fps);
+    }
+    
+    // Draw with cached string
+    text(font, fps_text, x, y, color);
+}
+
+
 void destroy_font(Font* font) {
     if (!font) return;
     

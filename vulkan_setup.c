@@ -538,6 +538,7 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .scissorCount = 1,
         .pScissors = &scissor
     };
+   
     
     VkPipelineRasterizationStateCreateInfo rasterizer = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -918,7 +919,7 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .scissorCount = 1,
         .pScissors = &scissor
     };
-    
+
     VkPipelineRasterizationStateCreateInfo rasterizer = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .depthClampEnable = VK_FALSE,
@@ -1100,7 +1101,7 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .minDepth = 0.0f,
         .maxDepth = 1.0f
     };
-
+    
     VkRect2D scissor = {
         .offset = {0, 0},
         .extent = context->swapChainExtent
@@ -1163,7 +1164,7 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .offset = 0,
         .size = sizeof(PushConstants)
     };
-
+    
     // Use the same pipeline layout as regular 3D (or create a separate one if needed)
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1173,8 +1174,7 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .pPushConstantRanges = &pushConstantRange,
     };
     
-    VkPipelineLayout pipelineLayoutLine;
-    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &pipelineLayoutLine) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &context->pipelineLayoutLine) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create line pipeline layout\n");
         exit(EXIT_FAILURE);
     }
@@ -1189,7 +1189,7 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
         .pColorBlendState = &colorBlending,
-        .layout = pipelineLayoutLine,
+        .layout = context->pipelineLayoutLine,
         .renderPass = context->renderPass,
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
@@ -1262,7 +1262,7 @@ void createGraphicsPipeline(VulkanContext* context) {
     };
     
     // ATTRIBUTE DESCRIPTOR
-
+    
     VkVertexInputAttributeDescription attributeDescriptions[4] = {
         {.binding = 0,
          .location = 0,
@@ -1281,7 +1281,7 @@ void createGraphicsPipeline(VulkanContext* context) {
          .format = VK_FORMAT_R32G32_SFLOAT,
          .offset = offsetof(Vertex, texCoord)} // Texture coordinates
     };
-
+    
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
@@ -1289,7 +1289,7 @@ void createGraphicsPipeline(VulkanContext* context) {
         .vertexAttributeDescriptionCount = 4, // Must be 4 now
         .pVertexAttributeDescriptions = attributeDescriptions
     };
-
+    
     // Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1319,6 +1319,7 @@ void createGraphicsPipeline(VulkanContext* context) {
         .scissorCount = 1,
         .pScissors = &scissor
     };
+    
     
     // Rasterizer
     VkPipelineRasterizationStateCreateInfo rasterizer = {
@@ -1632,7 +1633,7 @@ void drawFrame(VulkanContext* context) {
                                             context->imageAvailableSemaphores[frameIndex],
                                             VK_NULL_HANDLE,
                                             &imageIndex
-                                            );
+                                           );
     
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         // TODO: handle swapchain recreation
@@ -1696,28 +1697,28 @@ void drawFrame(VulkanContext* context) {
 
 void createUniformBuffer(VulkanContext* context) {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-
+    
     VkBufferCreateInfo bufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = bufferSize,
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
-
+    
     vkCreateBuffer(context->device, &bufferInfo, NULL, &uniformBuffer);
-
+    
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(context->device, uniformBuffer, &memRequirements);
-
+    
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = 0
     };
-
+    
     allocInfo.memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
+    
     vkAllocateMemory(context->device, &allocInfo, NULL, &uniformBufferMemory);
     vkBindBufferMemory(context->device, uniformBuffer, uniformBufferMemory, 0);
 }
@@ -1730,13 +1731,13 @@ void createDescriptorSetLayout(VulkanContext* context) {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .pImmutableSamplers = NULL
     };
-
+    
     VkDescriptorSetLayoutCreateInfo layoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
         .pBindings = &uboLayoutBinding
     };
-
+    
     vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout);
 }
 
@@ -1760,12 +1761,12 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
 
     VkClearValue clearValues[2];
     clearValues[0].color = (VkClearColorValue){
-        {context->clearColor.r, context->clearColor.g, 
+        {context->clearColor.r, context->clearColor.g,
          context->clearColor.b, context->clearColor.a}
     };
     clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
-    
-    
+
+
     VkRenderPassBeginInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = context->renderPass,
@@ -1777,44 +1778,44 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
         .clearValueCount = 2,
         .pClearValues = clearValues,
     };
-    
+
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    
+
     // Set AO state once globally for all 3D rendering
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
-    
+
     // --- RENDER 3D SOLID GEOMETRY (TRIANGLES) ---
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout,
                             0, 1, &descriptorSet, 0, NULL);
-    
+
     // Draw all meshes
     meshes_draw(cmd, &scene.meshes);
-    
-    // Or specify each one 
+
+    // Or specify each one
     /* Mesh *teapot = get_mesh("teapot"); */
     /* Mesh *cow = get_mesh("cow"); */
     /* mesh(cmd, teapot); */
     /* mesh(cmd, cow); */
-    
-    
+
+
     // Draw immediate mode 3D triangle content (cubes, spheres, etc.)
     renderer_draw(cmd);
-    
+
     // --- RENDER 3D TEXTURED GEOMETRY ---
     renderer_draw_textured3D(cmd);
-    
+
     // --- RENDER LINES WITH LINE PIPELINE ---
     if (context->graphicsPipelineLine && lineVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipelineLine);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout,
                                 0, 1, &descriptorSet, 0, NULL);
         line_renderer_draw(cmd);  // Use the dedicated line renderer
     }
-    
+
     // --- RENDER 2D CONTENT ON TOP (NO DEPTH TEST) ---
     renderer2D_draw(cmd);
-    
+
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
 }
@@ -1827,8 +1828,7 @@ void cleanup(VulkanContext* context) {
     line_renderer_shutdown();
     meshes_destroy(context->device, &scene.meshes);
     
-    // Texture pool is now cleaned up before this function is called
-    // (in main before cleanup() is called)
+    texture_pool_cleanup(context);
     
     // Clean up 2D descriptor resources
     if (context->descriptorSetLayout2D) 
@@ -1868,34 +1868,33 @@ void cleanup(VulkanContext* context) {
     free(context->swapChainImageViews);
     free(context->swapChainImages);
     
-    // GRAPHICS PIPELINE
-    if (context->graphicsPipeline) vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
-    if (context->pipelineLayout) vkDestroyPipelineLayout(context->device, context->pipelineLayout, NULL);
-    
-    // 2D GRAPHICS PIPELINE
-    if (context->graphicsPipeline2D) vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
-    if (context->pipelineLayout2D) vkDestroyPipelineLayout(context->device, context->pipelineLayout2D, NULL);
-    
-    // 3D TEXTURED PIPELINE:
+    // DESTROY ALL PIPELINES FIRST (before their layouts!)
+    if (context->graphicsPipeline) 
+        vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
+    if (context->graphicsPipeline2D) 
+        vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
+    if (context->graphicsPipelineTextured2D) 
+        vkDestroyPipeline(context->device, context->graphicsPipelineTextured2D, NULL);
     if (context->graphicsPipelineTextured3D) 
         vkDestroyPipeline(context->device, context->graphicsPipelineTextured3D, NULL);
-    if (context->pipelineLayoutTextured3D) 
-        vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured3D, NULL);
-    
-    // LINE PIPELINE
     if (context->graphicsPipelineLine) 
         vkDestroyPipeline(context->device, context->graphicsPipelineLine, NULL);
     
+    // NOW DESTROY PIPELINE LAYOUTS (after all pipelines)
+    if (context->pipelineLayout) 
+        vkDestroyPipelineLayout(context->device, context->pipelineLayout, NULL);
+    if (context->pipelineLayout2D) 
+        vkDestroyPipelineLayout(context->device, context->pipelineLayout2D, NULL);
+    if (context->pipelineLayoutTextured2D) 
+        vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured2D, NULL);
+    if (context->pipelineLayoutTextured3D) 
+        vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured3D, NULL);
+    if (context->pipelineLayoutLine) 
+        vkDestroyPipelineLayout(context->device, context->pipelineLayoutLine, NULL);
     
     // 2D VERTEX BUFFER
     if (context->vertexBuffer2D) vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
     if (context->vertexBufferMemory2D) vkFreeMemory(context->device, context->vertexBufferMemory2D, NULL);
-    
-    // TEXTURE GRAPHICS PIPELINE
-    if (context->graphicsPipelineTextured2D) 
-        vkDestroyPipeline(context->device, context->graphicsPipelineTextured2D, NULL);
-    if (context->pipelineLayoutTextured2D) 
-        vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured2D, NULL);
     
     if (context->renderPass) vkDestroyRenderPass(context->device, context->renderPass, NULL);
     
@@ -1922,8 +1921,6 @@ void cleanup(VulkanContext* context) {
     if (context->window) glfwDestroyWindow(context->window);
     glfwTerminate();
 }
-
-/// UTILITY
 
 void toggle_ambient_occlusion() {
     ambientOcclusionEnabled = !ambientOcclusionEnabled;

@@ -19,6 +19,7 @@ typedef struct {
     mat4 vp;
 } UniformBufferObject;
 
+
 void create2DDescriptorSetLayout(VulkanContext* context);
 void create2DDescriptorPool(VulkanContext *context);
 void createDescriptorSet(VulkanContext *context);
@@ -50,7 +51,6 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex);
 
 
 void cleanup(VulkanContext* context);
-
 
 
 void toggle_ambient_occlusion();

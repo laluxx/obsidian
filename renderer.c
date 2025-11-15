@@ -5,6 +5,9 @@
 #include "common.h"
 #include "scene.h"
 
+#include "vulkan_setup.h"
+
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -848,7 +851,6 @@ void renderer2D_upload() {
 }
 
 
-
 void renderer2D_draw(VkCommandBuffer cmd) {
     if (vertexCount2D == 0) return;
 
@@ -856,15 +858,6 @@ void renderer2D_draw(VkCommandBuffer cmd) {
     glm_ortho(0.0f, (float)context.swapChainExtent.width,
               (float)context.swapChainExtent.height, 0.0f,
               -1.0f, 1.0f, projection);
-
-
-    // NOTE This fixes quad2D positioning but makes the font blurry and rendered in subpixels
-    /* float margin_x = 1.0f; // IDK why */
-    /* float margin_y = 2.0f; // But like this it’s perfect */
-    /* mat4 projection; */
-    /* glm_ortho(0.0f - margin_x, (float)context.swapChainExtent.width + margin_x, */
-    /*           (float)context.swapChainExtent.height + margin_y, 0.0f - margin_y, */
-    /*           -1.0f, 1.0f, projection); */
 
 
     VkDeviceSize offsets[] = {0};
@@ -1874,6 +1867,7 @@ void renderer_upload_textured3D() {
     memcpy(data, vertices3D_textured, vertex_count_3D_textured * sizeof(Vertex));
     vkUnmapMemory(device, vertexBufferMemory3D_textured);
 }
+
 
 void renderer_draw_textured3D(VkCommandBuffer cmd) {
     if (texture3DBatchCount == 0) return;

@@ -16,12 +16,17 @@ KeyChordMap keymap;
 // But if we bind <up> on PRESS and then rebind it on PRESS again the second one will take precedence
 
 
-// TODO internal_before_keychord_hook
 AfterKeychordHook internal_after_keychord_hook = NULL;
-
 void register_after_keychord_hook(AfterKeychordHook hook) {
     internal_after_keychord_hook = hook;
 }
+
+BeforeKeychordHook internal_before_keychord_hook = NULL;
+void register_before_keychord_hook(BeforeKeychordHook hook) {
+    internal_before_keychord_hook = hook;
+}
+
+
 
 
 void keymap_init(KeyChordMap *map) {
@@ -157,6 +162,8 @@ static bool parse_single_key(const char *notation, int *key_out, int *mods_out) 
             *key_out = GLFW_KEY_LEFT;
         } else if (strcmp(key_part, "<right>") == 0) {
             *key_out = GLFW_KEY_RIGHT;
+        } else if (strcmp(key_part, "<delete>") == 0) {
+            *key_out = GLFW_KEY_DELETE;
         } else {
             return false;
         }
@@ -272,12 +279,10 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     if (!map) return false;
     
     // Ignore standalone modifier key presses in chord building
-    // These are keys like Shift, Control, Alt themselves (not modified keys)
     if (key == GLFW_KEY_LEFT_SHIFT   || key == GLFW_KEY_RIGHT_SHIFT   ||
         key == GLFW_KEY_LEFT_CONTROL || key == GLFW_KEY_RIGHT_CONTROL ||
         key == GLFW_KEY_LEFT_ALT     || key == GLFW_KEY_RIGHT_ALT     ||
         key == GLFW_KEY_LEFT_SUPER   || key == GLFW_KEY_RIGHT_SUPER) {
-        // Don't consume these, let them pass through
         return false;
     }
     
@@ -306,18 +311,27 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     if (map->current_chord.length == 0) {
         KeyChordAction single_action = keychord_lookup(map, &single_key_chord, action);
         if (single_action) {
-            // Execute the action first
+            // Find the binding for the hooks
+            KeyChordBinding *binding = NULL;
+            for (size_t i = 0; i < map->count; i++) {
+                if (keychord_equal(&map->bindings[i].chord, &single_key_chord) &&
+                    (map->bindings[i].action_type & action)) {
+                    binding = &map->bindings[i];
+                    break;
+                }
+            }
+            
+            // Call BEFORE hook
+            if (internal_before_keychord_hook && binding) {
+                internal_before_keychord_hook(binding->notation, binding);
+            }
+            
+            // Execute the action
             single_action();
             
-            // Then call the callback after execution
-            if (internal_after_keychord_hook != NULL) {
-                for (size_t i = 0; i < map->count; i++) {
-                    if (keychord_equal(&map->bindings[i].chord, &single_key_chord) &&
-                        (map->bindings[i].action_type & action)) {
-                        internal_after_keychord_hook(map->bindings[i].notation, &map->bindings[i]);
-                        break;
-                    }
-                }
+            // Call AFTER hook
+            if (internal_after_keychord_hook && binding) {
+                internal_after_keychord_hook(binding->notation, binding);
             }
             
             return true;
@@ -349,18 +363,27 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     KeyChordAction multi_action = keychord_lookup(map, &map->current_chord, GLFW_PRESS);
     
     if (multi_action) {
-        // Execute the action first
+        // Find the binding for the hooks
+        KeyChordBinding *binding = NULL;
+        for (size_t i = 0; i < map->count; i++) {
+            if (keychord_equal(&map->bindings[i].chord, &map->current_chord) &&
+                (map->bindings[i].action_type & GLFW_PRESS)) {
+                binding = &map->bindings[i];
+                break;
+            }
+        }
+        
+        // Call BEFORE hook
+        if (internal_before_keychord_hook && binding) {
+            internal_before_keychord_hook(binding->notation, binding);
+        }
+        
+        // Execute the action
         multi_action();
         
-        // Then call the callback after execution
-        if (internal_after_keychord_hook != NULL) {
-            for (size_t i = 0; i < map->count; i++) {
-                if (keychord_equal(&map->bindings[i].chord, &map->current_chord) &&
-                    (map->bindings[i].action_type & GLFW_PRESS)) {
-                    internal_after_keychord_hook(map->bindings[i].notation, &map->bindings[i]);
-                    break;
-                }
-            }
+        // Call AFTER hook
+        if (internal_after_keychord_hook && binding) {
+            internal_after_keychord_hook(binding->notation, binding);
         }
         
         // Reset chord state

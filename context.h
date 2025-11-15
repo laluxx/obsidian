@@ -60,12 +60,12 @@ typedef struct {
     VkPipelineLayout pipelineLayoutTextured3D;
 
     VkPipeline graphicsPipelineLine;
-
+    VkPipelineLayout pipelineLayoutLine;
+    
     VkPipeline graphicsPipelineBlend;
     VkPipeline graphicsPipelineTextured3DBlend;
 
     Color clearColor;
-
 } VulkanContext;
 
 extern VulkanContext context;

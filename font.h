@@ -55,6 +55,8 @@ float character(Font* font, uint32_t codepoint, float x, float y, Color color);
 void text(Font* font, const char* text, float x, float y, Color color);
 void text3D(Font* font, const char* text_str, vec3 position, float size, Color color);
 
+void fps(Font* font, float x, float y, Color color);
+
 float font_height(Font* font);
 float font_width(Font* font);
 float character_width(Font* font, uint32_t codepoint);

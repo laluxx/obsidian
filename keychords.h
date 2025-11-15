@@ -37,6 +37,12 @@ extern AfterKeychordHook internal_after_keychord_hook;
 void register_after_keychord_hook(AfterKeychordHook hook);
 
 
+typedef void (*BeforeKeychordHook)(const char *notation, KeyChordBinding *binding);
+extern BeforeKeychordHook internal_before_keychord_hook;
+void register_before_keychord_hook(BeforeKeychordHook hook);
+
+
+
 void keymap_init(KeyChordMap *map);
 void keymap_free(KeyChordMap *map);
 
