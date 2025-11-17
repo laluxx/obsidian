@@ -15,7 +15,6 @@ KeyChordMap keymap;
 // The RELEASE one will always take precedence.
 // But if we bind <up> on PRESS and then rebind it on PRESS again the second one will take precedence
 
-
 AfterKeychordHook internal_after_keychord_hook = NULL;
 void register_after_keychord_hook(AfterKeychordHook hook) {
     internal_after_keychord_hook = hook;
@@ -25,8 +24,6 @@ BeforeKeychordHook internal_before_keychord_hook = NULL;
 void register_before_keychord_hook(BeforeKeychordHook hook) {
     internal_before_keychord_hook = hook;
 }
-
-
 
 
 void keymap_init(KeyChordMap *map) {
@@ -40,6 +37,9 @@ void keymap_init(KeyChordMap *map) {
 
 void keymap_free(KeyChordMap *map) {
     for (size_t i = 0; i < map->count; i++) {
+        if (map->bindings[i].action_type == ACTION_SCHEME_PROC) {
+            scm_gc_unprotect_object(map->bindings[i].action.scheme_proc);
+        }
         free(map->bindings[i].description);
         free(map->bindings[i].notation);
     }
@@ -209,12 +209,72 @@ bool keychord_bind(KeyChordMap *map, const char *notation,
     KeyChord chord;
     if (!parse_keychord_notation(notation, &chord)) return false;
     
-    // Check if binding already exists with the exact same chord
+    // Check if binding already exists
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, &chord)) {
-            // Found existing binding for this chord, merge action types
-            map->bindings[i].action_type |= action_type;
-            map->bindings[i].action = action;
+            // If it was a Scheme proc, unprotect it
+            if (map->bindings[i].action_type == ACTION_SCHEME_PROC) {
+                scm_gc_unprotect_object(map->bindings[i].action.scheme_proc);
+            }
+            
+            // Update binding
+            map->bindings[i].action_type = ACTION_C_FUNCTION;
+            map->bindings[i].action.c_action = action;
+            map->bindings[i].action_type_flag |= action_type;
+            
+            // Free and update description
+            if (map->bindings[i].description) {
+                free(map->bindings[i].description);
+            }
+            map->bindings[i].description = description ? strdup(description) : NULL;
+            
+            return true;
+        }
+    }
+    
+    // Add new binding
+    if (map->count >= map->capacity) {
+        map->capacity *= 2;
+        map->bindings = realloc(map->bindings, map->capacity * sizeof(KeyChordBinding));
+    }
+    
+    KeyChordBinding *binding = &map->bindings[map->count];
+    binding->chord = chord;
+    binding->action_type = ACTION_C_FUNCTION;
+    binding->action.c_action = action;
+    binding->description = description ? strdup(description) : NULL;  // Always strdup!
+    binding->notation = strdup(notation);
+    binding->action_type_flag = action_type;
+    
+    map->count++;
+    return true;
+}
+
+bool keychord_bind_scheme(KeyChordMap *map, const char *notation, SCM scheme_proc,
+                          const char *description, int action_type) {
+    if (!map || !notation || !scm_is_true(scm_procedure_p(scheme_proc))) {
+        return false;
+    }
+    
+    KeyChord chord;
+    if (!parse_keychord_notation(notation, &chord)) return false;
+    
+    // Check if binding already exists
+    for (size_t i = 0; i < map->count; i++) {
+        if (keychord_equal(&map->bindings[i].chord, &chord)) {
+            // Update existing binding
+            // If it was a Scheme proc, unprotect the old one
+            if (map->bindings[i].action_type == ACTION_SCHEME_PROC) {
+                scm_gc_unprotect_object(map->bindings[i].action.scheme_proc);
+            }
+            
+            map->bindings[i].action_type = ACTION_SCHEME_PROC;
+            map->bindings[i].action.scheme_proc = scheme_proc;
+            map->bindings[i].action_type_flag |= action_type;
+            
+            // Protect the new procedure from GC
+            scm_gc_protect_object(scheme_proc);
+            
             free(map->bindings[i].description);
             map->bindings[i].description = description ? strdup(description) : NULL;
             return true;
@@ -229,10 +289,14 @@ bool keychord_bind(KeyChordMap *map, const char *notation,
     
     KeyChordBinding *binding = &map->bindings[map->count];
     binding->chord = chord;
-    binding->action = action;
+    binding->action_type = ACTION_SCHEME_PROC;
+    binding->action.scheme_proc = scheme_proc;
     binding->description = description ? strdup(description) : NULL;
     binding->notation = strdup(notation);
-    binding->action_type = action_type;
+    binding->action_type_flag = action_type;
+    
+    // Protect from GC
+    scm_gc_protect_object(scheme_proc);
     
     map->count++;
     return true;
@@ -246,6 +310,11 @@ bool keychord_unbind(KeyChordMap *map, const char *notation) {
     
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, &chord)) {
+            // If it's a Scheme proc, unprotect it first!
+            if (map->bindings[i].action_type == ACTION_SCHEME_PROC) {
+                scm_gc_unprotect_object(map->bindings[i].action.scheme_proc);
+            }
+            
             free(map->bindings[i].description);
             free(map->bindings[i].notation);
             
@@ -261,19 +330,29 @@ bool keychord_unbind(KeyChordMap *map, const char *notation) {
     return false;
 }
 
-KeyChordAction keychord_lookup(KeyChordMap *map, const KeyChord *chord, int action_type) {
+KeyChordBinding *keychord_lookup_binding(KeyChordMap *map, const KeyChord *chord, int action_type) {
     if (!map || !chord) return NULL;
     
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, chord) &&
-            (map->bindings[i].action_type & action_type)) {  // Bitwise check
-            return map->bindings[i].action;
+            (map->bindings[i].action_type_flag & action_type)) {
+            return &map->bindings[i];
         }
     }
     
     return NULL;
 }
 
+// Helper to execute a binding
+static void execute_binding(KeyChordBinding *binding) {
+    if (!binding) return;
+    
+    if (binding->action_type == ACTION_C_FUNCTION) {
+        binding->action.c_action();
+    } else if (binding->action_type == ACTION_SCHEME_PROC) {
+        scm_call_0(binding->action.scheme_proc);
+    }
+}
 
 bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     if (!map) return false;
@@ -295,12 +374,12 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     single_key_chord.length = 1;
     
     // Check what action types are bound to this key
-    KeyChordAction press_action = keychord_lookup(map, &single_key_chord, GLFW_PRESS);
-    KeyChordAction release_action = keychord_lookup(map, &single_key_chord, GLFW_RELEASE);
-    KeyChordAction repeat_action = keychord_lookup(map, &single_key_chord, GLFW_REPEAT);
+    KeyChordBinding *press_binding = keychord_lookup_binding(map, &single_key_chord, GLFW_PRESS);
+    KeyChordBinding *release_binding = keychord_lookup_binding(map, &single_key_chord, GLFW_RELEASE);
+    KeyChordBinding *repeat_binding = keychord_lookup_binding(map, &single_key_chord, GLFW_REPEAT);
     
     // If we're on PRESS but this key is ONLY bound to RELEASE or REPEAT, consume it
-    if (action == GLFW_PRESS && !press_action && (release_action || repeat_action)) {
+    if (action == GLFW_PRESS && !press_binding && (release_binding || repeat_binding)) {
         if (map->current_chord.length > 0) {
             keychord_reset_state(map);
         }
@@ -309,28 +388,18 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     
     // Handle single-key bindings (when not building a multi-key chord)
     if (map->current_chord.length == 0) {
-        KeyChordAction single_action = keychord_lookup(map, &single_key_chord, action);
-        if (single_action) {
-            // Find the binding for the hooks
-            KeyChordBinding *binding = NULL;
-            for (size_t i = 0; i < map->count; i++) {
-                if (keychord_equal(&map->bindings[i].chord, &single_key_chord) &&
-                    (map->bindings[i].action_type & action)) {
-                    binding = &map->bindings[i];
-                    break;
-                }
-            }
-            
+        KeyChordBinding *binding = keychord_lookup_binding(map, &single_key_chord, action);
+        if (binding) {
             // Call BEFORE hook
-            if (internal_before_keychord_hook && binding) {
+            if (internal_before_keychord_hook) {
                 internal_before_keychord_hook(binding->notation, binding);
             }
             
             // Execute the action
-            single_action();
+            execute_binding(binding);
             
             // Call AFTER hook
-            if (internal_after_keychord_hook && binding) {
+            if (internal_after_keychord_hook) {
                 internal_after_keychord_hook(binding->notation, binding);
             }
             
@@ -360,30 +429,20 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     }
     
     // Try to find a matching multi-key binding
-    KeyChordAction multi_action = keychord_lookup(map, &map->current_chord, GLFW_PRESS);
+    KeyChordBinding *multi_binding = keychord_lookup_binding(map, &map->current_chord, GLFW_PRESS);
     
-    if (multi_action) {
-        // Find the binding for the hooks
-        KeyChordBinding *binding = NULL;
-        for (size_t i = 0; i < map->count; i++) {
-            if (keychord_equal(&map->bindings[i].chord, &map->current_chord) &&
-                (map->bindings[i].action_type & GLFW_PRESS)) {
-                binding = &map->bindings[i];
-                break;
-            }
-        }
-        
+    if (multi_binding) {
         // Call BEFORE hook
-        if (internal_before_keychord_hook && binding) {
-            internal_before_keychord_hook(binding->notation, binding);
+        if (internal_before_keychord_hook) {
+            internal_before_keychord_hook(multi_binding->notation, multi_binding);
         }
         
         // Execute the action
-        multi_action();
+        execute_binding(multi_binding);
         
         // Call AFTER hook
-        if (internal_after_keychord_hook && binding) {
-            internal_after_keychord_hook(binding->notation, binding);
+        if (internal_after_keychord_hook) {
+            internal_after_keychord_hook(multi_binding->notation, multi_binding);
         }
         
         // Reset chord state

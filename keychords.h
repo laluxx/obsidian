@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "input.h"
+#include <libguile.h>
 
 // Key sequence for chord support (e.g., "C-x C-s")
 typedef struct {
@@ -12,12 +13,23 @@ typedef struct {
 
 typedef void (*KeyChordAction)(void);
 
+typedef enum {
+    ACTION_C_FUNCTION,
+    ACTION_SCHEME_PROC
+} ActionType;
+
+typedef void (*KeyChordAction)(void);
+
 typedef struct {
     KeyChord chord;
-    KeyChordAction action;
+    ActionType action_type;
+    union {
+        KeyChordAction c_action;
+        SCM scheme_proc;
+    } action;
     char *description;
-    char *notation; // Original notation
-    int action_type; // PRESS, RELEASE, or REPEAT (or bitwise combination)
+    char *notation;       // Original notation
+    int action_type_flag; // PRESS, RELEASE, or REPEAT (or bitwise combination)
 } KeyChordBinding;
 
 typedef struct {
@@ -26,7 +38,7 @@ typedef struct {
     size_t capacity;
     KeyChord current_chord;
     double last_key_time;
-    double chord_timeout;   // Time in seconds to wait for next key in chord
+    double chord_timeout;   // TODO REMOVEME Time in seconds to wait for next key in chord
 } KeyChordMap;
 
 extern KeyChordMap keymap;
@@ -47,8 +59,14 @@ void keymap_init(KeyChordMap *map);
 void keymap_free(KeyChordMap *map);
 
 bool parse_keychord_notation(const char *notation, KeyChord *chord);
+
 bool keychord_bind(KeyChordMap *map, const char *notation, KeyChordAction action, 
                    const char *description, int action_type);
+
+bool keychord_bind_scheme(KeyChordMap *map, const char *notation, SCM scheme_proc,
+                          const char *description, int action_type);
+
+
 bool keychord_unbind(KeyChordMap *map, const char *notation);
 KeyChordAction keychord_lookup(KeyChordMap *map, const KeyChord *chord, int action_type);
 bool keychord_process_key(KeyChordMap *map, int key, int action, int mods);

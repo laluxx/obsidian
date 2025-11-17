@@ -585,8 +585,8 @@ static void keybinding_selected(void* data) {
                binding->description ? binding->description : "No description");
         
         // Execute the action
-        if (binding->action) {
-            binding->action();
+        if (binding->action.c_action) {
+            binding->action.c_action();
         }
     }
 }
