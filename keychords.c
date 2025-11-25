@@ -564,3 +564,229 @@ void keymap_reset_state() {
     keymap.current_chord.length = 0;
     keymap.last_key_time = 0.0;
 }
+
+
+// Keymap stack for layered keymaps (local maps have priority over global)
+KeyChordMap *keymap_stack[MAX_KEYMAP_STACK] = {NULL};
+size_t keymap_stack_count = 0;
+
+void keymap_stack_push(KeyChordMap *map) {
+    if (keymap_stack_count < MAX_KEYMAP_STACK) {
+        keymap_stack[keymap_stack_count++] = map;
+    }
+}
+
+void keymap_stack_pop(void) {
+    if (keymap_stack_count > 0) {
+        keymap_stack_count--;
+        keymap_stack[keymap_stack_count] = NULL;
+    }
+}
+
+void keymap_stack_clear(void) {
+    for (size_t i = 0; i < keymap_stack_count; i++) {
+        keymap_stack[i] = NULL;
+    }
+    keymap_stack_count = 0;
+}
+
+KeyChordMap* keymap_stack_get_local(void) {
+    if (keymap_stack_count > 0) {
+        return keymap_stack[keymap_stack_count - 1];
+    }
+    return NULL;
+}
+
+
+// Check if a chord is a prefix of any binding in a keymap
+static bool is_chord_prefix(KeyChordMap *map, const KeyChord *current_chord) {
+    if (!map || !current_chord) return false;
+    
+    for (size_t i = 0; i < map->count; i++) {
+        KeyChord *bound = &map->bindings[i].chord;
+        
+        // Check if bound chord is longer than current
+        if (bound->length <= current_chord->length) {
+            continue;
+        }
+        
+        // Check if current chord matches the beginning of this binding
+        bool matches = true;
+        for (size_t j = 0; j < current_chord->length; j++) {
+            if (bound->keys[j] != current_chord->keys[j] ||
+                bound->mods[j] != current_chord->mods[j]) {
+                matches = false;
+                break;
+            }
+        }
+        
+        if (matches) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// Process key with keymap stack (local maps first, then global)
+bool keychord_process_key_with_stack(int key, int action, int mods) {
+    // Ignore standalone modifier keys
+    if (key == GLFW_KEY_LEFT_SHIFT   || key == GLFW_KEY_RIGHT_SHIFT   ||
+        key == GLFW_KEY_LEFT_CONTROL || key == GLFW_KEY_RIGHT_CONTROL ||
+        key == GLFW_KEY_LEFT_ALT     || key == GLFW_KEY_RIGHT_ALT     ||
+        key == GLFW_KEY_LEFT_SUPER   || key == GLFW_KEY_RIGHT_SUPER) {
+        return false;
+    }
+    
+    double current_time = glfwGetTime();
+    
+    // Create a chord for the current key
+    KeyChord single_key_chord;
+    single_key_chord.keys[0] = key;
+    single_key_chord.mods[0] = mods;
+    single_key_chord.length = 1;
+    
+    // Check if we're building a chord in any keymap
+    bool building_chord = false;
+    KeyChordMap *active_chord_map = NULL;
+    
+    // Check local keymaps first
+    for (int i = keymap_stack_count - 1; i >= 0; i--) {
+        if (keymap_stack[i] && keymap_stack[i]->current_chord.length > 0) {
+            building_chord = true;
+            active_chord_map = keymap_stack[i];
+            break;
+        }
+    }
+    
+    // Check global keymap
+    if (!building_chord && keymap.current_chord.length > 0) {
+        building_chord = true;
+        active_chord_map = &keymap;
+    }
+    
+    // Handle single-key bindings (when not building a chord)
+    if (!building_chord) {
+        // Check local keymaps first (top of stack has priority)
+        for (int i = keymap_stack_count - 1; i >= 0; i--) {
+            KeyChordMap *local = keymap_stack[i];
+            if (!local) continue;
+            
+            KeyChordBinding *binding = keychord_lookup_binding(local, &single_key_chord, action);
+            if (binding) {
+                // Found in local keymap - execute it
+                if (internal_before_keychord_hook) {
+                    internal_before_keychord_hook(binding->notation, binding);
+                }
+                
+                execute_binding(binding);
+                
+                if (internal_after_keychord_hook) {
+                    internal_after_keychord_hook(binding->notation, binding);
+                }
+                
+                return true;
+            }
+        }
+        
+        // Not found in any local keymap, check global
+        KeyChordBinding *global_binding = keychord_lookup_binding(&keymap, &single_key_chord, action);
+        if (global_binding) {
+            if (internal_before_keychord_hook) {
+                internal_before_keychord_hook(global_binding->notation, global_binding);
+            }
+            
+            execute_binding(global_binding);
+            
+            if (internal_after_keychord_hook) {
+                internal_after_keychord_hook(global_binding->notation, global_binding);
+            }
+            
+            return true;
+        }
+        
+        // No direct binding found, but check if this could start a multi-key chord
+        // Only do this on PRESS
+        if (action != GLFW_PRESS) {
+            return false;
+        }
+        
+        // Check if this key is a prefix in any local keymap
+        for (int i = keymap_stack_count - 1; i >= 0; i--) {
+            if (keymap_stack[i] && is_chord_prefix(keymap_stack[i], &single_key_chord)) {
+                // Start building chord in this local map
+                keymap_stack[i]->current_chord = single_key_chord;
+                keymap_stack[i]->last_key_time = current_time;
+                return true;
+            }
+        }
+        
+        // Check if it's a prefix in global keymap
+        if (is_chord_prefix(&keymap, &single_key_chord)) {
+            // Start building chord in global map
+            keymap.current_chord = single_key_chord;
+            keymap.last_key_time = current_time;
+            return true;
+        }
+        
+        // Not a binding and not a prefix
+        return false;
+    }
+    
+    // We're building a multi-key chord
+    // Only build multi-key chords on PRESS
+    if (action != GLFW_PRESS) {
+        return false;
+    }
+    
+    // Check for chord timeout
+    if (active_chord_map && current_time - active_chord_map->last_key_time > active_chord_map->chord_timeout) {
+        // Reset all keymaps on timeout
+        for (size_t i = 0; i < keymap_stack_count; i++) {
+            if (keymap_stack[i]) {
+                keychord_reset_state(keymap_stack[i]);
+            }
+        }
+        keychord_reset_state(&keymap);
+        building_chord = false;
+        active_chord_map = NULL;
+        // Try processing this key again as a new chord
+        return keychord_process_key_with_stack(key, action, mods);
+    }
+    
+    // Add key to the active chord map's current chord
+    if (active_chord_map->current_chord.length < 4) {
+        active_chord_map->current_chord.keys[active_chord_map->current_chord.length] = key;
+        active_chord_map->current_chord.mods[active_chord_map->current_chord.length] = mods;
+        active_chord_map->current_chord.length++;
+        active_chord_map->last_key_time = current_time;
+    }
+    
+    // Try to find a matching multi-key binding
+    KeyChordBinding *multi_binding = keychord_lookup_binding(active_chord_map, &active_chord_map->current_chord, GLFW_PRESS);
+    
+    if (multi_binding) {
+        if (internal_before_keychord_hook) {
+            internal_before_keychord_hook(multi_binding->notation, multi_binding);
+        }
+        
+        execute_binding(multi_binding);
+        
+        if (internal_after_keychord_hook) {
+            internal_after_keychord_hook(multi_binding->notation, multi_binding);
+        }
+        
+        keychord_reset_state(active_chord_map);
+        return true;
+    }
+    
+    // Check if this could be a prefix for a longer chord
+    if (is_chord_prefix(active_chord_map, &active_chord_map->current_chord)) {
+        // We're in the middle of a chord - consume the key
+        return true;
+    }
+    
+    // Not a match and not a prefix - reset and allow normal handling
+    keychord_reset_state(active_chord_map);
+    return false;
+}

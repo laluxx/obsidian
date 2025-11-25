@@ -80,11 +80,11 @@ typedef struct {
     Color font_lock_builtin_face_bg;
     Color font_lock_builtin_face_fg;
 
-} Theme;
+} ColorScheme;
 
 
 void initThemes();
-const Theme* getCurrentTheme();
+const ColorScheme* getCurrentTheme();
 void nextTheme();
 void previousTheme();
 void switchToTheme(int index);

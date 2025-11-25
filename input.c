@@ -228,12 +228,11 @@ void internal_key_callback(GLFWwindow* window, int key, int scancode, int action
         keysReleased[key] = 1;
     }
     
-    // Process keychords - if a keychord is triggered or we're building one, skip char callback
-    bool handled = keychord_process_key(&keymap, key, action, mods);
+    // Process keychords with stack (local maps have priority)
+    bool handled = keychord_process_key_with_stack(key, action, mods);
     if (handled) {
-        // If keychord consumed the key (either executed or building), skip the char callback
         skip_next_char = true;
-        return;  // Keychord handled the input, stop here
+        return;
     }
     
     // Then call the user's callback if it's registered and keychord didn't handle it
@@ -241,6 +240,33 @@ void internal_key_callback(GLFWwindow* window, int key, int scancode, int action
         currentKeyCallback(key, action, mods);
     }
 }
+
+/* void internal_key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) { */
+/*     // Reset the skip flag at the start of each key event */
+/*     skip_next_char = false; */
+    
+/*     // Update the internal state first */
+/*     if (action == GLFW_PRESS) { */
+/*         keys[key] = 1; */
+/*         keysPressed[key] = 1; */
+/*     } else if (action == GLFW_RELEASE) { */
+/*         keys[key] = 0; */
+/*         keysReleased[key] = 1; */
+/*     } */
+    
+/*     // Process keychords - if a keychord is triggered or we're building one, skip char callback */
+/*     bool handled = keychord_process_key(&keymap, key, action, mods); */
+/*     if (handled) { */
+/*         // If keychord consumed the key (either executed or building), skip the char callback */
+/*         skip_next_char = true; */
+/*         return;  // Keychord handled the input, stop here */
+/*     } */
+    
+/*     // Then call the user's callback if it's registered and keychord didn't handle it */
+/*     if (currentKeyCallback != NULL) { */
+/*         currentKeyCallback(key, action, mods); */
+/*     } */
+/* } */
 
 void internal_mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
     if (currentMouseButtonCallback != NULL) {
