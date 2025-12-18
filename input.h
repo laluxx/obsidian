@@ -16,24 +16,30 @@ typedef void (*KeyInputCallback)(int key, int action, int mods);
 typedef void (*MouseButtonCallback)(int button, int action, int mods);
 typedef void (*CursorPosCallback)(double xpos, double ypos);
 typedef void (*ScrollCallback)(double xOffset, double deltaY);
+typedef void (*WindowResizeCallback)(int width, int height);
 
 extern TextCallback currentTextCallback;
 extern KeyInputCallback currentKeyCallback;
 extern MouseButtonCallback currentMouseButtonCallback;
 extern CursorPosCallback currentCursorPosCallback;
 extern ScrollCallback currentScrollCallback;
+extern WindowResizeCallback currentResizeCallback;
 
 void registerTextCallback(TextCallback callback);
 void registerKeyCallback(KeyInputCallback callback);
 void registerMouseButtonCallback(MouseButtonCallback callback);
 void registerCursorPosCallback(CursorPosCallback callback);
 void registerScrollCallback(ScrollCallback callback);
+void registerWindowResizeCallback(WindowResizeCallback callback);
 
 void internal_char_callback(GLFWwindow* window, unsigned int codepoint);
 void internal_key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
 void internal_mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
 void internal_cursor_position_callback(GLFWwindow* window, double xpos, double ypos);
 void internal_scroll_callback(GLFWwindow* window, double xOffset, double yOffset);
+void internal_window_resize_callback(GLFWwindow* window, int width, int height);
+
+
 
 
 void init_input();

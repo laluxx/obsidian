@@ -20,6 +20,10 @@ typedef struct {
 } UniformBufferObject;
 
 
+void recreateSwapChain(VulkanContext* context);
+void cleanupSwapChain(VulkanContext* context);
+
+
 void create2DDescriptorSetLayout(VulkanContext* context);
 void create2DDescriptorPool(VulkanContext *context);
 void createDescriptorSet(VulkanContext *context);

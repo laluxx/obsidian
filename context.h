@@ -4,7 +4,7 @@
 #include <GLFW/glfw3.h>
 
 #include "common.h"
-
+#include <stdbool.h>
 typedef struct {
     GLFWwindow *window;
     VkInstance instance;
@@ -66,6 +66,7 @@ typedef struct {
     VkPipeline graphicsPipelineTextured3DBlend;
 
     Color clearColor;
+    bool framebufferResized;
 } VulkanContext;
 
 extern VulkanContext context;

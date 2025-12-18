@@ -3,6 +3,10 @@
 #define WIDTH 800
 #define HEIGHT 600
 
+#define CURSOR_NORMAL   GLFW_CURSOR_NORMAL
+#define CURSOR_HIDDEN   GLFW_CURSOR_HIDDEN
+#define CURSOR_DISABLED GLFW_CURSOR_DISABLED
+
 #include "context.h"
 #include "camera.h"
 
@@ -22,6 +26,15 @@ void setClipboardString(const char *text);
 
 void setInputMode(GLFWwindow* window, int mode, int value);
 void getCursorPos(GLFWwindow* window, double* xpos, double* ypos);
+
+
+void setCursorMode(int mode);
+int getCursorMode();
+void showCursor();
+void hideCursor();
+void disableCursor();
+
+
 
 void toggle_editor_mode();
 

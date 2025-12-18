@@ -285,20 +285,35 @@ void createSwapChain(VulkanContext* context) {
     
     VkSurfaceFormatKHR surfaceFormat = {
         .format = VK_FORMAT_B8G8R8A8_SRGB,
-        /* .format = VK_FORMAT_B8G8R8A8_UNORM, */
         .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
     };
     
-    /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR; // Supported by all implementations, it enforces VSync */
-    VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR; // No VSync, low latency, but possible tearing
-    /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, lower latency than FIFO, no tearing, but higher GPU load. */
-    /* VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR; */
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
     
-    VkExtent2D extent = capabilities.currentExtent.width != UINT32_MAX ? 
-        capabilities.currentExtent : 
-        (VkExtent2D){WIDTH, HEIGHT};
+    // FIX: Get actual current framebuffer size instead of using hardcoded WIDTH/HEIGHT
+    VkExtent2D extent;
+    if (capabilities.currentExtent.width != UINT32_MAX) {
+        extent = capabilities.currentExtent;
+    } else {
+        // Fallback: query actual window size
+        int width, height;
+        glfwGetFramebufferSize(context->window, &width, &height);
+        
+        extent.width = (uint32_t)width;
+        extent.height = (uint32_t)height;
+        
+        // Clamp to allowed values
+        extent.width = extent.width < capabilities.minImageExtent.width ? 
+                       capabilities.minImageExtent.width : extent.width;
+        extent.width = extent.width > capabilities.maxImageExtent.width ? 
+                       capabilities.maxImageExtent.width : extent.width;
+        extent.height = extent.height < capabilities.minImageExtent.height ? 
+                        capabilities.minImageExtent.height : extent.height;
+        extent.height = extent.height > capabilities.maxImageExtent.height ? 
+                        capabilities.maxImageExtent.height : extent.height;
+    }
     
-    // Ensure we stay within bounds
+    // Rest of the function stays the same...
     uint32_t imageCount = capabilities.minImageCount + 1;
     if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount) {
         imageCount = capabilities.maxImageCount;
@@ -332,6 +347,8 @@ void createSwapChain(VulkanContext* context) {
     
     context->swapChainImageFormat = surfaceFormat.format;
     context->swapChainExtent = extent;
+    
+    /* printf("Swapchain created with extent: %dx%d\n", extent.width, extent.height); */
 }
 
 void createImageViews(VulkanContext* context) {
@@ -1821,6 +1838,94 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
 }
 
 
+
+void cleanupSwapChain(VulkanContext* context) {
+    // Wait for device to finish operations
+    vkDeviceWaitIdle(context->device);
+    
+    // Destroy framebuffers
+    for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
+        vkDestroyFramebuffer(context->device, context->swapChainFramebuffers[i], NULL);
+    }
+    free(context->swapChainFramebuffers);
+    
+    // Destroy image views
+    for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
+        vkDestroyImageView(context->device, context->swapChainImageViews[i], NULL);
+    }
+    free(context->swapChainImageViews);
+    
+    // Destroy depth resources
+    vkDestroyImageView(context->device, context->depthImageView, NULL);
+    vkDestroyImage(context->device, context->depthImage, NULL);
+    vkFreeMemory(context->device, context->depthImageMemory, NULL);
+    
+    // Destroy swapchain
+    vkDestroySwapchainKHR(context->device, context->swapChain, NULL);
+    
+    // Free swapchain images array (they're destroyed with swapchain)
+    free(context->swapChainImages);
+}
+
+
+// In vulkan_setup.c - REPLACE the entire recreateSwapChain() function with this:
+
+void recreateSwapChain(VulkanContext* context) {
+    // Handle minimization - wait until window is visible again
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(context->window, &width, &height);
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(context->window, &width, &height);
+        glfwWaitEvents();
+    }
+    
+    vkDeviceWaitIdle(context->device);
+    
+    // Clean up old swapchain
+    cleanupSwapChain(context);
+    
+    // Recreate swapchain and dependent resources
+    createSwapChain(context);
+    createImageViews(context);
+    createDepthResources(context);
+    
+    // RECREATE ALL PIPELINES with new viewport/scissor dimensions
+    // Destroy old pipelines first
+    if (context->graphicsPipeline) 
+        vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
+    if (context->graphicsPipeline2D) 
+        vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
+    if (context->graphicsPipelineTextured2D) 
+        vkDestroyPipeline(context->device, context->graphicsPipelineTextured2D, NULL);
+    if (context->graphicsPipelineTextured3D) 
+        vkDestroyPipeline(context->device, context->graphicsPipelineTextured3D, NULL);
+    if (context->graphicsPipelineLine) 
+        vkDestroyPipeline(context->device, context->graphicsPipelineLine, NULL);
+    
+    // Recreate all pipelines with correct viewport/scissor
+    createGraphicsPipeline(context);
+    create3DTexturedGraphicsPipeline(context);
+    create2DGraphicsPipeline(context);
+    createTextured2DGraphicsPipeline(context);
+    createLineGraphicsPipeline(context);
+    
+    createFramebuffers(context);
+    
+    // Recreate command buffers with new framebuffers
+    vkFreeCommandBuffers(context->device, context->commandPool, 
+                        context->swapChainImageCount, context->commandBuffers);
+    free(context->commandBuffers);
+    createCommandBuffers(context);
+    
+    // Update 3D camera aspect ratio for perspective
+    camera.aspect_ratio = (float)context->swapChainExtent.width / 
+                    (float)context->swapChainExtent.height;
+    glm_perspective(glm_rad(camera.fov), camera.aspect_ratio, 0.1f, 100.0f, 
+                    camera.projection_matrix);
+    
+    /* printf("Swapchain recreated: %dx%d\n", context->swapChainExtent.width, context->swapChainExtent.height); */
+}
+
 void cleanup(VulkanContext* context) {
     vkDeviceWaitIdle(context->device);
     
@@ -1855,18 +1960,9 @@ void cleanup(VulkanContext* context) {
     
     // COMMANDS
     if (context->commandPool) vkDestroyCommandPool(context->device, context->commandPool, NULL);
-    free(context->commandBuffers);
     
-    // FRAMEBUFFERS & IMAGE VIEWS
-    for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
-        if (context->swapChainFramebuffers[i])
-            vkDestroyFramebuffer(context->device, context->swapChainFramebuffers[i], NULL);
-        if (context->swapChainImageViews[i])
-            vkDestroyImageView(context->device, context->swapChainImageViews[i], NULL);
-    }
-    free(context->swapChainFramebuffers);
-    free(context->swapChainImageViews);
-    free(context->swapChainImages);
+    // Clean up swapchain resources
+    cleanupSwapChain(context);
     
     // DESTROY ALL PIPELINES FIRST (before their layouts!)
     if (context->graphicsPipeline) 
@@ -1898,19 +1994,13 @@ void cleanup(VulkanContext* context) {
     
     if (context->renderPass) vkDestroyRenderPass(context->device, context->renderPass, NULL);
     
-    // DEPTH
-    if (context->depthImageView) vkDestroyImageView(context->device, context->depthImageView, NULL);
-    if (context->depthImage) vkDestroyImage(context->device, context->depthImage, NULL);
-    if (context->depthImageMemory) vkFreeMemory(context->device, context->depthImageMemory, NULL);
-    
     // UNIFORM BUFFER & DESCRIPTORS
     if (uniformBuffer) vkDestroyBuffer(context->device, uniformBuffer, NULL);
     if (uniformBufferMemory) vkFreeMemory(context->device, uniformBufferMemory, NULL);
     if (descriptorPool) vkDestroyDescriptorPool(context->device, descriptorPool, NULL);
     if (context->descriptorSetLayout) vkDestroyDescriptorSetLayout(context->device, context->descriptorSetLayout, NULL);
     
-    // SWAPCHAIN & DEVICE
-    if (context->swapChain) vkDestroySwapchainKHR(context->device, context->swapChain, NULL);
+    // DEVICE
     if (context->device) vkDestroyDevice(context->device, NULL);
     
     // SURFACE & INSTANCE
