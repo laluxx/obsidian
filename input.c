@@ -205,6 +205,18 @@ void registerWindowResizeCallback(WindowResizeCallback callback) {
     currentResizeCallback = callback;
 }
 
+WindowFocusCallback currentFocusCallback = NULL;
+void registerWindowFocusCallback(WindowFocusCallback callback) {
+    currentFocusCallback = callback;
+}
+
+WindowPosCallback currentWindowPosCallback = NULL;
+void registerWindowPosCallback(WindowPosCallback callback) {
+    currentWindowPosCallback = callback;
+}
+
+
+
 // Add a flag to track if we should skip the next char callback
 static bool skip_next_char = false;
 
@@ -273,3 +285,14 @@ void internal_window_resize_callback(GLFWwindow* window, int width, int height) 
     }
 }
 
+void internal_window_focus_callback(GLFWwindow* window, int focused) {
+    if (currentFocusCallback != NULL) {
+        currentFocusCallback(focused);
+    }
+}
+
+void internal_window_pos_callback(GLFWwindow* window, int xpos, int ypos) {
+    if (currentWindowPosCallback != NULL) {
+        currentWindowPosCallback(xpos, ypos);
+    }
+}

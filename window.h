@@ -21,6 +21,11 @@ void beginFrame();
 void endFrame();
 
 double getTime();
+
+void setWindowPos(GLFWwindow* window, int x, int y);
+void getWindowPos(GLFWwindow* window, int* x, int* y);
+void pollEvents(void);
+
 const char* getClipboardString();
 void setClipboardString(const char *text);
 

@@ -36,12 +36,14 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     glfwSetCursorPosCallback(context.window, internal_cursor_position_callback);
     glfwSetScrollCallback(context.window, internal_scroll_callback);
     glfwSetFramebufferSizeCallback(context.window, internal_window_resize_callback);
+    glfwSetWindowFocusCallback(context.window, internal_window_focus_callback);
+    glfwSetWindowPosCallback(context.window, internal_window_pos_callback);
 
     init_input();
     keymap_init(&keymap);
     init_free_type();
 
-    // Default cursor mode is normal (visible) - library user can change this
+    // Default cursor mode is normal (visible)
     current_cursor_mode = GLFW_CURSOR_NORMAL;
     glfwSetInputMode(context.window, GLFW_CURSOR, current_cursor_mode);
     
@@ -250,9 +252,28 @@ void endFrame() {
     context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
+
+
+
 double getTime() {
     return glfwGetTime();
 }
+
+
+
+void setWindowPos(GLFWwindow* window, int x, int y) {
+    glfwSetWindowPos(window, x, y);
+}
+
+void getWindowPos(GLFWwindow* window, int* x, int* y) {
+    glfwGetWindowPos(window, x, y);
+}
+
+void pollEvents(void) {
+    glfwPollEvents();
+}
+
+
 
 const char* getClipboardString() {
     return glfwGetClipboardString(NULL);
