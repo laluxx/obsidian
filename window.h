@@ -1,5 +1,8 @@
 #pragma once
 
+#include "context.h"
+#include "camera.h"
+
 #define WIDTH 800
 #define HEIGHT 600
 
@@ -7,8 +10,17 @@
 #define CURSOR_HIDDEN   GLFW_CURSOR_HIDDEN
 #define CURSOR_DISABLED GLFW_CURSOR_DISABLED
 
-#include "context.h"
-#include "camera.h"
+
+#define ARROW_CURSOR     GLFW_ARROW_CURSOR
+#define IBEAM_CURSOR     GLFW_IBEAM_CURSOR
+#define CROSSHAIR_CURSOR GLFW_CROSSHAIR_CURSOR
+#define HAND_CURSOR      GLFW_HAND_CURSOR
+#define HRESIZE_CURSOR   GLFW_HRESIZE_CURSOR
+#define VRESIZE_CURSOR   GLFW_VRESIZE_CURSOR
+
+GLFWcursor* createStandardCursor(int shape);
+void setCursor(GLFWcursor* cursor);
+
 
 extern float delta_time;
 extern float last_frame;
@@ -24,6 +36,10 @@ double getTime();
 
 void setWindowPos(GLFWwindow* window, int x, int y);
 void getWindowPos(GLFWwindow* window, int* x, int* y);
+
+void setWindowSize(GLFWwindow* window, int width, int height);
+void getWindowSize(GLFWwindow* window, int* width, int* height);
+
 void pollEvents(void);
 
 const char* getClipboardString();
@@ -39,8 +55,9 @@ void showCursor();
 void hideCursor();
 void disableCursor();
 
+/* void setWindowResizeIncrements(int char_width, int char_height); */
+void setWindowResizeIncrements(int char_width, int char_height, int min_width, int min_height);
 
 
 void toggle_editor_mode();
-
 void process_editor_movement(Camera* cam, float deltaTime);

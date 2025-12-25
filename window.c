@@ -1,20 +1,18 @@
 #include "window.h"
 #include "input.h"
 #include "keychords.h"
-#include "font.h"
 #include "gltf_loader.h"
 #include "camera.h"
 #include "theme.h"
 #include "vulkan_setup.h"
-
 #include <stdio.h>
+#include "font.h"
+
 
 float delta_time;
 float last_frame = 0.0f;
 
 static int current_cursor_mode = GLFW_CURSOR_NORMAL;
-
-
 
 GLFWwindow* initWindow(int width, int height, const char* title) {
     if (!glfwInit()) {
@@ -269,6 +267,14 @@ void getWindowPos(GLFWwindow* window, int* x, int* y) {
     glfwGetWindowPos(window, x, y);
 }
 
+void setWindowSize(GLFWwindow* window, int width, int height) {
+    glfwSetWindowSize(window, width, height);
+}
+
+void getWindowSize(GLFWwindow* window, int* width, int* height) {
+    glfwGetWindowSize(window, width, height);
+}
+
 void pollEvents(void) {
     glfwPollEvents();
 }
@@ -315,6 +321,29 @@ void hideCursor() {
 void disableCursor() {
     setCursorMode(GLFW_CURSOR_DISABLED);
 }
+
+GLFWcursor* createStandardCursor(int shape) {
+    return glfwCreateStandardCursor(shape);
+}
+
+void setCursor(GLFWcursor* cursor) {
+    glfwSetCursor(context.window, cursor);
+}
+
+
+// window.c - no X11 headers here!
+
+#if defined(__linux__) || defined(__unix__)
+extern void setWindowResizeIncrements_x11(GLFWwindow *window, int char_width, int char_height,
+                                           int min_width, int min_height);
+#endif
+
+void setWindowResizeIncrements(int char_width, int char_height, int min_width, int min_height) {
+#if defined(__linux__) || defined(__unix__)
+    setWindowResizeIncrements_x11(context.window, char_width, char_height, min_width, min_height);
+#endif
+}
+
 
 void toggle_editor_mode() {
     camera.active = !camera.active;
