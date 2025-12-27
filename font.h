@@ -31,7 +31,9 @@ typedef struct {
     unsigned int height;         // height of the texture atlas
     int ascent;                  // font ascent
     int descent;                 // font descent
-    
+    float underline_position;
+    float underline_thickness;
+
     // Dynamic character storage
     CharNode *char_table[FONT_HASH_SIZE];
     

@@ -230,6 +230,34 @@ Font* load_font(const char* fontPath, int fontSize) {
     font->atlas_y = 0;
     font->row_height = 0;
     font->needs_update = false;
+
+    // Extract underline metrics from font
+    if (face->underline_position && face->underline_thickness) {
+        // Convert from font units to pixels
+        // underline_position is typically negative in FreeType (below baseline)
+        // We want to store it as a POSITIVE value (distance below baseline)
+        // So we negate it to make it positive
+        font->underline_position = -(face->underline_position * fontSize) / (float)face->units_per_EM;
+
+        // If the result is negative (font had positive underline_position, which is weird),
+        // make it positive
+        if (font->underline_position < 0) {
+            font->underline_position = -font->underline_position;
+        }
+
+        font->underline_thickness = (face->underline_thickness * fontSize) / (float)face->units_per_EM;
+
+        // Ensure reasonable values
+        if (font->underline_thickness < 1.0f) {
+            font->underline_thickness = 1.0f;
+        }
+    } else {
+        // Fallback if font doesn't provide underline metrics
+        font->underline_position = 0;
+        font->underline_thickness = 0;
+    }
+
+    
     
     // Initialize hash table
     memset(font->char_table, 0, sizeof(font->char_table));
