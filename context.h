@@ -40,7 +40,7 @@ typedef struct {
     // 2D rendering pipeline
     VkPipeline graphicsPipeline2D;
     VkPipelineLayout pipelineLayout2D;
-    
+
 
     // Texture rendering pipeline
     VkPipeline graphicsPipelineTextured2D;   // For textured shapes
@@ -49,7 +49,7 @@ typedef struct {
     VkBuffer vertexBuffer2D;
     VkDeviceMemory vertexBufferMemory2D;
     VkPipelineLayout pipelineLayoutTextured2D;
-    
+
     // 2D descriptor set layout for textures - ADD THESE
     VkDescriptorSetLayout descriptorSetLayout2D;
     VkDescriptorPool descriptorPool2D;
@@ -61,9 +61,16 @@ typedef struct {
 
     VkPipeline graphicsPipelineLine;
     VkPipelineLayout pipelineLayoutLine;
-    
+
     VkPipeline graphicsPipelineBlend;
     VkPipeline graphicsPipelineTextured3DBlend;
+
+    // SDF
+    VkPipeline graphicsPipelineSDF2D;
+    VkPipelineLayout pipelineLayoutSDF2D;
+
+    VkPipeline graphicsPipelineSDF3D;
+    VkPipelineLayout pipelineLayoutSDF3D;
 
     Color clearColor;
     bool framebufferResized;

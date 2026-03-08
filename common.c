@@ -5,7 +5,7 @@
 uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-    
+
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
         if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
             return i;
@@ -50,7 +50,7 @@ void endSingleTimeCommands(VkDevice device, VkCommandPool commandPool, VkQueue q
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 }
 
-void transitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkFormat format, 
+void transitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkFormat format,
                           VkImageLayout oldLayout, VkImageLayout newLayout) {
     VkImageMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -67,10 +67,10 @@ void transitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkForma
             .layerCount = 1
         }
     };
-    
+
     VkPipelineStageFlags sourceStage;
     VkPipelineStageFlags destinationStage;
-    
+
     if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -91,7 +91,7 @@ void transitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkForma
         fprintf(stderr, "Unsupported layout transition from %d to %d!\n", oldLayout, newLayout);
         return;
     }
-    
+
     vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
@@ -120,7 +120,7 @@ void copyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage i
 Color hexToColor(const char *hex) {
     int r, g, b, a = 255;
     size_t len = strlen(hex);
-    
+
     if (len == 9) { // #RRGGBBAA
         sscanf(hex, "#%02x%02x%02x%02x", &r, &g, &b, &a);
     } else if (len == 7) { // #RRGGBB
@@ -128,17 +128,17 @@ Color hexToColor(const char *hex) {
     } else { // Default to red if invalid ERROR
         return (Color){1.0f, 0.0f, 0.0f, 1.0f};
     }
-    
+
     // Convert from 0-255 to 0.0-1.0
     float rf = r / 255.0f;
     float gf = g / 255.0f;
     float bf = b / 255.0f;
     float af = a / 255.0f;
-    
+
     // Convert sRGB to linear
     rf = (rf <= 0.04045f) ? rf / 12.92f : powf((rf + 0.055f) / 1.055f, 2.4f);
     gf = (gf <= 0.04045f) ? gf / 12.92f : powf((gf + 0.055f) / 1.055f, 2.4f);
     bf = (bf <= 0.04045f) ? bf / 12.92f : powf((bf + 0.055f) / 1.055f, 2.4f);
-    
+
     return (Color){rf, gf, bf, af};
 }

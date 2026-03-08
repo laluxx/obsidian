@@ -1,8 +1,8 @@
 #include "vulkan_setup.h"
 #include "renderer.h"
 #include "context.h"
-#include "window.h"
 #include "scene.h"
+#include "camera.h"
 #include <vulkan/vulkan_core.h>
 #include <cglm/types.h>
 #include <stdio.h>
@@ -15,6 +15,8 @@
 #include "2D.frag.spv.h"
 #include "texture.frag.spv.h"
 #include "texture3D.frag.spv.h"
+#include "sdf.frag.spv.h"
+#include "sdf3D.frag.spv.h"
 
 
 #define ENABLE_VALIDATION_LAYERS 1
@@ -50,13 +52,13 @@ void create2DDescriptorSetLayout(VulkanContext* context) {
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
         .pImmutableSamplers = NULL
     };
-    
+
     VkDescriptorSetLayoutCreateInfo layoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
         .pBindings = &samplerLayoutBinding
     };
-    
+
     if (vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout2D) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create 2D descriptor set layout\n");
         exit(EXIT_FAILURE);
@@ -258,7 +260,7 @@ void createLogicalDevice(VulkanContext* context) {
     VkPhysicalDeviceFeatures deviceFeatures = {
         .wideLines = VK_TRUE
     };
-    
+
     VkDeviceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
@@ -270,26 +272,26 @@ void createLogicalDevice(VulkanContext* context) {
         .enabledLayerCount = VALIDATION_LAYERS_COUNT,
         .ppEnabledLayerNames = validationLayers
     };
-    
+
     if (vkCreateDevice(context->physicalDevice, &createInfo, NULL, &context->device) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create logical device\n");
         exit(EXIT_FAILURE);
     }
-    
+
     vkGetDeviceQueue(context->device, 0, 0, &context->graphicsQueue);
 }
 
 void createSwapChain(VulkanContext* context) {
     VkSurfaceCapabilitiesKHR capabilities;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context->physicalDevice, context->surface, &capabilities);
-    
+
     VkSurfaceFormatKHR surfaceFormat = {
         .format = VK_FORMAT_B8G8R8A8_SRGB,
         .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
     };
-    
+
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-    
+
     // FIX: Get actual current framebuffer size instead of using hardcoded WIDTH/HEIGHT
     VkExtent2D extent;
     if (capabilities.currentExtent.width != UINT32_MAX) {
@@ -298,27 +300,27 @@ void createSwapChain(VulkanContext* context) {
         // Fallback: query actual window size
         int width, height;
         glfwGetFramebufferSize(context->window, &width, &height);
-        
+
         extent.width = (uint32_t)width;
         extent.height = (uint32_t)height;
-        
+
         // Clamp to allowed values
-        extent.width = extent.width < capabilities.minImageExtent.width ? 
+        extent.width = extent.width < capabilities.minImageExtent.width ?
                        capabilities.minImageExtent.width : extent.width;
-        extent.width = extent.width > capabilities.maxImageExtent.width ? 
+        extent.width = extent.width > capabilities.maxImageExtent.width ?
                        capabilities.maxImageExtent.width : extent.width;
-        extent.height = extent.height < capabilities.minImageExtent.height ? 
+        extent.height = extent.height < capabilities.minImageExtent.height ?
                         capabilities.minImageExtent.height : extent.height;
-        extent.height = extent.height > capabilities.maxImageExtent.height ? 
+        extent.height = extent.height > capabilities.maxImageExtent.height ?
                         capabilities.maxImageExtent.height : extent.height;
     }
-    
+
     // Rest of the function stays the same...
     uint32_t imageCount = capabilities.minImageCount + 1;
     if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount) {
         imageCount = capabilities.maxImageCount;
     }
-    
+
     VkSwapchainCreateInfoKHR createInfo = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = context->surface,
@@ -335,25 +337,25 @@ void createSwapChain(VulkanContext* context) {
         .clipped = VK_TRUE,
         .oldSwapchain = VK_NULL_HANDLE
     };
-    
+
     if (vkCreateSwapchainKHR(context->device, &createInfo, NULL, &context->swapChain) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create swap chain\n");
         exit(EXIT_FAILURE);
     }
-    
+
     vkGetSwapchainImagesKHR(context->device, context->swapChain, &context->swapChainImageCount, NULL);
     context->swapChainImages = malloc(context->swapChainImageCount * sizeof(VkImage));
     vkGetSwapchainImagesKHR(context->device, context->swapChain, &context->swapChainImageCount, context->swapChainImages);
-    
+
     context->swapChainImageFormat = surfaceFormat.format;
     context->swapChainExtent = extent;
-    
+
     /* printf("Swapchain created with extent: %dx%d\n", extent.width, extent.height); */
 }
 
 void createImageViews(VulkanContext* context) {
     context->swapChainImageViews = malloc(context->swapChainImageCount * sizeof(VkImageView));
-    
+
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         VkImageViewCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -374,7 +376,7 @@ void createImageViews(VulkanContext* context) {
                 .layerCount = 1
             }
         };
-        
+
         if (vkCreateImageView(context->device, &createInfo, NULL, &context->swapChainImageViews[i]) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create image views\n");
             exit(EXIT_FAILURE);
@@ -393,7 +395,7 @@ void createRenderPass(VulkanContext* context) {
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
-    
+
     VkAttachmentDescription depthAttachment = {
         .format = context->depthFormat,
         .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -404,26 +406,26 @@ void createRenderPass(VulkanContext* context) {
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     };
-    
-    
+
+
     VkAttachmentReference colorAttachmentRef = {
         .attachment = 0,
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
     };
-    
+
     VkAttachmentReference depthAttachmentRef = {
         .attachment = 1,
         .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     };
-    
+
     VkSubpassDescription subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &colorAttachmentRef,
         .pDepthStencilAttachment = &depthAttachmentRef,
     };
-    
-    
+
+
     // Add subpass dependency for layout transitions
     VkSubpassDependency dependency = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
@@ -433,7 +435,7 @@ void createRenderPass(VulkanContext* context) {
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
     };
-    
+
     VkRenderPassCreateInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = 2,
@@ -444,75 +446,63 @@ void createRenderPass(VulkanContext* context) {
         .dependencyCount = 1,
         .pDependencies = &dependency
     };
-    
+
     if (vkCreateRenderPass(context->device, &renderPassInfo, NULL, &context->renderPass) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create render pass\n");
         exit(EXIT_FAILURE);
     }
 }
 
+
 void createTextured2DGraphicsPipeline(VulkanContext* context) {
-    // Load shaders from header files
     VkShaderModule vertShaderModule2D;
     VkShaderModule fragShaderModuleTextured;
-    
-    // Create vertex shader module (same as regular 2D)
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = sizeof(__2D_vert_spv),
             .pCode = (const uint32_t*)__2D_vert_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create 2D vertex shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D);
     }
-    
-    // Create fragment shader module for textured rendering
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = sizeof(texture_frag_spv),
             .pCode = (const uint32_t*)texture_frag_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create textured fragment shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured);
     }
-    
-    VkPipelineShaderStageCreateInfo vertShaderStageInfo2D = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = vertShaderModule2D,
-        .pName = "main"
+
+    VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertShaderModule2D,
+            .pName = "main"
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragShaderModuleTextured,
+            .pName = "main"
+        }
     };
-    
-    VkPipelineShaderStageCreateInfo fragShaderStageInfoTextured = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = fragShaderModuleTextured,
-        .pName = "main"
-    };
-    
-    VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {vertShaderStageInfo2D, fragShaderStageInfoTextured};
-    
-    // 2D vertex input (same as regular 2D)
+
     VkVertexInputBindingDescription bindingDescription2D = {
         .binding = 0,
         .stride = sizeof(Vertex2D),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-    
+
     VkVertexInputAttributeDescription attributeDescriptions2D[3] = {
         {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, pos)},
         {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex2D, color)},
         {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, texCoord)}
     };
-    
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
@@ -520,43 +510,22 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .vertexAttributeDescriptionCount = 3,
         .pVertexAttributeDescriptions = attributeDescriptions2D
     };
-    
+
     VkPipelineInputAssemblyStateCreateInfo inputAssembly2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE
     };
-    
-    // LINE
-    VkPipelineInputAssemblyStateCreateInfo inputAssemblyLine = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
-        .primitiveRestartEnable = VK_FALSE
-    };
-    
-    VkViewport viewport = {
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = (float)context->swapChainExtent.width,
-        .height = (float)context->swapChainExtent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-    
-    VkRect2D scissor = {
-        .offset = {0, 0},
-        .extent = context->swapChainExtent
-    };
-    
+
+    // DYNAMIC viewport/scissor
     VkPipelineViewportStateCreateInfo viewportState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1,
-        .pViewports = &viewport,
+        .pViewports = NULL,
         .scissorCount = 1,
-        .pScissors = &scissor
+        .pScissors = NULL
     };
-   
-    
+
     VkPipelineRasterizationStateCreateInfo rasterizer = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .depthClampEnable = VK_FALSE,
@@ -567,13 +536,13 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = VK_FALSE
     };
-    
+
     VkPipelineMultisampleStateCreateInfo multisampling = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .sampleShadingEnable = VK_FALSE,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
     };
-    
+
     VkPipelineColorBlendAttachmentState colorBlendAttachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         .blendEnable = VK_TRUE,
@@ -584,14 +553,14 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
     };
-    
+
     VkPipelineColorBlendStateCreateInfo colorBlending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
         .attachmentCount = 1,
         .pAttachments = &colorBlendAttachment
     };
-    
+
     VkPipelineDepthStencilStateCreateInfo depthStencil2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_FALSE,
@@ -600,14 +569,13 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
     };
-    
+
     VkPushConstantRange pushConstantRange2D = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
         .size = sizeof(mat4)
     };
-    
-    // Pipeline layout for textured 2D - uses descriptor sets for textures
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfoTextured2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
@@ -615,12 +583,17 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstantRange2D,
     };
-    
-    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfoTextured2D, NULL, &context->pipelineLayoutTextured2D) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create textured 2D pipeline layout\n");
-        exit(EXIT_FAILURE);
-    }
-    
+
+    vkCreatePipelineLayout(context->device, &pipelineLayoutInfoTextured2D, NULL, &context->pipelineLayoutTextured2D);
+
+    // DYNAMIC STATE
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates
+    };
+
     VkGraphicsPipelineCreateInfo pipelineInfoTextured2D = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = 2,
@@ -631,84 +604,68 @@ void createTextured2DGraphicsPipeline(VulkanContext* context) {
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
         .pColorBlendState = &colorBlending,
+        .pDepthStencilState = &depthStencil2D,
+        .pDynamicState = &dynamicState,  // ADD THIS
         .layout = context->pipelineLayoutTextured2D,
         .renderPass = context->renderPass,
-        .subpass = 0,
-        .basePipelineHandle = VK_NULL_HANDLE,
-        .pDepthStencilState = &depthStencil2D,
+        .subpass = 0
     };
-    
-    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoTextured2D, NULL, &context->graphicsPipelineTextured2D) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create textured 2D graphics pipeline\n");
-        exit(EXIT_FAILURE);
-    }
-    
+
+    vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoTextured2D, NULL, &context->graphicsPipelineTextured2D);
+
     vkDestroyShaderModule(context->device, fragShaderModuleTextured, NULL);
     vkDestroyShaderModule(context->device, vertShaderModule2D, NULL);
 }
 
 void create2DGraphicsPipeline(VulkanContext* context) {
-    // Load 2D shaders from header files
     VkShaderModule vertShaderModule2D;
     VkShaderModule fragShaderModule2D;
-    
-    // Create vertex shader module from header
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = sizeof(__2D_vert_spv),
             .pCode = (const uint32_t*)__2D_vert_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create 2D vertex shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D);
     }
-    
-    // Create fragment shader module from header  
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = sizeof(__2D_frag_spv),
             .pCode = (const uint32_t*)__2D_frag_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule2D) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create 2D fragment shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule2D);
     }
-    
-    VkPipelineShaderStageCreateInfo vertShaderStageInfo2D = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = vertShaderModule2D,
-        .pName = "main"
+
+    VkPipelineShaderStageCreateInfo shaderStages2D[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertShaderModule2D,
+            .pName = "main"
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragShaderModule2D,
+            .pName = "main"
+        }
     };
-    
-    VkPipelineShaderStageCreateInfo fragShaderStageInfo2D = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = fragShaderModule2D,
-        .pName = "main"
-    };
-    
-    VkPipelineShaderStageCreateInfo shaderStages2D[] = {vertShaderStageInfo2D, fragShaderStageInfo2D};
-    
-    // 2D vertex input
+
     VkVertexInputBindingDescription bindingDescription2D = {
         .binding = 0,
         .stride = sizeof(Vertex2D),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-    
+
     VkVertexInputAttributeDescription attributeDescriptions2D[3] = {
         {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, pos)},
         {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex2D, color)},
         {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, texCoord)}
     };
-    
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
@@ -716,37 +673,22 @@ void create2DGraphicsPipeline(VulkanContext* context) {
         .vertexAttributeDescriptionCount = 3,
         .pVertexAttributeDescriptions = attributeDescriptions2D
     };
-    
+
     VkPipelineInputAssemblyStateCreateInfo inputAssembly2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE
     };
-    
-    // Viewport and scissor
-    VkViewport viewport = {
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = (float)context->swapChainExtent.width,
-        .height = (float)context->swapChainExtent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-    
-    VkRect2D scissor = {
-        .offset = {0, 0},
-        .extent = context->swapChainExtent
-    };
-    
+
+    // DYNAMIC viewport/scissor
     VkPipelineViewportStateCreateInfo viewportState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1,
-        .pViewports = &viewport,
+        .pViewports = NULL,
         .scissorCount = 1,
-        .pScissors = &scissor
+        .pScissors = NULL
     };
-    
-    // Rasterizer
+
     VkPipelineRasterizationStateCreateInfo rasterizer = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .depthClampEnable = VK_FALSE,
@@ -757,15 +699,13 @@ void create2DGraphicsPipeline(VulkanContext* context) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = VK_FALSE
     };
-    
-    // Multisampling
+
     VkPipelineMultisampleStateCreateInfo multisampling = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .sampleShadingEnable = VK_FALSE,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
     };
-    
-    // Color blending
+
     VkPipelineColorBlendAttachmentState colorBlendAttachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         .blendEnable = VK_TRUE,
@@ -776,15 +716,14 @@ void create2DGraphicsPipeline(VulkanContext* context) {
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
     };
-    
+
     VkPipelineColorBlendStateCreateInfo colorBlending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
         .attachmentCount = 1,
         .pAttachments = &colorBlendAttachment
     };
-    
-    // Disable depth testing for 2D
+
     VkPipelineDepthStencilStateCreateInfo depthStencil2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_FALSE,
@@ -793,27 +732,31 @@ void create2DGraphicsPipeline(VulkanContext* context) {
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
     };
-    
-    // 2D push constants - ONLY projection matrix (64 bytes)
+
     VkPushConstantRange pushConstantRange2D = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
-        .size = sizeof(mat4) // 64 bytes - just the projection matrix
+        .size = sizeof(mat4)
     };
-    
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo2D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 0,  // NO descriptor sets for colored pipeline!
+        .setLayoutCount = 0,
         .pSetLayouts = NULL,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstantRange2D,
     };
-    
-    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo2D, NULL, &context->pipelineLayout2D) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create 2D pipeline layout\n");
-        exit(EXIT_FAILURE);
-    }
-    
+
+    vkCreatePipelineLayout(context->device, &pipelineLayoutInfo2D, NULL, &context->pipelineLayout2D);
+
+    // DYNAMIC STATE
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates
+    };
+
     VkGraphicsPipelineCreateInfo pipelineInfo2D = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = 2,
@@ -824,18 +767,15 @@ void create2DGraphicsPipeline(VulkanContext* context) {
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
         .pColorBlendState = &colorBlending,
+        .pDepthStencilState = &depthStencil2D,
+        .pDynamicState = &dynamicState,  // ADD THIS
         .layout = context->pipelineLayout2D,
         .renderPass = context->renderPass,
-        .subpass = 0,
-        .basePipelineHandle = VK_NULL_HANDLE,
-        .pDepthStencilState = &depthStencil2D,
+        .subpass = 0
     };
-    
-    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfo2D, NULL, &context->graphicsPipeline2D) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create 2D graphics pipeline\n");
-        exit(EXIT_FAILURE);
-    }
-    
+
+    vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfo2D, NULL, &context->graphicsPipeline2D);
+
     vkDestroyShaderModule(context->device, fragShaderModule2D, NULL);
     vkDestroyShaderModule(context->device, vertShaderModule2D, NULL);
 }
@@ -843,64 +783,53 @@ void create2DGraphicsPipeline(VulkanContext* context) {
 void create3DTexturedGraphicsPipeline(VulkanContext* context) {
     VkShaderModule vertShaderModule;
     VkShaderModule fragShaderModuleTextured;
-    
-    // Create vertex shader module
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = sizeof(vert_vert_spv),
             .pCode = (const uint32_t*)vert_vert_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create 3D textured vertex shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule);
     }
-    
-    // Create fragment shader module - USE THE NEW TEXTURE3D SHADER!
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(texture3D_frag_spv),  // CHANGED!
-            .pCode = (const uint32_t*)texture3D_frag_spv  // CHANGED!
+            .codeSize = sizeof(texture3D_frag_spv),
+            .pCode = (const uint32_t*)texture3D_frag_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create 3D textured fragment shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleTextured);
     }
-    
-    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = vertShaderModule,
-        .pName = "main"
+
+    VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertShaderModule,
+            .pName = "main"
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragShaderModuleTextured,
+            .pName = "main"
+        }
     };
-    
-    VkPipelineShaderStageCreateInfo fragShaderStageInfoTextured = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = fragShaderModuleTextured,
-        .pName = "main"
-    };
-    
-    VkPipelineShaderStageCreateInfo shaderStagesTextured[] = {vertShaderStageInfo, fragShaderStageInfoTextured};
-    
+
     VkVertexInputBindingDescription bindingDescription = {
         .binding = 0,
         .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-    
+
     VkVertexInputAttributeDescription attributeDescriptions[4] = {
         {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
         {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color)},
         {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
         {.binding = 0, .location = 3, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texCoord)}
     };
-    
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
@@ -908,33 +837,20 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .vertexAttributeDescriptionCount = 4,
         .pVertexAttributeDescriptions = attributeDescriptions
     };
-    
+
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE
     };
-    
-    VkViewport viewport = {
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = (float)context->swapChainExtent.width,
-        .height = (float)context->swapChainExtent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-    
-    VkRect2D scissor = {
-        .offset = {0, 0},
-        .extent = context->swapChainExtent
-    };
-    
+
+    // DYNAMIC viewport/scissor
     VkPipelineViewportStateCreateInfo viewportState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1,
-        .pViewports = &viewport,
+        .pViewports = NULL,
         .scissorCount = 1,
-        .pScissors = &scissor
+        .pScissors = NULL
     };
 
     VkPipelineRasterizationStateCreateInfo rasterizer = {
@@ -947,13 +863,13 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = VK_FALSE
     };
-    
+
     VkPipelineMultisampleStateCreateInfo multisampling = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .sampleShadingEnable = VK_FALSE,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
     };
-    
+
     VkPipelineColorBlendAttachmentState colorBlendAttachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         .blendEnable = VK_TRUE,
@@ -964,14 +880,14 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
     };
-    
+
     VkPipelineColorBlendStateCreateInfo colorBlending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
         .attachmentCount = 1,
         .pAttachments = &colorBlendAttachment
     };
-    
+
     VkPipelineDepthStencilStateCreateInfo depthStencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
@@ -980,19 +896,18 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
     };
-    
+
     VkPushConstantRange pushConstantRange = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
         .size = sizeof(PushConstants)
     };
-    
-    // Pipeline layout uses both descriptor sets
+
     VkDescriptorSetLayout layouts[2] = {
-        context->descriptorSetLayout,    // Set 0: UBO for camera
-        context->descriptorSetLayout2D   // Set 1: Texture sampler (now with FRAGMENT_BIT!)
+        context->descriptorSetLayout,
+        context->descriptorSetLayout2D
     };
-    
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfoTextured3D = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 2,
@@ -1000,12 +915,17 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstantRange,
     };
-    
-    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfoTextured3D, NULL, &context->pipelineLayoutTextured3D) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create 3D textured pipeline layout\n");
-        exit(EXIT_FAILURE);
-    }
-    
+
+    vkCreatePipelineLayout(context->device, &pipelineLayoutInfoTextured3D, NULL, &context->pipelineLayoutTextured3D);
+
+    // DYNAMIC STATE
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates
+    };
+
     VkGraphicsPipelineCreateInfo pipelineInfoTextured3D = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = 2,
@@ -1016,85 +936,70 @@ void create3DTexturedGraphicsPipeline(VulkanContext* context) {
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
         .pColorBlendState = &colorBlending,
+        .pDepthStencilState = &depthStencil,
+        .pDynamicState = &dynamicState,  // ADD THIS
         .layout = context->pipelineLayoutTextured3D,
         .renderPass = context->renderPass,
-        .subpass = 0,
-        .basePipelineHandle = VK_NULL_HANDLE,
-        .pDepthStencilState = &depthStencil,
+        .subpass = 0
     };
-    
-    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoTextured3D, NULL, &context->graphicsPipelineTextured3D) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create 3D textured graphics pipeline\n");
-        exit(EXIT_FAILURE);
-    }
-    
+
+    vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoTextured3D, NULL, &context->graphicsPipelineTextured3D);
+
     vkDestroyShaderModule(context->device, fragShaderModuleTextured, NULL);
     vkDestroyShaderModule(context->device, vertShaderModule, NULL);
 }
 
+
 void createLineGraphicsPipeline(VulkanContext* context) {
-    // Load shaders from header files (use the same as regular 3D)
     VkShaderModule vertShaderModule;
     VkShaderModule fragShaderModule;
-    
-    // Create vertex shader module
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = sizeof(vert_vert_spv),
             .pCode = (const uint32_t*)vert_vert_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create line vertex shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule);
     }
-    
-    // Create fragment shader module
+
     {
         VkShaderModuleCreateInfo createInfo = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = sizeof(frag_frag_spv),
             .pCode = (const uint32_t*)frag_frag_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create line fragment shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule);
     }
-    
-    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = vertShaderModule,
-        .pName = "main"
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertShaderModule,
+            .pName = "main"
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragShaderModule,
+            .pName = "main"
+        }
     };
-    
-    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = fragShaderModule,
-        .pName = "main"
-    };
-    
-    VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
-    
-    // Vertex input (same as regular 3D)
+
     VkVertexInputBindingDescription bindingDescription = {
         .binding = 0,
         .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-    
+
     VkVertexInputAttributeDescription attributeDescriptions[4] = {
         {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
         {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color)},
         {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
         {.binding = 0, .location = 3, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texCoord)}
     };
-    
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
@@ -1102,36 +1007,22 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .vertexAttributeDescriptionCount = 4,
         .pVertexAttributeDescriptions = attributeDescriptions
     };
-    
-    // KEY DIFFERENCE: Use LINE_LIST topology
+
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyLine = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,  // This is the key!
+        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
         .primitiveRestartEnable = VK_FALSE
     };
-    
-    VkViewport viewport = {
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = (float)context->swapChainExtent.width,
-        .height = (float)context->swapChainExtent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-    
-    VkRect2D scissor = {
-        .offset = {0, 0},
-        .extent = context->swapChainExtent
-    };
-    
+
+    // DYNAMIC viewport/scissor
     VkPipelineViewportStateCreateInfo viewportState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1,
-        .pViewports = &viewport,
+        .pViewports = NULL,
         .scissorCount = 1,
-        .pScissors = &scissor
+        .pScissors = NULL
     };
-    
+
     VkPipelineRasterizationStateCreateInfo rasterizer = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .depthClampEnable = VK_FALSE,
@@ -1142,13 +1033,13 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = VK_FALSE
     };
-    
+
     VkPipelineMultisampleStateCreateInfo multisampling = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .sampleShadingEnable = VK_FALSE,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
     };
-    
+
     VkPipelineColorBlendAttachmentState colorBlendAttachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         .blendEnable = VK_TRUE,
@@ -1159,14 +1050,14 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
     };
-    
+
     VkPipelineColorBlendStateCreateInfo colorBlending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
         .attachmentCount = 1,
         .pAttachments = &colorBlendAttachment
     };
-    
+
     VkPipelineDepthStencilStateCreateInfo depthStencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
@@ -1175,14 +1066,13 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
     };
-    
+
     VkPushConstantRange pushConstantRange = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
         .size = sizeof(PushConstants)
     };
-    
-    // Use the same pipeline layout as regular 3D (or create a separate one if needed)
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
@@ -1190,38 +1080,38 @@ void createLineGraphicsPipeline(VulkanContext* context) {
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstantRange,
     };
-    
-    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &context->pipelineLayoutLine) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create line pipeline layout\n");
-        exit(EXIT_FAILURE);
-    }
-    
+
+    vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &context->pipelineLayoutLine);
+
+    // DYNAMIC STATE
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates
+    };
+
     VkGraphicsPipelineCreateInfo pipelineInfoLine = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = 2,
         .pStages = shaderStages,
         .pVertexInputState = &vertexInputInfo,
-        .pInputAssemblyState = &inputAssemblyLine,  // Use line assembly state
+        .pInputAssemblyState = &inputAssemblyLine,
         .pViewportState = &viewportState,
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
         .pColorBlendState = &colorBlending,
+        .pDepthStencilState = &depthStencil,
+        .pDynamicState = &dynamicState,  // ADD THIS
         .layout = context->pipelineLayoutLine,
         .renderPass = context->renderPass,
-        .subpass = 0,
-        .basePipelineHandle = VK_NULL_HANDLE,
-        .pDepthStencilState = &depthStencil,
+        .subpass = 0
     };
-    
-    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoLine, NULL, &context->graphicsPipelineLine) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create line graphics pipeline\n");
-        exit(EXIT_FAILURE);
-    }
-    
-    // Cleanup shader modules
+
+    vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoLine, NULL, &context->graphicsPipelineLine);
+
     vkDestroyShaderModule(context->device, fragShaderModule, NULL);
     vkDestroyShaderModule(context->device, vertShaderModule, NULL);
-    // NOTE: We're not destroying pipelineLayoutLine since it's used by the pipeline
 }
 
 void createGraphicsPipeline(VulkanContext* context) {
@@ -1233,13 +1123,9 @@ void createGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(vert_vert_spv),
             .pCode = (const uint32_t*)vert_vert_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create vertex shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule);
     }
-    
+
     // Fragment shader
     VkShaderModule fragShaderModule;
     {
@@ -1248,118 +1134,77 @@ void createGraphicsPipeline(VulkanContext* context) {
             .codeSize = sizeof(frag_frag_spv),
             .pCode = (const uint32_t*)frag_frag_spv
         };
-        
-        if (vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create fragment shader module\n");
-            exit(EXIT_FAILURE);
-        }
+        vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModule);
     }
-    
-    // Pipeline stages
-    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = vertShaderModule,
-        .pName = "main"
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertShaderModule,
+            .pName = "main"
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragShaderModule,
+            .pName = "main"
+        }
     };
-    
-    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = fragShaderModule,
-        .pName = "main"
-    };
-    
-    VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
-    
+
     VkVertexInputBindingDescription bindingDescription = {
         .binding = 0,
         .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
-    
-    // ATTRIBUTE DESCRIPTOR
-    
+
     VkVertexInputAttributeDescription attributeDescriptions[4] = {
-        {.binding = 0,
-         .location = 0,
-         .format = VK_FORMAT_R32G32B32_SFLOAT,
-         .offset = offsetof(Vertex, pos)},
-        {.binding = 0,
-         .location = 1,
-         .format = VK_FORMAT_R32G32B32A32_SFLOAT,
-         .offset = offsetof(Vertex, color)},
-        {.binding = 0,
-         .location = 2,
-         .format = VK_FORMAT_R32G32B32_SFLOAT,
-         .offset = offsetof(Vertex, normal)},
-        {.binding = 0,
-         .location = 3,
-         .format = VK_FORMAT_R32G32_SFLOAT,
-         .offset = offsetof(Vertex, texCoord)} // Texture coordinates
+        {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
+        {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color)},
+        {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
+        {.binding = 0, .location = 3, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texCoord)}
     };
-    
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &bindingDescription,
-        .vertexAttributeDescriptionCount = 4, // Must be 4 now
+        .vertexAttributeDescriptionCount = 4,
         .pVertexAttributeDescriptions = attributeDescriptions
     };
-    
-    // Input assembly
+
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = VK_FALSE
     };
-    
-    // Viewport and scissor
-    VkViewport viewport = {
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = (float)context->swapChainExtent.width,
-        .height = (float)context->swapChainExtent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-    
-    VkRect2D scissor = {
-        .offset = {0, 0},
-        .extent = context->swapChainExtent
-    };
-    
+
+    // DYNAMIC: Don't set static viewport/scissor
     VkPipelineViewportStateCreateInfo viewportState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1,
-        .pViewports = &viewport,
+        .pViewports = NULL,
         .scissorCount = 1,
-        .pScissors = &scissor
+        .pScissors = NULL
     };
-    
-    
-    // Rasterizer
+
     VkPipelineRasterizationStateCreateInfo rasterizer = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .depthClampEnable = VK_FALSE,
         .rasterizerDiscardEnable = VK_FALSE,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        /* .polygonMode = VK_POLYGON_MODE_LINE, */
-        /* .polygonMode = VK_POLYGON_MODE_POINT, */
         .lineWidth = 1.0f,
         .cullMode = VK_CULL_MODE_NONE,
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = VK_FALSE
     };
-    
-    // Multisampling
+
     VkPipelineMultisampleStateCreateInfo multisampling = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .sampleShadingEnable = VK_FALSE,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
     };
-    
-    // Color blending
+
     VkPipelineColorBlendAttachmentState colorBlendAttachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         .blendEnable = VK_TRUE,
@@ -1370,42 +1215,14 @@ void createGraphicsPipeline(VulkanContext* context) {
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
     };
-    
-    
+
     VkPipelineColorBlendStateCreateInfo colorBlending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
         .attachmentCount = 1,
         .pAttachments = &colorBlendAttachment
     };
-    
-    
-    // Pipeline layout
-    VkPushConstantRange pushConstantRange = {
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        .offset = 0,
-        .size = sizeof(PushConstants), // Now includes both model matrix and AO state
-    };
-    
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts = &context->descriptorSetLayout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &pushConstantRange,
-    };
-    
-    
-    pipelineLayoutInfo.pSetLayouts = &context->descriptorSetLayout;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    
-    
-    if (vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &context->pipelineLayout) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create pipeline layout\n");
-        exit(EXIT_FAILURE);
-    }
-    
-    
+
     VkPipelineDepthStencilStateCreateInfo depthStencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
@@ -1414,8 +1231,31 @@ void createGraphicsPipeline(VulkanContext* context) {
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
     };
-    
-    // Create graphics pipeline
+
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(PushConstants)
+    };
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &context->descriptorSetLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange,
+    };
+
+    vkCreatePipelineLayout(context->device, &pipelineLayoutInfo, NULL, &context->pipelineLayout);
+
+    // DYNAMIC STATE: Viewport and Scissor
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates
+    };
+
     VkGraphicsPipelineCreateInfo pipelineInfo = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = 2,
@@ -1426,33 +1266,359 @@ void createGraphicsPipeline(VulkanContext* context) {
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
         .pColorBlendState = &colorBlending,
+        .pDepthStencilState = &depthStencil,
+        .pDynamicState = &dynamicState,  // ADD THIS
         .layout = context->pipelineLayout,
         .renderPass = context->renderPass,
-        .subpass = 0,
-        .basePipelineHandle = VK_NULL_HANDLE,
-        .pDepthStencilState = &depthStencil,
+        .subpass = 0
     };
-    
-    if (vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &context->graphicsPipeline) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create graphics pipeline\n");
-        exit(EXIT_FAILURE);
-    }
-    
-    // Clean up shader modules
+
+    vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &context->graphicsPipeline);
+
     vkDestroyShaderModule(context->device, fragShaderModule, NULL);
+    vkDestroyShaderModule(context->device, vertShaderModule, NULL);
+}
+
+/// SDF
+
+void createSDF2DGraphicsPipeline(VulkanContext* context) {
+    VkShaderModule vertShaderModule2D;
+    VkShaderModule fragShaderModuleSDF;
+
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(__2D_vert_spv),
+            .pCode = (const uint32_t*)__2D_vert_spv
+        };
+        vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule2D);
+    }
+
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(sdf_frag_spv),
+            .pCode = (const uint32_t*)sdf_frag_spv
+        };
+        vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleSDF);
+    }
+
+    VkPipelineShaderStageCreateInfo shaderStagesSDF[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertShaderModule2D,
+            .pName = "main"
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragShaderModuleSDF,
+            .pName = "main"
+        }
+    };
+
+    VkVertexInputBindingDescription bindingDescription2D = {
+        .binding = 0,
+        .stride = sizeof(Vertex2D),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+
+    VkVertexInputAttributeDescription attributeDescriptions2D[3] = {
+        {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, pos)},
+        {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex2D, color)},
+        {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex2D, texCoord)}
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription2D,
+        .vertexAttributeDescriptionCount = 3,
+        .pVertexAttributeDescriptions = attributeDescriptions2D
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
+
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = NULL,
+        .scissorCount = 1,
+        .pScissors = NULL
+    };
+
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .lineWidth = 1.0f,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE
+    };
+
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = VK_FALSE,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+    };
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+
+    VkPushConstantRange pushConstantRange2D = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(mat4)
+    };
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfoSDF2D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &context->descriptorSetLayout2D,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange2D,
+    };
+
+    vkCreatePipelineLayout(context->device, &pipelineLayoutInfoSDF2D, NULL, &context->pipelineLayoutSDF2D);
+
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates
+    };
+
+    VkGraphicsPipelineCreateInfo pipelineInfoSDF2D = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = shaderStagesSDF,
+        .pVertexInputState = &vertexInputInfo2D,
+        .pInputAssemblyState = &inputAssembly2D,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pColorBlendState = &colorBlending,
+        .pDepthStencilState = &depthStencil2D,
+        .pDynamicState = &dynamicState,
+        .layout = context->pipelineLayoutSDF2D,
+        .renderPass = context->renderPass,
+        .subpass = 0
+    };
+
+    vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoSDF2D, NULL, &context->graphicsPipelineSDF2D);
+
+    vkDestroyShaderModule(context->device, fragShaderModuleSDF, NULL);
+    vkDestroyShaderModule(context->device, vertShaderModule2D, NULL);
+}
+
+void createSDF3DGraphicsPipeline(VulkanContext* context) {
+    VkShaderModule vertShaderModule;
+    VkShaderModule fragShaderModuleSDF;
+
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(vert_vert_spv),
+            .pCode = (const uint32_t*)vert_vert_spv
+        };
+        vkCreateShaderModule(context->device, &createInfo, NULL, &vertShaderModule);
+    }
+
+    {
+        VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(sdf3D_frag_spv),
+            .pCode = (const uint32_t*)sdf3D_frag_spv
+        };
+        vkCreateShaderModule(context->device, &createInfo, NULL, &fragShaderModuleSDF);
+    }
+
+    VkPipelineShaderStageCreateInfo shaderStagesSDF[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vertShaderModule,
+            .pName = "main"
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fragShaderModuleSDF,
+            .pName = "main"
+        }
+    };
+
+    VkVertexInputBindingDescription bindingDescription = {
+        .binding = 0,
+        .stride = sizeof(Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+
+    VkVertexInputAttributeDescription attributeDescriptions[4] = {
+        {.binding = 0, .location = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
+        {.binding = 0, .location = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color)},
+        {.binding = 0, .location = 2, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
+        {.binding = 0, .location = 3, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texCoord)}
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription,
+        .vertexAttributeDescriptionCount = 4,
+        .pVertexAttributeDescriptions = attributeDescriptions
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
+
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = NULL,
+        .scissorCount = 1,
+        .pScissors = NULL
+    };
+
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .lineWidth = 1.0f,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE
+    };
+
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .sampleShadingEnable = VK_FALSE,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+    };
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(PushConstants)
+    };
+
+    VkDescriptorSetLayout layouts[2] = {
+        context->descriptorSetLayout,
+        context->descriptorSetLayout2D
+    };
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfoSDF3D = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 2,
+        .pSetLayouts = layouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange,
+    };
+
+    vkCreatePipelineLayout(context->device, &pipelineLayoutInfoSDF3D, NULL, &context->pipelineLayoutSDF3D);
+
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates
+    };
+
+    VkGraphicsPipelineCreateInfo pipelineInfoSDF3D = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = shaderStagesSDF,
+        .pVertexInputState = &vertexInputInfo,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pColorBlendState = &colorBlending,
+        .pDepthStencilState = &depthStencil,
+        .pDynamicState = &dynamicState,
+        .layout = context->pipelineLayoutSDF3D,
+        .renderPass = context->renderPass,
+        .subpass = 0
+    };
+
+    vkCreateGraphicsPipelines(context->device, VK_NULL_HANDLE, 1, &pipelineInfoSDF3D, NULL, &context->graphicsPipelineSDF3D);
+
+    vkDestroyShaderModule(context->device, fragShaderModuleSDF, NULL);
     vkDestroyShaderModule(context->device, vertShaderModule, NULL);
 }
 
 void createFramebuffers(VulkanContext* context) {
     context->swapChainFramebuffers = malloc(context->swapChainImageCount * sizeof(VkFramebuffer));
-    
+
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         VkImageView attachments[] = {
             context->swapChainImageViews[i],
             context->depthImageView
         };
-        
-        
+
+
         VkFramebufferCreateInfo framebufferInfo = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = context->renderPass,
@@ -1462,7 +1628,7 @@ void createFramebuffers(VulkanContext* context) {
             .height = context->swapChainExtent.height,
             .layers = 1
         };
-        
+
         if (vkCreateFramebuffer(context->device, &framebufferInfo, NULL, &context->swapChainFramebuffers[i]) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create framebuffer\n");
             exit(EXIT_FAILURE);
@@ -1476,7 +1642,7 @@ void createCommandPool(VulkanContext* context) {
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = 0 // Assuming graphics queue family is 0
     };
-    
+
     if (vkCreateCommandPool(context->device, &poolInfo, NULL, &context->commandPool) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create command pool\n");
         exit(EXIT_FAILURE);
@@ -1484,85 +1650,67 @@ void createCommandPool(VulkanContext* context) {
 }
 
 void createCommandBuffers(VulkanContext* context) {
+    // Free existing command buffers if any (safety check)
+    if (context->commandBuffers) {
+        vkFreeCommandBuffers(context->device, context->commandPool,
+                            context->swapChainImageCount, context->commandBuffers);
+        free(context->commandBuffers);
+        context->commandBuffers = NULL;
+    }
+
+    // Allocate new command buffers
     context->commandBuffers = malloc(context->swapChainImageCount * sizeof(VkCommandBuffer));
-    
+    if (!context->commandBuffers) {
+        fprintf(stderr, "Failed to allocate memory for command buffers\n");
+        exit(EXIT_FAILURE);
+    }
+
     VkCommandBufferAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = context->commandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = context->swapChainImageCount
     };
-    
+
     if (vkAllocateCommandBuffers(context->device, &allocInfo, context->commandBuffers) != VK_SUCCESS) {
         fprintf(stderr, "Failed to allocate command buffers\n");
         exit(EXIT_FAILURE);
     }
-    
+
+    // IMPORTANT: Do NOT record commands here!
+    // Command buffers will be recorded dynamically each frame in recordCommandBuffer()
+    // This allows us to set the correct viewport/scissor for the current framebuffer size
+
+    // Optional: Set debug names for command buffers (if you have debugging enabled)
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
-        VkCommandBufferBeginInfo beginInfo = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-        };
-        
-        if (vkBeginCommandBuffer(context->commandBuffers[i], &beginInfo) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to begin recording command buffer\n");
-            exit(EXIT_FAILURE);
-        }
-        
-        
-        VkClearValue clearValues[2];
-        clearValues[0].color = (VkClearColorValue){{0.0f, 0.0f, 0.0f, 1.0f}};
-        clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
-        
-        VkRenderPassBeginInfo renderPassInfo = {
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = context->renderPass,
-            .framebuffer = context->swapChainFramebuffers[i],
-            
-            
-            .renderArea = {
-                .offset = {0, 0},
-                .extent = context->swapChainExtent
-            },
-            .clearValueCount = 2,
-            .pClearValues = clearValues,
-        };
-        
-        
-        vkCmdBeginRenderPass(context->commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        
-        
-        vkCmdBindPipeline(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
-        vkCmdBindDescriptorSets(context->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
-        
-        renderer_draw(context->commandBuffers[i]);
-        
-        
-        vkCmdEndRenderPass(context->commandBuffers[i]);
-        
-        if (vkEndCommandBuffer(context->commandBuffers[i]) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to record command buffer\n");
-            exit(EXIT_FAILURE);
-        }
+        // You can set object names here if using validation layers
+        // For example:
+        // VkDebugUtilsObjectNameInfoEXT nameInfo = {
+        //     .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        //     .objectType = VK_OBJECT_TYPE_COMMAND_BUFFER,
+        //     .objectHandle = (uint64_t)context->commandBuffers[i],
+        //     .pObjectName = "Primary Command Buffer"
+        // };
+        // vkSetDebugUtilsObjectNameEXT(context->device, &nameInfo);
     }
 }
-
 
 void createSyncObjects(VulkanContext* context) {
     context->imageAvailableSemaphores = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
     context->inFlightFences = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
-    
+
     context->renderFinishedSemaphores = malloc(context->swapChainImageCount * sizeof(VkSemaphore));
     context->imagesInFlight = malloc(context->swapChainImageCount * sizeof(VkFence));
-    
+
     VkSemaphoreCreateInfo semaphoreInfo = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
     };
-    
+
     VkFenceCreateInfo fenceInfo = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT
     };
-    
+
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vkCreateSemaphore(context->device, &semaphoreInfo, NULL, &context->imageAvailableSemaphores[i]) != VK_SUCCESS ||
             vkCreateFence(context->device, &fenceInfo, NULL, &context->inFlightFences[i]) != VK_SUCCESS) {
@@ -1570,7 +1718,7 @@ void createSyncObjects(VulkanContext* context) {
             exit(EXIT_FAILURE);
         }
     }
-    
+
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
         if (vkCreateSemaphore(context->device, &semaphoreInfo, NULL, &context->renderFinishedSemaphores[i]) != VK_SUCCESS) {
             fprintf(stderr, "Failed to create renderFinishedSemaphore for image %u\n", i);
@@ -1582,7 +1730,7 @@ void createSyncObjects(VulkanContext* context) {
 
 void createDepthResources(VulkanContext* context) {
     context->depthFormat = VK_FORMAT_D32_SFLOAT;
-    
+
     // Create depth image
     VkImageCreateInfo depthImageInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1603,10 +1751,10 @@ void createDepthResources(VulkanContext* context) {
         fprintf(stderr, "Failed to create depth image\n");
         exit(EXIT_FAILURE);
     }
-    
+
     VkMemoryRequirements depthMemReq;
     vkGetImageMemoryRequirements(context->device, context->depthImage, &depthMemReq);
-    
+
     VkMemoryAllocateInfo depthAllocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = depthMemReq.size,
@@ -1617,7 +1765,7 @@ void createDepthResources(VulkanContext* context) {
         exit(EXIT_FAILURE);
     }
     vkBindImageMemory(context->device, context->depthImage, context->depthImageMemory, 0);
-    
+
     VkImageViewCreateInfo depthImageViewInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = context->depthImage,
@@ -1635,43 +1783,68 @@ void createDepthResources(VulkanContext* context) {
     }
 }
 
+void updateUniformBuffer(VulkanContext* context) {
+    void* data;
+    VkResult result = vkMapMemory(context->device, uniformBufferMemory, 0, sizeof(UniformBufferObject), 0, &data);
+    if (result != VK_SUCCESS) {
+        fprintf(stderr, "Failed to map uniform buffer memory\n");
+        return;
+    }
+
+    UniformBufferObject ubo;
+
+    // Calculate VP matrix (projection * view)
+    // Note: Depending on your matrix order (row-major vs column-major), you might need to adjust this
+    glm_mat4_mul(camera.projection_matrix, camera.view_matrix, ubo.vp);
+
+    memcpy(data, &ubo, sizeof(ubo));
+    vkUnmapMemory(context->device, uniformBufferMemory);
+}
+
+
 // Main render loop
 void drawFrame(VulkanContext* context) {
     uint32_t frameIndex = context->currentFrame;
     VkFence inFlightFence = context->inFlightFences[frameIndex];
-    
+
     vkWaitForFences(context->device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-    
+
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
-                                            context->device,
-                                            context->swapChain,
-                                            UINT64_MAX,
-                                            context->imageAvailableSemaphores[frameIndex],
-                                            VK_NULL_HANDLE,
-                                            &imageIndex
-                                           );
-    
+        context->device,
+        context->swapChain,
+        UINT64_MAX,
+        context->imageAvailableSemaphores[frameIndex],
+        VK_NULL_HANDLE,
+        &imageIndex
+    );
+
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        // TODO: handle swapchain recreation
+        recreateSwapChain(context);
         return;
     } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         fprintf(stderr, "Failed to acquire swap chain image\n");
         exit(EXIT_FAILURE);
     }
-    
+
+    // Check if a previous frame is using this image
     if (context->imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         vkWaitForFences(context->device, 1, &context->imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
     }
-    
+
+    // Mark the image as now being in use by this frame
     context->imagesInFlight[imageIndex] = inFlightFence;
-    
-    vkResetFences(context->device, 1, &inFlightFence);
-    
+
+    // Update uniform buffer
+    updateUniformBuffer(context);
+
+    // Record command buffer for this specific framebuffer
+    recordCommandBuffer(context, imageIndex);
+
     VkSemaphore waitSemaphores[] = { context->imageAvailableSemaphores[frameIndex] };
     VkSemaphore signalSemaphores[] = { context->renderFinishedSemaphores[imageIndex] };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    
+
     VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
@@ -1682,12 +1855,14 @@ void drawFrame(VulkanContext* context) {
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = signalSemaphores
     };
-    
+
+    vkResetFences(context->device, 1, &inFlightFence);
+
     if (vkQueueSubmit(context->graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
         fprintf(stderr, "Failed to submit draw command buffer\n");
         exit(EXIT_FAILURE);
     }
-    
+
     VkPresentInfoKHR presentInfo = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
@@ -1697,45 +1872,43 @@ void drawFrame(VulkanContext* context) {
         .pImageIndices = &imageIndex,
         .pResults = NULL
     };
-    
+
     result = vkQueuePresentKHR(context->graphicsQueue, &presentInfo);
-    
+
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-        // TODO: handle swapchain recreation
+        recreateSwapChain(context);
     } else if (result != VK_SUCCESS) {
         fprintf(stderr, "Failed to present swap chain image\n");
         exit(EXIT_FAILURE);
     }
-    
+
     context->currentFrame = (context->currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
-
-
 void createUniformBuffer(VulkanContext* context) {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-    
+
     VkBufferCreateInfo bufferInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = bufferSize,
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
-    
+
     vkCreateBuffer(context->device, &bufferInfo, NULL, &uniformBuffer);
-    
+
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(context->device, uniformBuffer, &memRequirements);
-    
+
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = 0
     };
-    
+
     allocInfo.memoryTypeIndex = findMemoryType(context->physicalDevice, memRequirements.memoryTypeBits,
                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    
+
     vkAllocateMemory(context->device, &allocInfo, NULL, &uniformBufferMemory);
     vkBindBufferMemory(context->device, uniformBuffer, uniformBufferMemory, 0);
 }
@@ -1748,13 +1921,13 @@ void createDescriptorSetLayout(VulkanContext* context) {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .pImmutableSamplers = NULL
     };
-    
+
     VkDescriptorSetLayoutCreateInfo layoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
         .pBindings = &uboLayoutBinding
     };
-    
+
     vkCreateDescriptorSetLayout(context->device, &layoutInfo, NULL, &context->descriptorSetLayout);
 }
 
@@ -1766,15 +1939,18 @@ void clear_background(Color color) {
 void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
     VkCommandBuffer cmd = context->commandBuffers[imageIndex];
 
+    // Reset command buffer (important for re-recording)
+    vkResetCommandBuffer(cmd, 0);
+
     VkCommandBufferBeginInfo beginInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
     };
 
-    vkBeginCommandBuffer(cmd, &beginInfo);
-
-    /* VkClearValue clearValues[2]; */
-    /* clearValues[0].color = (VkClearColorValue){{0.0f, 0.0f, 0.0f, 1.0f}}; */
-    /* clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0}; */
+    if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to begin recording command buffer\n");
+        exit(EXIT_FAILURE);
+    }
 
     VkClearValue clearValues[2];
     clearValues[0].color = (VkClearColorValue){
@@ -1782,7 +1958,6 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
          context->clearColor.b, context->clearColor.a}
     };
     clearValues[1].depthStencil = (VkClearDepthStencilValue){1.0f, 0};
-
 
     VkRenderPassBeginInfo renderPassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -1798,217 +1973,376 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex) {
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Set AO state once globally for all 3D rendering
+    // Set dynamic viewport and scissor - MUST be done BEFORE any drawing commands!
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)context->swapChainExtent.width,
+        .height = (float)context->swapChainExtent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f
+    };
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = context->swapChainExtent
+    };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Set AO state
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
 
-    // --- RENDER 3D SOLID GEOMETRY (TRIANGLES) ---
+    // --- RENDER 3D SOLID GEOMETRY ---
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout,
                             0, 1, &descriptorSet, 0, NULL);
 
-    // Draw all meshes
     meshes_draw(cmd, &scene.meshes);
-
-    // Or specify each one
-    /* Mesh *teapot = get_mesh("teapot"); */
-    /* Mesh *cow = get_mesh("cow"); */
-    /* mesh(cmd, teapot); */
-    /* mesh(cmd, cow); */
-
-
-    // Draw immediate mode 3D triangle content (cubes, spheres, etc.)
     renderer_draw(cmd);
 
     // --- RENDER 3D TEXTURED GEOMETRY ---
     renderer_draw_textured3D(cmd);
 
-    // --- RENDER LINES WITH LINE PIPELINE ---
+    // --- RENDER LINES ---
     if (context->graphicsPipelineLine && lineVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->graphicsPipelineLine);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipelineLayout,
                                 0, 1, &descriptorSet, 0, NULL);
-        line_renderer_draw(cmd);  // Use the dedicated line renderer
+        line_renderer_draw(cmd);
     }
 
-    // --- RENDER 2D CONTENT ON TOP (NO DEPTH TEST) ---
+    // --- RENDER 2D CONTENT ---
     renderer2D_draw(cmd);
 
     vkCmdEndRenderPass(cmd);
-    vkEndCommandBuffer(cmd);
+
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to record command buffer\n");
+        exit(EXIT_FAILURE);
+    }
 }
 
-
-
+// Update the original cleanupSwapChain to use the new function
 void cleanupSwapChain(VulkanContext* context) {
-    // Wait for device to finish operations
-    vkDeviceWaitIdle(context->device);
-    
-    // Destroy framebuffers
-    for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
-        vkDestroyFramebuffer(context->device, context->swapChainFramebuffers[i], NULL);
-    }
-    free(context->swapChainFramebuffers);
-    
-    // Destroy image views
-    for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
-        vkDestroyImageView(context->device, context->swapChainImageViews[i], NULL);
-    }
-    free(context->swapChainImageViews);
-    
-    // Destroy depth resources
-    vkDestroyImageView(context->device, context->depthImageView, NULL);
-    vkDestroyImage(context->device, context->depthImage, NULL);
-    vkFreeMemory(context->device, context->depthImageMemory, NULL);
-    
-    // Destroy swapchain
-    vkDestroySwapchainKHR(context->device, context->swapChain, NULL);
-    
-    // Free swapchain images array (they're destroyed with swapchain)
-    free(context->swapChainImages);
+    cleanupSwapChainResources(context, context->swapChain);
 }
 
+// New function to clean up swapchain resources without touching pipelines
+void cleanupSwapChainResources(VulkanContext* context, VkSwapchainKHR oldSwapchain) {
+    // CRITICAL: Wait for all GPU operations to complete before destroying resources
+    vkDeviceWaitIdle(context->device);
 
-// In vulkan_setup.c - REPLACE the entire recreateSwapChain() function with this:
+    // Destroy framebuffers
+    if (context->swapChainFramebuffers) {
+        for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
+            if (context->swapChainFramebuffers[i] != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(context->device, context->swapChainFramebuffers[i], NULL);
+                context->swapChainFramebuffers[i] = VK_NULL_HANDLE;
+            }
+        }
+        free(context->swapChainFramebuffers);
+        context->swapChainFramebuffers = NULL;
+    }
+
+    // Free command buffers first (they reference the framebuffers)
+    if (context->commandBuffers && context->commandPool) {
+        vkFreeCommandBuffers(context->device, context->commandPool,
+                            context->swapChainImageCount, context->commandBuffers);
+        free(context->commandBuffers);
+        context->commandBuffers = NULL;
+    }
+
+    // Destroy image views
+    if (context->swapChainImageViews) {
+        for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
+            if (context->swapChainImageViews[i] != VK_NULL_HANDLE) {
+                vkDestroyImageView(context->device, context->swapChainImageViews[i], NULL);
+                context->swapChainImageViews[i] = VK_NULL_HANDLE;
+            }
+        }
+        free(context->swapChainImageViews);
+        context->swapChainImageViews = NULL;
+    }
+
+    // Destroy depth resources
+    if (context->depthImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(context->device, context->depthImageView, NULL);
+        context->depthImageView = VK_NULL_HANDLE;
+    }
+    if (context->depthImage != VK_NULL_HANDLE) {
+        vkDestroyImage(context->device, context->depthImage, NULL);
+        context->depthImage = VK_NULL_HANDLE;
+    }
+    if (context->depthImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(context->device, context->depthImageMemory, NULL);
+        context->depthImageMemory = VK_NULL_HANDLE;
+    }
+
+    // Destroy the OLD swapchain
+    if (oldSwapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(context->device, oldSwapchain, NULL);
+    }
+
+    if (context->swapChainImages) {
+        free(context->swapChainImages);
+        context->swapChainImages = NULL;
+    }
+
+    context->swapChainImageCount = 0;
+}
 
 void recreateSwapChain(VulkanContext* context) {
-    // Handle minimization - wait until window is visible again
+    // Handle minimization
     int width = 0, height = 0;
     glfwGetFramebufferSize(context->window, &width, &height);
     while (width == 0 || height == 0) {
         glfwGetFramebufferSize(context->window, &width, &height);
         glfwWaitEvents();
     }
-    
-    vkDeviceWaitIdle(context->device);
-    
-    // Clean up old swapchain
-    cleanupSwapChain(context);
-    
-    // Recreate swapchain and dependent resources
-    createSwapChain(context);
+
+    // Wait for ALL frames in flight to complete
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (context->inFlightFences[i] != VK_NULL_HANDLE) {
+            vkWaitForFences(context->device, 1, &context->inFlightFences[i], VK_TRUE, UINT64_MAX);
+        }
+    }
+
+    // Store old swapchain
+    VkSwapchainKHR oldSwapchain = context->swapChain;
+
+    // Get new surface capabilities
+    VkSurfaceCapabilitiesKHR capabilities;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context->physicalDevice, context->surface, &capabilities);
+
+    // Create new swapchain
+    VkSwapchainCreateInfoKHR createInfo = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = context->surface,
+        .minImageCount = capabilities.minImageCount + 1,
+        .imageFormat = context->swapChainImageFormat,
+        .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+        .imageExtent = { (uint32_t)width, (uint32_t)height },
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .preTransform = capabilities.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR,
+        .clipped = VK_TRUE,
+        .oldSwapchain = oldSwapchain
+    };
+
+    if (capabilities.maxImageCount > 0 && createInfo.minImageCount > capabilities.maxImageCount) {
+        createInfo.minImageCount = capabilities.maxImageCount;
+    }
+
+    VkSwapchainKHR newSwapchain;
+    if (vkCreateSwapchainKHR(context->device, &createInfo, NULL, &newSwapchain) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to recreate swap chain\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Clean up old resources
+    cleanupSwapChainResources(context, oldSwapchain);
+
+    // Update context with new swapchain
+    context->swapChain = newSwapchain;
+    context->swapChainExtent = (VkExtent2D){ (uint32_t)width, (uint32_t)height };
+
+    // Get new swapchain images
+    vkGetSwapchainImagesKHR(context->device, context->swapChain, &context->swapChainImageCount, NULL);
+    context->swapChainImages = malloc(context->swapChainImageCount * sizeof(VkImage));
+    vkGetSwapchainImagesKHR(context->device, context->swapChain, &context->swapChainImageCount, context->swapChainImages);
+
+    // Recreate dependent resources
     createImageViews(context);
     createDepthResources(context);
-    
-    // RECREATE ALL PIPELINES with new viewport/scissor dimensions
-    // Destroy old pipelines first
-    if (context->graphicsPipeline) 
-        vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
-    if (context->graphicsPipeline2D) 
-        vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
-    if (context->graphicsPipelineTextured2D) 
-        vkDestroyPipeline(context->device, context->graphicsPipelineTextured2D, NULL);
-    if (context->graphicsPipelineTextured3D) 
-        vkDestroyPipeline(context->device, context->graphicsPipelineTextured3D, NULL);
-    if (context->graphicsPipelineLine) 
-        vkDestroyPipeline(context->device, context->graphicsPipelineLine, NULL);
-    
-    // Recreate all pipelines with correct viewport/scissor
-    createGraphicsPipeline(context);
-    create3DTexturedGraphicsPipeline(context);
-    create2DGraphicsPipeline(context);
-    createTextured2DGraphicsPipeline(context);
-    createLineGraphicsPipeline(context);
-    
     createFramebuffers(context);
-    
-    // Recreate command buffers with new framebuffers
-    vkFreeCommandBuffers(context->device, context->commandPool, 
-                        context->swapChainImageCount, context->commandBuffers);
-    free(context->commandBuffers);
+
+    // Recreate command buffers (allocate only, not record)
     createCommandBuffers(context);
-    
-    // Update 3D camera aspect ratio for perspective
-    camera.aspect_ratio = (float)context->swapChainExtent.width / 
-                    (float)context->swapChainExtent.height;
-    glm_perspective(glm_rad(camera.fov), camera.aspect_ratio, 0.1f, 100.0f, 
+
+    // Update camera aspect ratio
+    camera.aspect_ratio = (float)context->swapChainExtent.width /
+                          (float)context->swapChainExtent.height;
+    glm_perspective(glm_rad(camera.fov), camera.aspect_ratio, 0.1f, 100.0f,
                     camera.projection_matrix);
-    
-    /* printf("Swapchain recreated: %dx%d\n", context->swapChainExtent.width, context->swapChainExtent.height); */
 }
 
 void cleanup(VulkanContext* context) {
+    // Wait for device to finish ALL operations
     vkDeviceWaitIdle(context->device);
-    
+
     renderer_shutdown();
     line_renderer_shutdown();
     meshes_destroy(context->device, &scene.meshes);
-    
     texture_pool_cleanup(context);
-    
+
     // Clean up 2D descriptor resources
-    if (context->descriptorSetLayout2D) 
+    if (context->descriptorSetLayout2D) {
         vkDestroyDescriptorSetLayout(context->device, context->descriptorSetLayout2D, NULL);
-    if (context->descriptorPool2D) 
+        context->descriptorSetLayout2D = VK_NULL_HANDLE;
+    }
+    if (context->descriptorPool2D) {
         vkDestroyDescriptorPool(context->device, context->descriptorPool2D, NULL);
-    
+        context->descriptorPool2D = VK_NULL_HANDLE;
+    }
+
+    // Free command buffers first
+    if (context->commandBuffers && context->commandPool) {
+        vkFreeCommandBuffers(context->device, context->commandPool,
+                            context->swapChainImageCount, context->commandBuffers);
+        free(context->commandBuffers);
+        context->commandBuffers = NULL;
+    }
+
     // SYNC OBJECTS
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (context->imageAvailableSemaphores[i])
+        if (context->imageAvailableSemaphores[i]) {
             vkDestroySemaphore(context->device, context->imageAvailableSemaphores[i], NULL);
-        if (context->inFlightFences[i])
+            context->imageAvailableSemaphores[i] = VK_NULL_HANDLE;
+        }
+        if (context->inFlightFences[i]) {
             vkDestroyFence(context->device, context->inFlightFences[i], NULL);
+            context->inFlightFences[i] = VK_NULL_HANDLE;
+        }
     }
     free(context->imageAvailableSemaphores);
     free(context->inFlightFences);
-    
+
     for (uint32_t i = 0; i < context->swapChainImageCount; i++) {
-        if (context->renderFinishedSemaphores[i])
+        if (context->renderFinishedSemaphores[i]) {
             vkDestroySemaphore(context->device, context->renderFinishedSemaphores[i], NULL);
+            context->renderFinishedSemaphores[i] = VK_NULL_HANDLE;
+        }
     }
     free(context->renderFinishedSemaphores);
     free(context->imagesInFlight);
-    
-    // COMMANDS
-    if (context->commandPool) vkDestroyCommandPool(context->device, context->commandPool, NULL);
-    
-    // Clean up swapchain resources
-    cleanupSwapChain(context);
-    
-    // DESTROY ALL PIPELINES FIRST (before their layouts!)
-    if (context->graphicsPipeline) 
+
+    // COMMAND POOL
+    if (context->commandPool) {
+        vkDestroyCommandPool(context->device, context->commandPool, NULL);
+        context->commandPool = VK_NULL_HANDLE;
+    }
+
+    // Clean up swapchain resources (this will destroy framebuffers, image views, depth, etc.)
+    cleanupSwapChainResources(context, context->swapChain);
+
+    // DESTROY ALL PIPELINES
+    if (context->graphicsPipeline) {
         vkDestroyPipeline(context->device, context->graphicsPipeline, NULL);
-    if (context->graphicsPipeline2D) 
+        context->graphicsPipeline = VK_NULL_HANDLE;
+    }
+    if (context->graphicsPipeline2D) {
         vkDestroyPipeline(context->device, context->graphicsPipeline2D, NULL);
-    if (context->graphicsPipelineTextured2D) 
+        context->graphicsPipeline2D = VK_NULL_HANDLE;
+    }
+    if (context->graphicsPipelineTextured2D) {
         vkDestroyPipeline(context->device, context->graphicsPipelineTextured2D, NULL);
-    if (context->graphicsPipelineTextured3D) 
+        context->graphicsPipelineTextured2D = VK_NULL_HANDLE;
+    }
+    if (context->graphicsPipelineTextured3D) {
         vkDestroyPipeline(context->device, context->graphicsPipelineTextured3D, NULL);
-    if (context->graphicsPipelineLine) 
+        context->graphicsPipelineTextured3D = VK_NULL_HANDLE;
+    }
+    if (context->graphicsPipelineLine) {
         vkDestroyPipeline(context->device, context->graphicsPipelineLine, NULL);
-    
-    // NOW DESTROY PIPELINE LAYOUTS (after all pipelines)
-    if (context->pipelineLayout) 
+        context->graphicsPipelineLine = VK_NULL_HANDLE;
+    }
+    if (context->graphicsPipelineSDF2D) {
+        vkDestroyPipeline(context->device, context->graphicsPipelineSDF2D, NULL);
+        context->graphicsPipelineSDF2D = VK_NULL_HANDLE;
+    }
+    if (context->graphicsPipelineSDF3D) {
+        vkDestroyPipeline(context->device, context->graphicsPipelineSDF3D, NULL);
+        context->graphicsPipelineSDF3D = VK_NULL_HANDLE;
+    }
+
+    // DESTROY PIPELINE LAYOUTS
+    if (context->pipelineLayout) {
         vkDestroyPipelineLayout(context->device, context->pipelineLayout, NULL);
-    if (context->pipelineLayout2D) 
+        context->pipelineLayout = VK_NULL_HANDLE;
+    }
+    if (context->pipelineLayout2D) {
         vkDestroyPipelineLayout(context->device, context->pipelineLayout2D, NULL);
-    if (context->pipelineLayoutTextured2D) 
+        context->pipelineLayout2D = VK_NULL_HANDLE;
+    }
+    if (context->pipelineLayoutTextured2D) {
         vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured2D, NULL);
-    if (context->pipelineLayoutTextured3D) 
+        context->pipelineLayoutTextured2D = VK_NULL_HANDLE;
+    }
+    if (context->pipelineLayoutTextured3D) {
         vkDestroyPipelineLayout(context->device, context->pipelineLayoutTextured3D, NULL);
-    if (context->pipelineLayoutLine) 
+        context->pipelineLayoutTextured3D = VK_NULL_HANDLE;
+    }
+    if (context->pipelineLayoutLine) {
         vkDestroyPipelineLayout(context->device, context->pipelineLayoutLine, NULL);
-    
+        context->pipelineLayoutLine = VK_NULL_HANDLE;
+    }
+    if (context->pipelineLayoutSDF2D) {
+        vkDestroyPipelineLayout(context->device, context->pipelineLayoutSDF2D, NULL);
+        context->pipelineLayoutSDF2D = VK_NULL_HANDLE;
+    }
+    if (context->pipelineLayoutSDF3D) {
+        vkDestroyPipelineLayout(context->device, context->pipelineLayoutSDF3D, NULL);
+        context->pipelineLayoutSDF3D = VK_NULL_HANDLE;
+    }
+
     // 2D VERTEX BUFFER
-    if (context->vertexBuffer2D) vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
-    if (context->vertexBufferMemory2D) vkFreeMemory(context->device, context->vertexBufferMemory2D, NULL);
-    
-    if (context->renderPass) vkDestroyRenderPass(context->device, context->renderPass, NULL);
-    
+    if (context->vertexBuffer2D) {
+        vkDestroyBuffer(context->device, context->vertexBuffer2D, NULL);
+        context->vertexBuffer2D = VK_NULL_HANDLE;
+    }
+    if (context->vertexBufferMemory2D) {
+        vkFreeMemory(context->device, context->vertexBufferMemory2D, NULL);
+        context->vertexBufferMemory2D = VK_NULL_HANDLE;
+    }
+
+    if (context->renderPass) {
+        vkDestroyRenderPass(context->device, context->renderPass, NULL);
+        context->renderPass = VK_NULL_HANDLE;
+    }
+
     // UNIFORM BUFFER & DESCRIPTORS
-    if (uniformBuffer) vkDestroyBuffer(context->device, uniformBuffer, NULL);
-    if (uniformBufferMemory) vkFreeMemory(context->device, uniformBufferMemory, NULL);
-    if (descriptorPool) vkDestroyDescriptorPool(context->device, descriptorPool, NULL);
-    if (context->descriptorSetLayout) vkDestroyDescriptorSetLayout(context->device, context->descriptorSetLayout, NULL);
-    
+    if (uniformBuffer) {
+        vkDestroyBuffer(context->device, uniformBuffer, NULL);
+        uniformBuffer = VK_NULL_HANDLE;
+    }
+    if (uniformBufferMemory) {
+        vkFreeMemory(context->device, uniformBufferMemory, NULL);
+        uniformBufferMemory = VK_NULL_HANDLE;
+    }
+    if (descriptorPool) {
+        vkDestroyDescriptorPool(context->device, descriptorPool, NULL);
+        descriptorPool = VK_NULL_HANDLE;
+    }
+    if (context->descriptorSetLayout) {
+        vkDestroyDescriptorSetLayout(context->device, context->descriptorSetLayout, NULL);
+        context->descriptorSetLayout = VK_NULL_HANDLE;
+    }
+
     // DEVICE
-    if (context->device) vkDestroyDevice(context->device, NULL);
-    
+    if (context->device) {
+        vkDestroyDevice(context->device, NULL);
+        context->device = VK_NULL_HANDLE;
+    }
+
     // SURFACE & INSTANCE
-    if (context->surface) vkDestroySurfaceKHR(context->instance, context->surface, NULL);
-    if (context->instance) vkDestroyInstance(context->instance, NULL);
-    
+    if (context->surface) {
+        vkDestroySurfaceKHR(context->instance, context->surface, NULL);
+        context->surface = VK_NULL_HANDLE;
+    }
+    if (context->instance) {
+        vkDestroyInstance(context->instance, NULL);
+        context->instance = VK_NULL_HANDLE;
+    }
+
     // WINDOW
-    if (context->window) glfwDestroyWindow(context->window);
+    if (context->window) {
+        glfwDestroyWindow(context->window);
+        context->window = NULL;
+    }
     glfwTerminate();
 }
 

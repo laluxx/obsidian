@@ -41,11 +41,15 @@ typedef struct {
 
 // Global keymap
 extern KeyChordMap keymap;
+extern bool pending_input; // Maybe it should part of the keymap..
+
 
 // Keymap stack for layered keymaps
 #define MAX_KEYMAP_STACK 8
 extern KeyChordMap *keymap_stack[MAX_KEYMAP_STACK];
 extern size_t keymap_stack_count;
+
+
 
 // Keychord Hook
 typedef void (*AfterKeychordHook)(const char *notation, KeyChordBinding *binding);
@@ -56,10 +60,32 @@ typedef void (*BeforeKeychordHook)(const char *notation, KeyChordBinding *bindin
 extern BeforeKeychordHook internal_before_keychord_hook;
 void register_before_keychord_hook(BeforeKeychordHook hook);
 
+
+typedef bool (*RawKeyInterceptor)(int key, int action, int mods);
+extern RawKeyInterceptor internal_raw_key_interceptor;
+void register_raw_key_interceptor(RawKeyInterceptor interceptor);
+
+// Replace single interceptor with a stack
+#define MAX_RAW_INTERCEPTORS 8
+void register_raw_key_interceptor(RawKeyInterceptor interceptor);
+void unregister_raw_key_interceptor(RawKeyInterceptor interceptor);
+
+
+typedef SCM (*CallInteractivelyFn)(SCM proc);
+extern CallInteractivelyFn keychord_call_interactively;
+void register_call_interactively(CallInteractivelyFn fn);
+
+
+const char *key_to_notation(int key, int mods);
+const char *notation_to_literal(const char *notation);
+
+extern bool skip_next_binding_execution;
+
+
 void keymap_init(KeyChordMap *map);
 void keymap_free(KeyChordMap *map);
 bool parse_keychord_notation(const char *notation, KeyChord *chord);
-bool keychord_bind(KeyChordMap *map, const char *notation, KeyChordAction action, 
+bool keychord_bind(KeyChordMap *map, const char *notation, KeyChordAction action,
                    const char *description, int action_type);
 bool keychord_bind_scheme(KeyChordMap *map, const char *notation, SCM scheme_proc,
                           const char *description, int action_type);

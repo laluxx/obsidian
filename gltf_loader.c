@@ -43,7 +43,7 @@ bool load_gltf_textures(cgltf_data* data, const char* base_path) {
 
     for (size_t i = 0; i < data->textures_count; i++) {
         cgltf_texture* tex = &data->textures[i];
-        
+
         if (!tex->image) {
             printf("  Texture %zu: No image data\n", i);
             gltf_texture_indices[i] = -1;
@@ -58,17 +58,17 @@ bool load_gltf_textures(cgltf_data* data, const char* base_path) {
             char full_path[1024];
             snprintf(full_path, sizeof(full_path), "%s%s", dir, img->uri);
             printf("  Texture %zu: Loading from file '%s'\n", i, full_path);
-            
+
             tex_id = texture_pool_add(&context, full_path);
         }
         // Case 2: Embedded texture data (typical in .glb)
         else if (img->buffer_view) {
             printf("  Texture %zu: Loading from embedded buffer\n", i);
-            
+
             cgltf_buffer_view* view = img->buffer_view;
             unsigned char* buffer_data = (unsigned char*)view->buffer->data + view->offset;
             size_t buffer_size = view->size;
-            
+
             // Load texture from memory buffer
             tex_id = texture_pool_add_from_memory(buffer_data, buffer_size);
         }
@@ -122,12 +122,12 @@ static MorphData* load_morph_targets(cgltf_primitive* prim) {
         // Find position and normal delta attributes
         for (size_t a = 0; a < target->attributes_count; a++) {
             cgltf_attribute* attr = &target->attributes[a];
-            
+
             if (attr->type == cgltf_attribute_type_position) {
                 size_t count = attr->data->count;
                 morph_target->vertex_count = count;
                 morph_target->positions = malloc(count * sizeof(vec3));
-                
+
                 for (size_t v = 0; v < count; v++) {
                     cgltf_accessor_read_float(attr->data, v, morph_target->positions[v], 3);
                 }
@@ -135,7 +135,7 @@ static MorphData* load_morph_targets(cgltf_primitive* prim) {
             } else if (attr->type == cgltf_attribute_type_normal) {
                 size_t count = attr->data->count;
                 morph_target->normals = malloc(count * sizeof(vec3));
-                
+
                 for (size_t v = 0; v < count; v++) {
                     cgltf_accessor_read_float(attr->data, v, morph_target->normals[v], 3);
                 }
@@ -196,20 +196,20 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     }
 
     size_t vertex_count = pos_accessor->count;
-    
+
     // Handle indices
     cgltf_accessor* indices_accessor = prim->indices;
     size_t index_count = 0;
     uint32_t* indices = NULL;
-    
+
     if (indices_accessor) {
         index_count = indices_accessor->count;
         indices = malloc(index_count * sizeof(uint32_t));
-        
+
         for (size_t i = 0; i < index_count; i++) {
             indices[i] = (uint32_t)cgltf_accessor_read_index(indices_accessor, i);
         }
-        
+
         printf("  -> Has %zu indices\n", index_count);
     } else {
         printf("  -> No indices (drawing sequential)\n");
@@ -218,19 +218,19 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     // Get material base color and check for unlit extension
     float base_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     bool is_unlit = false;
-    
+
     if (prim->material) {
         // Get base color from material
         if (prim->material->has_pbr_metallic_roughness) {
             cgltf_pbr_metallic_roughness* pbr = &prim->material->pbr_metallic_roughness;
             memcpy(base_color, pbr->base_color_factor, sizeof(base_color));
-            printf("  -> Material base color: (%.2f, %.2f, %.2f, %.2f)\n", 
+            printf("  -> Material base color: (%.2f, %.2f, %.2f, %.2f)\n",
                    base_color[0], base_color[1], base_color[2], base_color[3]);
         }
-        
+
         // Check for unlit extension using cgltf's built-in flag
         is_unlit = prim->material->unlit;
-        
+
         // Load alpha mode from glTF material
         switch (prim->material->alpha_mode) {
             case cgltf_alpha_mode_opaque:
@@ -250,7 +250,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
                 mesh.alpha_mode = 0;
                 break;
         }
-        
+
         if (is_unlit) {
             printf("  -> Material is UNLIT (KHR_materials_unlit)\n");
         } else {
@@ -259,7 +259,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     } else {
         printf("  -> No material, using default white color\n");
     }
-    
+
     mesh.is_unlit = is_unlit;
 
     // Create vertex array with material colors
@@ -309,42 +309,42 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
 
     // Load morph targets BEFORE expanding indices
     mesh.morph_data = load_morph_targets(prim);
-    
+
     // Expand indices or use vertices directly
     Vertex* final_vertices = NULL;
     size_t final_vertex_count = 0;
-    
+
     if (indices) {
         final_vertex_count = index_count;
         final_vertices = malloc(final_vertex_count * sizeof(Vertex));
-        
+
         // Expand vertices AND store the index mapping for morphing
         if (mesh.morph_data) {
             mesh.morph_data->index_map = malloc(index_count * sizeof(uint32_t));
         }
-        
+
         for (size_t i = 0; i < index_count; i++) {
             final_vertices[i] = vertices[indices[i]];
-            
+
             // Store which original vertex this expanded vertex came from
             if (mesh.morph_data) {
                 mesh.morph_data->index_map[i] = indices[i];
             }
         }
-        
+
         // Store base vertices for morphing (unexpanded)
         if (mesh.morph_data) {
             mesh.morph_data->base_vertices = malloc(vertex_count * sizeof(Vertex));
             memcpy(mesh.morph_data->base_vertices, vertices, vertex_count * sizeof(Vertex));
             mesh.morph_data->base_vertex_count = vertex_count;
         }
-        
+
         free(vertices);
         free(indices);
     } else {
         final_vertices = vertices;
         final_vertex_count = vertex_count;
-        
+
         // No indices, so identity mapping
         if (mesh.morph_data) {
             mesh.morph_data->base_vertices = malloc(vertex_count * sizeof(Vertex));
@@ -359,10 +359,10 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     // Load texture if present
     if (prim->material && prim->material->has_pbr_metallic_roughness) {
         cgltf_pbr_metallic_roughness* pbr = &prim->material->pbr_metallic_roughness;
-        
+
         if (pbr->base_color_texture.texture) {
             cgltf_texture* base_texture = pbr->base_color_texture.texture;
-            
+
             for (size_t t = 0; t < data->textures_count; t++) {
                 if (&data->textures[t] == base_texture) {
                     if (t < gltf_texture_count && gltf_texture_indices[t] >= 0) {
@@ -393,7 +393,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = findMemoryType(
-            context.physicalDevice, 
+            context.physicalDevice,
             memRequirements.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
         )
@@ -422,46 +422,46 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             break;
     }
     printf("\n");
-    
+
     return mesh;
 }
 
 static void process_node(cgltf_node* node, cgltf_data* data, Meshes* meshes, mat4 parent_transform) {
     mat4 local_transform;
     mat4 world_transform;
-    
+
     cgltf_node_transform_local(node, (float*)local_transform);
     glm_mat4_mul(parent_transform, local_transform, world_transform);
-    
+
     size_t mesh_start = meshes->count;
-    
+
     if (node->mesh) {
         cgltf_mesh* gltf_mesh = node->mesh;
-        
+
         for (size_t i = 0; i < gltf_mesh->primitives_count; i++) {
             char mesh_name[256];
-            snprintf(mesh_name, sizeof(mesh_name), "%s_prim_%zu", 
+            snprintf(mesh_name, sizeof(mesh_name), "%s_prim_%zu",
                      node->name ? node->name : "node", i);
-            
+
             Mesh mesh = create_mesh_from_primitive(&gltf_mesh->primitives[i], data, mesh_name);
-            
+
             if (mesh.vertexCount > 0) {
                 mesh.node = node;
                 glm_mat4_copy(world_transform, mesh.model);
                 glm_mat4_copy(local_transform, mesh.local_transform);
-                
+
                 // Copy initial weights from mesh if available
                 if (mesh.morph_data && gltf_mesh->weights_count > 0) {
                     for (size_t w = 0; w < mesh.morph_data->target_count && w < gltf_mesh->weights_count; w++) {
                         mesh.morph_data->weights[w] = gltf_mesh->weights[w];
                     }
                 }
-                
+
                 meshes_add(meshes, mesh);
             }
         }
     }
-    
+
     size_t mesh_count = meshes->count - mesh_start;
     if (mesh_count > 0 && node_mapping_count < 256) {
         node_mappings[node_mapping_count].node = node;
@@ -469,7 +469,7 @@ static void process_node(cgltf_node* node, cgltf_data* data, Meshes* meshes, mat
         node_mappings[node_mapping_count].mesh_count = mesh_count;
         node_mapping_count++;
     }
-    
+
     for (size_t i = 0; i < node->children_count; i++) {
         process_node(node->children[i], data, meshes, world_transform);
     }
@@ -488,7 +488,7 @@ void load_gltf_meshes(cgltf_data* data, Meshes* meshes) {
 
     node_mapping_count = 0;
     cgltf_scene* scene = data->scene ? data->scene : &data->scenes[0];
-    
+
     printf("Processing scene with %zu root nodes\n", scene->nodes_count);
 
     mat4 identity;
@@ -512,15 +512,15 @@ bool load_gltf_animations(cgltf_data* data, GLTFInstance* instance) {
     printf("Loading %zu animations from glTF...\n", data->animations_count);
 
     Animation* animations = malloc(data->animations_count * sizeof(Animation));
-    
+
     for (size_t i = 0; i < data->animations_count; i++) {
         cgltf_animation* anim = &data->animations[i];
-        
+
         animations[i].name = anim->name ? strdup(anim->name) : strdup("unnamed");
         animations[i].duration = 0.0f;
         animations[i].channel_count = anim->channels_count;
         animations[i].channels = malloc(anim->channels_count * sizeof(AnimationChannel));
-        
+
         printf("  Animation %zu: '%s' with %zu channels\n",
                i, animations[i].name, anim->channels_count);
 
@@ -528,27 +528,27 @@ bool load_gltf_animations(cgltf_data* data, GLTFInstance* instance) {
             cgltf_animation_channel* gltf_channel = &anim->channels[c];
             cgltf_animation_sampler* sampler = gltf_channel->sampler;
             AnimationChannel* channel = &animations[i].channels[c];
-            
+
             channel->target_node = gltf_channel->target_node;
             channel->path = gltf_channel->target_path;
-            
+
             cgltf_accessor* input = sampler->input;
             cgltf_accessor* output = sampler->output;
-            
+
             channel->keyframe_count = input->count;
             channel->times = malloc(input->count * sizeof(float));
             channel->translations = NULL;
             channel->rotations = NULL;
             channel->scales = NULL;
             channel->weights = NULL;
-            
+
             for (size_t k = 0; k < input->count; k++) {
                 cgltf_accessor_read_float(input, k, &channel->times[k], 1);
                 if (channel->times[k] > animations[i].duration) {
                     animations[i].duration = channel->times[k];
                 }
             }
-            
+
             if (gltf_channel->target_path == cgltf_animation_path_type_translation) {
                 channel->translations = malloc(output->count * sizeof(vec3));
                 for (size_t k = 0; k < output->count; k++) {
@@ -574,7 +574,7 @@ bool load_gltf_animations(cgltf_data* data, GLTFInstance* instance) {
                 printf("    Channel %zu: Morph weights (%zu targets)\n", c, num_weights);
             }
         }
-        
+
         printf("    Duration: %.2f seconds\n", animations[i].duration);
     }
 
@@ -586,22 +586,22 @@ bool load_gltf_animations(cgltf_data* data, GLTFInstance* instance) {
 bool load_gltf(const char* filepath, Scene* scene) {
     cgltf_options options = {0};
     cgltf_data* data = NULL;
-    
+
     FILE* test = fopen(filepath, "r");
     if (!test) {
         printf("Cannot open file '%s'\n", filepath);
         return false;
     }
     fclose(test);
-    
+
     printf("Parsing glTF file: %s\n", filepath);
-    
+
     cgltf_result result = cgltf_parse_file(&options, filepath, &data);
     if (result != cgltf_result_success) {
         printf("Failed to parse GLTF file '%s': %d\n", filepath, result);
         return false;
     }
-    
+
     printf("Successfully parsed GLTF: %s\n", filepath);
     printf("  Scenes: %zu\n", data->scenes_count);
     printf("  Nodes: %zu\n", data->nodes_count);
@@ -610,48 +610,48 @@ bool load_gltf(const char* filepath, Scene* scene) {
     printf("  Textures: %zu\n", data->textures_count);
     printf("  Animations: %zu\n", data->animations_count);
     printf("\n");
-    
+
     result = cgltf_load_buffers(&options, data, filepath);
     if (result != cgltf_result_success) {
         printf("Failed to load buffers: %d\n", result);
         cgltf_free(data);
         return false;
     }
-    
+
     // Create new glTF instance
     if (scene->gltf_instance_count == scene->gltf_instance_capacity) {
         size_t new_cap = scene->gltf_instance_capacity ? scene->gltf_instance_capacity * 2 : 4;
         scene->gltf_instances = realloc(scene->gltf_instances, new_cap * sizeof(GLTFInstance));
         scene->gltf_instance_capacity = new_cap;
     }
-    
+
     GLTFInstance* instance = &scene->gltf_instances[scene->gltf_instance_count];
     instance->mesh_start_index = scene->meshes.count;
     instance->gltf_data = data;
     instance->animations = NULL;
     instance->animation_count = 0;
     instance->mesh_count = 0;
-    
+
     if (!load_gltf_textures(data, filepath)) {
         printf("Warning: Failed to load some textures\n");
     }
-    
+
     load_gltf_meshes(data, &scene->meshes);
-    
+
     instance->mesh_count = scene->meshes.count - instance->mesh_start_index;
-    
+
     load_gltf_animations(data, instance);
-    
+
     scene->gltf_instance_count++;
-    
+
     printf("Loaded glTF instance #%zu with %zu meshes (indices %zu to %zu)\n",
            scene->gltf_instance_count - 1,
            instance->mesh_count,
            instance->mesh_start_index,
            instance->mesh_start_index + instance->mesh_count - 1);
-    
+
     return true;
-}    
+}
 
 static float lerp(float a, float b, float t) {
     return a + (b - a) * t;
@@ -670,25 +670,25 @@ void animate_scene(Scene* scene, float time) {
     // Animate each glTF instance independently
     for (size_t inst = 0; inst < scene->gltf_instance_count; inst++) {
         GLTFInstance* instance = &scene->gltf_instances[inst];
-        
+
         if (!instance->animations) continue;
-        
+
         for (size_t a = 0; a < instance->animation_count; a++) {
             Animation* anim = &instance->animations[a];
-            
+
             float anim_time = fmodf(time, anim->duration);
-            
+
             for (size_t c = 0; c < anim->channel_count; c++) {
                 AnimationChannel* channel = &anim->channels[c];
                 cgltf_node* target_node = channel->target_node;
-                
+
                 size_t k0 = find_keyframe(channel->times, channel->keyframe_count, anim_time);
                 size_t k1 = k0 + 1;
-                
+
                 float t0 = channel->times[k0];
                 float t1 = channel->times[k1];
                 float factor = (anim_time - t0) / (t1 - t0);
-                
+
                 // Handle morph weight animations
                 if (channel->path == cgltf_animation_path_type_weights && channel->weights) {
                     // Only search meshes belonging to THIS instance
@@ -697,20 +697,20 @@ void animate_scene(Scene* scene, float time) {
                         Mesh* mesh = &scene->meshes.items[m];
                         if (mesh->node == target_node && mesh->morph_data) {
                             size_t num_targets = mesh->morph_data->target_count;
-                            
+
                             // Interpolate weights for each morph target
                             for (size_t t = 0; t < num_targets; t++) {
                                 float w0 = channel->weights[k0 * num_targets + t];
                                 float w1 = channel->weights[k1 * num_targets + t];
                                 mesh->morph_data->weights[t] = lerp(w0, w1, factor);
                             }
-                            
+
                             // Update the mesh vertices with morphed positions
                             mesh_update_morph(mesh);
                         }
                     }
                 }
-                
+
                 // Handle transformation animations
                 size_t mesh_end = instance->mesh_start_index + instance->mesh_count;
                 for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
@@ -718,13 +718,13 @@ void animate_scene(Scene* scene, float time) {
                     if (mesh->node == target_node) {
                         mat4 animated_transform;
                         glm_mat4_identity(animated_transform);
-                        
+
                         if (channel->path == cgltf_animation_path_type_translation && channel->translations) {
                             vec3 pos;
                             glm_vec3_lerp(channel->translations[k0], channel->translations[k1], factor, pos);
                             glm_translate(animated_transform, pos);
                         }
-                        
+
                         if (channel->path == cgltf_animation_path_type_rotation && channel->rotations) {
                             versor rot;
                             glm_quat_slerp(channel->rotations[k0], channel->rotations[k1], factor, rot);
@@ -732,13 +732,13 @@ void animate_scene(Scene* scene, float time) {
                             glm_quat_mat4(rot, rot_mat);
                             glm_mat4_mul(animated_transform, rot_mat, animated_transform);
                         }
-                        
+
                         if (channel->path == cgltf_animation_path_type_scale && channel->scales) {
                             vec3 scale;
                             glm_vec3_lerp(channel->scales[k0], channel->scales[k1], factor, scale);
                             glm_scale(animated_transform, scale);
                         }
-                        
+
                         glm_mat4_copy(animated_transform, mesh->model);
                     }
                 }

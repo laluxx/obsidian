@@ -27,7 +27,7 @@ typedef struct {
     float far_plane;
     bool active;
     vec3 look_at;
-    bool use_look_at;    
+    bool use_look_at;
 } Camera;
 
 extern Camera camera;

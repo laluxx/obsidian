@@ -45,12 +45,14 @@ typedef struct {
     Texture2D* texture;
     uint32_t startVertex;
     uint32_t vertexCount;
+    bool is_sdf;  // ADD THIS LINE
 } Texture3DBatch;
 
 typedef struct {
     Texture2D* texture;
     uint32_t startVertex;
     uint32_t vertexCount;
+    bool is_sdf;  // ADD THIS LINE
 } TextureBatch;
 
 
@@ -77,6 +79,7 @@ void renderer_draw_textured3D(VkCommandBuffer cmd);
 void renderer_clear_textured3D();
 
 // Texture management
+bool load_texture_from_rgba_with_format(VulkanContext* context, unsigned char* rgba_data, uint32_t width, uint32_t height, Texture2D* texture, VkFormat format);
 bool load_texture_from_rgba(VulkanContext* context, unsigned char* rgba_data, uint32_t width, uint32_t height, Texture2D* texture);
 bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture, unsigned char* rgba_data, int width, int height);
 bool load_texture_from_memory(VulkanContext* context, unsigned char* data, size_t data_size, Texture2D* texture);
@@ -93,13 +96,6 @@ void texture_pool_cleanup(VulkanContext* context);
 int32_t texture_pool_add(VulkanContext* context, const char* filename);
 Texture2D* texture_pool_get(int32_t index);
 
-/* typedef struct { */
-/*     mat4 model; */
-/*     int ambientOcclusionEnabled; */
-/*     int isUnlit; */
-/*     int padding[2]; */
-/* } PushConstants; */
-
 typedef struct {
     mat4 model;
     int ambientOcclusionEnabled;
@@ -107,8 +103,6 @@ typedef struct {
     int alphaMode;
     float alphaCutoff;
 } PushConstants;
-
-
 
 extern PushConstants pushConstants;
 
@@ -124,7 +118,7 @@ typedef struct {
     float* weights;           // Current weights for each target
     Vertex* base_vertices;    // Original vertices before morphing
     size_t base_vertex_count;
-    uint32_t* index_map;      // Maps expanded vertex index to original vertex 
+    uint32_t* index_map;      // Maps expanded vertex index to original vertex
 } MorphData;
 
 typedef struct {
@@ -151,12 +145,10 @@ typedef struct {
     size_t capacity;
 } Meshes;
 
-void renderer_init(
-                   VkDevice device,
+void renderer_init(VkDevice device,
                    VkPhysicalDevice physicalDevice,
                    VkCommandPool commandPool,
-                   VkQueue graphicsQueue
-                   );
+                   VkQueue graphicsQueue);
 void renderer_shutdown(void);
 void renderer_upload(void);
 void renderer_draw(VkCommandBuffer cmd);

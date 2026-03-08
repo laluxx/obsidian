@@ -1,6 +1,7 @@
 CC = gcc
 CFLAGS = -std=c23 -Wall -Wextra -g3 -O3 -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
 LDFLAGS = -lvulkan -lglfw -lX11 -lcglm -lm $(shell pkg-config --libs freetype2 guile-3.0)
+
 GLSLANG = glslangValidator
 XXD = xxd
 
@@ -11,13 +12,14 @@ INSTALL_DIR = /usr
 
 # Project settings
 LIB_NAME = libobsidian
-TEST_EXECUTABLE = obsidian
+EXECUTABLE = obsidian
 
-# Auto-detect all sources and headers
+# Source files
 LIB_SOURCES = $(filter-out main.c, $(wildcard *.c))
 LIB_OBJECTS = $(LIB_SOURCES:.c=.o)
-TEST_SOURCES = main.c
-TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
+MAIN_OBJECT = main.o
+ALL_OBJECTS = $(LIB_OBJECTS) $(MAIN_OBJECT)
+
 HEADERS = $(wildcard *.h)
 
 # Shaders
@@ -26,8 +28,8 @@ SHADER_FRAGS = $(wildcard *.frag)
 SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv)
 SPV_HEADERS = $(SHADER_SPVS:.spv=.spv.h)
 
-# Default target
-all: $(SPV_HEADERS) $(LIB_NAME).a $(LIB_NAME).so $(TEST_EXECUTABLE)
+# Default target - build executable directly
+all: $(SPV_HEADERS) $(EXECUTABLE)
 
 # Compile shaders to SPIR-V
 %.vert.spv: %.vert
@@ -40,28 +42,27 @@ all: $(SPV_HEADERS) $(LIB_NAME).a $(LIB_NAME).so $(TEST_EXECUTABLE)
 %.spv.h: %.spv
 	$(XXD) -i $< > $@
 
-# Library object files (with -fPIC)
-%.o: %.c
+# Compile C sources to object files
+%.o: %.c $(HEADERS) $(SPV_HEADERS)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-# Static library
-$(LIB_NAME).a: $(SPV_HEADERS) $(LIB_OBJECTS)
+# Build executable by linking all objects directly
+$(EXECUTABLE): $(ALL_OBJECTS)
+	$(CC) $(ALL_OBJECTS) -o $@ $(LDFLAGS)
+
+# Static library (optional, for distribution)
+$(LIB_NAME).a: $(LIB_OBJECTS)
 	ar rcs $@ $(LIB_OBJECTS)
 
-# Dynamic library
-$(LIB_NAME).so: $(SPV_HEADERS) $(LIB_OBJECTS)
+# Shared library (optional, for distribution)
+$(LIB_NAME).so: $(LIB_OBJECTS)
 	$(CC) -shared -o $@ $(LIB_OBJECTS) $(LDFLAGS)
 
-# Test executable (links against the static library)
-$(TEST_EXECUTABLE): $(TEST_OBJECTS) $(LIB_NAME).a
-	$(CC) $(TEST_OBJECTS) -o $@ -L. -lobsidian $(LDFLAGS)
+# Build both libraries
+libs: $(LIB_NAME).a $(LIB_NAME).so
 
-# Alternative: build test executable using object files directly
-$(TEST_EXECUTABLE)-direct: $(SPV_HEADERS) $(LIB_OBJECTS) $(TEST_OBJECTS)
-	$(CC) $(LIB_OBJECTS) $(TEST_OBJECTS) -o $(TEST_EXECUTABLE) $(LDFLAGS)
-
-# Installation (only installs library, not test executable)
-install: $(LIB_NAME).a $(LIB_NAME).so
+# Installation (installs libraries and headers)
+install: libs
 	install -d $(INSTALL_DIR)/lib
 	install -m 644 $(LIB_NAME).a $(INSTALL_DIR)/lib
 	install -m 755 $(LIB_NAME).so $(INSTALL_DIR)/lib
@@ -79,8 +80,40 @@ uninstall:
 	rm -rf $(INSTALL_DIR)/include/obsidian
 	ldconfig
 
-# Clean
+# Clean build artifacts
 clean:
-	rm -f $(LIB_OBJECTS) $(TEST_OBJECTS) *.spv *.spv.h $(LIB_NAME).a $(LIB_NAME).so $(TEST_EXECUTABLE)
+	rm -f $(ALL_OBJECTS) $(SHADER_SPVS) $(SPV_HEADERS)
+	rm -f $(LIB_NAME).a $(LIB_NAME).so $(EXECUTABLE)
 
-.PHONY: all install uninstall clean
+# Clean everything including shaders
+distclean: clean
+	rm -f *.spv *.spv.h
+
+# Rebuild everything from scratch
+rebuild: clean all
+
+# Run the executable
+run: $(EXECUTABLE)
+	./$(EXECUTABLE)
+
+# Debug build (rebuild with debug symbols and no optimization)
+debug: CFLAGS = -std=c23 -Wall -Wextra -g3 -O0 -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
+debug: rebuild
+
+# Help target
+help:
+	@echo "Obsidian Engine Makefile"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all       - Build the executable (default)"
+	@echo "  libs      - Build static and shared libraries"
+	@echo "  install   - Install libraries and headers"
+	@echo "  uninstall - Remove installed files"
+	@echo "  clean     - Remove build artifacts"
+	@echo "  distclean - Remove all generated files"
+	@echo "  rebuild   - Clean and rebuild everything"
+	@echo "  run       - Build and run the executable"
+	@echo "  debug     - Build with debug symbols and no optimization"
+	@echo "  help      - Show this help message"
+
+.PHONY: all libs install uninstall clean distclean rebuild run debug help

@@ -26,6 +26,36 @@ The result is an environment where **creation and introspection are one continuo
 
 If **Vulkan** is the forge, **Scheme** is the sculptor’s hand.
 
+
+### Quickstart
+
+```C
+#include <obsidian/obsidian.h>
+
+int sw = 1920;
+int sh = 1080;
+
+int main() {
+    initWindow(sw, sh, "Program name");
+
+    Font *jetb = load_font("JetBrainsMonoNerdFont-Regular.ttf", 40);
+
+    keychord_bind(&keymap, "M-=", nextTheme,     "Next theme",     PRESS);
+    keychord_bind(&keymap, "M--", previousTheme, "Previous theme", PRESS);
+
+    loadThemeByName("modus-vivendi");
+
+    while (!windowShouldClose()) {
+        beginFrame();
+        clear_background(CT.bg);
+        fps(jetb, context.swapChainExtent.width - 300, 100, CT.error);
+        endFrame();
+    }
+
+    return 0;
+}
+```
+
 ---
 
 ### 🚧 Under Construction

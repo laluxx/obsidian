@@ -8,6 +8,8 @@
 #define KEYCHORD_INIT_CAP 64
 #define DEFAULT_CHORD_TIMEOUT 1.0  // seconds to complete a chord
 static bool should_timeout = false;
+bool skip_next_binding_execution = false; // NOTE EXTERN
+bool pending_input = false;               // NOTE EXTERN
 
 KeyChordMap keymap;
 
@@ -16,14 +18,44 @@ KeyChordMap keymap;
 // But if we bind <up> on PRESS and then rebind it on PRESS again the second one will take precedence
 
 AfterKeychordHook internal_after_keychord_hook = NULL;
-void register_after_keychord_hook(AfterKeychordHook hook) {
-    internal_after_keychord_hook = hook;
-}
+void register_after_keychord_hook(AfterKeychordHook hook)
+ {internal_after_keychord_hook = hook;}
 
 BeforeKeychordHook internal_before_keychord_hook = NULL;
-void register_before_keychord_hook(BeforeKeychordHook hook) {
-    internal_before_keychord_hook = hook;
+void register_before_keychord_hook(BeforeKeychordHook hook)
+ {internal_before_keychord_hook = hook;}
+
+
+/* RawKeyInterceptor internal_raw_key_interceptor = NULL; */
+/* void register_raw_key_interceptor(RawKeyInterceptor interceptor) */
+/*  {internal_raw_key_interceptor = interceptor;} */
+
+static RawKeyInterceptor raw_interceptors[MAX_RAW_INTERCEPTORS];
+static int raw_interceptor_count = 0;
+
+void register_raw_key_interceptor(RawKeyInterceptor interceptor) {
+    if (raw_interceptor_count < MAX_RAW_INTERCEPTORS)
+        raw_interceptors[raw_interceptor_count++] = interceptor;
 }
+
+void unregister_raw_key_interceptor(RawKeyInterceptor interceptor) {
+    for (int i = 0; i < raw_interceptor_count; i++) {
+        if (raw_interceptors[i] == interceptor) {
+            // Shift remaining down
+            for (int j = i; j < raw_interceptor_count - 1; j++)
+                raw_interceptors[j] = raw_interceptors[j + 1];
+            raw_interceptor_count--;
+            return;
+        }
+    }
+}
+
+
+
+
+CallInteractivelyFn keychord_call_interactively = NULL;
+void register_call_interactively(CallInteractivelyFn fn)
+ {keychord_call_interactively = fn;}
 
 
 void keymap_init(KeyChordMap *map) {
@@ -47,6 +79,8 @@ void keymap_free(KeyChordMap *map) {
     map->bindings = NULL;
     map->count = map->capacity = 0;
 }
+
+
 
 // Map of shift characters to their base keys
 static const struct {
@@ -78,12 +112,169 @@ static const struct {
     {0, 0, 0}  // sentinel
 };
 
+static char _notation_buf[16];
+
+const char *key_to_notation(int key, int mods) {
+    bool ctrl  = (mods & GLFW_MOD_CONTROL) != 0;
+    bool shift = (mods & GLFW_MOD_SHIFT)   != 0;
+    bool alt   = (mods & GLFW_MOD_ALT)     != 0;
+
+    // Special keys
+    if (key == GLFW_KEY_SPACE) {
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-SPC");
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-SPC");
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-SPC");
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "SPC");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_ENTER) {
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-RET");
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-RET");
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-RET");
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "RET");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_TAB) {
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-TAB");
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-TAB");
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-TAB");
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "TAB");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_ESCAPE) {
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-ESC");
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-ESC");
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-ESC");
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "ESC");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_BACKSPACE) {
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-DEL");
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-DEL");
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-DEL");
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "DEL");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_DELETE) {
+        if (alt) snprintf(_notation_buf, sizeof(_notation_buf), "M-<delete>");
+        else     snprintf(_notation_buf, sizeof(_notation_buf), "<delete>");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_UP) {
+        if (alt) snprintf(_notation_buf, sizeof(_notation_buf), "M-<up>");
+        else     snprintf(_notation_buf, sizeof(_notation_buf), "<up>");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_DOWN) {
+        if (alt) snprintf(_notation_buf, sizeof(_notation_buf), "M-<down>");
+        else     snprintf(_notation_buf, sizeof(_notation_buf), "<down>");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_LEFT) {
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-<left>");
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-<left>");
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-<left>");
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "<left>");
+        return _notation_buf;
+    }
+    if (key == GLFW_KEY_RIGHT) {
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-<right>");
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-<right>");
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-<right>");
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "<right>");
+        return _notation_buf;
+    }
+
+    // Letter keys
+    if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z) {
+        char lower = 'a' + (key - GLFW_KEY_A);
+        char upper = 'A' + (key - GLFW_KEY_A);
+        if (ctrl && alt && shift)
+            snprintf(_notation_buf, sizeof(_notation_buf), "C-M-%c", upper);
+        else if (ctrl && alt)
+            snprintf(_notation_buf, sizeof(_notation_buf), "C-M-%c", lower);
+        else if (ctrl && shift)
+            snprintf(_notation_buf, sizeof(_notation_buf), "C-%c", upper);
+        else if (ctrl)
+            snprintf(_notation_buf, sizeof(_notation_buf), "C-%c", lower);
+        else if (alt && shift)
+            snprintf(_notation_buf, sizeof(_notation_buf), "M-%c", upper);
+        else if (alt)
+            snprintf(_notation_buf, sizeof(_notation_buf), "M-%c", lower);
+        else if (shift)
+            snprintf(_notation_buf, sizeof(_notation_buf), "%c", upper);
+        else
+            snprintf(_notation_buf, sizeof(_notation_buf), "%c", lower);
+        return _notation_buf;
+    }
+
+    // Digit keys
+    if (key >= GLFW_KEY_0 && key <= GLFW_KEY_9) {
+        char c = '0' + (key - GLFW_KEY_0);
+        if (shift) {
+            for (int i = 0; shift_char_map[i].shifted != 0; i++) {
+                if (shift_char_map[i].glfw_key == key) {
+                    if (alt) snprintf(_notation_buf, sizeof(_notation_buf), "M-%c", shift_char_map[i].shifted);
+                    else     snprintf(_notation_buf, sizeof(_notation_buf), "%c",   shift_char_map[i].shifted);
+                    return _notation_buf;
+                }
+            }
+        }
+        if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-%c", c);
+        else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-%c",   c);
+        else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-%c",   c);
+        else             snprintf(_notation_buf, sizeof(_notation_buf), "%c",     c);
+        return _notation_buf;
+    }
+
+    // Punctuation/symbol keys
+    for (int i = 0; shift_char_map[i].shifted != 0; i++) {
+        if (shift_char_map[i].glfw_key == key) {
+            char c = shift ? shift_char_map[i].shifted : shift_char_map[i].base;
+            if (ctrl && alt) snprintf(_notation_buf, sizeof(_notation_buf), "C-M-%c", c);
+            else if (ctrl)   snprintf(_notation_buf, sizeof(_notation_buf), "C-%c",   c);
+            else if (alt)    snprintf(_notation_buf, sizeof(_notation_buf), "M-%c",   c);
+            else             snprintf(_notation_buf, sizeof(_notation_buf), "%c",     c);
+            return _notation_buf;
+        }
+    }
+
+    snprintf(_notation_buf, sizeof(_notation_buf), "%c", (char)key);
+    return _notation_buf;
+}
+
+static char _literal_buf[8];
+
+const char *notation_to_literal(const char *notation) {
+    if (strcmp(notation, "TAB") == 0)  { _literal_buf[0] = '\t';   _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "RET") == 0)  { _literal_buf[0] = '\n';   _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "SPC") == 0)  { _literal_buf[0] = ' ';    _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "ESC") == 0)  { _literal_buf[0] = '\x1b'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "DEL") == 0)  { _literal_buf[0] = '\x7f'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "NUL") == 0)  { _literal_buf[0] = '\x00'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "BEL") == 0)  { _literal_buf[0] = '\x07'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "BS")  == 0)  { _literal_buf[0] = '\x08'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "LF")  == 0)  { _literal_buf[0] = '\x0a'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "VT")  == 0)  { _literal_buf[0] = '\x0b'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "FF")  == 0)  { _literal_buf[0] = '\x0c'; _literal_buf[1] = 0; return _literal_buf; }
+    if (strcmp(notation, "CR")  == 0)  { _literal_buf[0] = '\x0d'; _literal_buf[1] = 0; return _literal_buf; }
+
+    if (notation[0] == 'C' && notation[1] == '-' && notation[2] != '\0' && notation[3] == '\0') {
+        char k = notation[2];
+        if (k >= '@' && k <= '_') { _literal_buf[0] = k - '@';      _literal_buf[1] = 0; return _literal_buf; }
+        if (k >= 'a' && k <= 'z') { _literal_buf[0] = k - 'a' + 1; _literal_buf[1] = 0; return _literal_buf; }
+        if (k >= '`' && k <= '~') { _literal_buf[0] = k - '`';     _literal_buf[1] = 0; return _literal_buf; }
+    }
+
+    return notation;
+}
+
 // Parse a single key with modifiers (e.g., "C-w" or "M-x")
 static bool parse_single_key(const char *notation, int *key_out, int *mods_out) {
     int mods = 0;
     const char *key_part = notation;
     size_t len = strlen(notation);
-    
+
     // Parse modifiers
     while (len >= 2 && key_part[1] == '-') {
         if (key_part[0] == 'C') {
@@ -102,13 +293,13 @@ static bool parse_single_key(const char *notation, int *key_out, int *mods_out) 
             break;
         }
     }
-    
+
     if (len == 0) return false;
-    
+
     // Parse the base key
     if (len == 1) {
         char c = key_part[0];
-        
+
         // Check if this is a shift character (like >, <, +, etc.)
         bool found_shift_char = false;
         for (int i = 0; shift_char_map[i].shifted != 0; i++) {
@@ -125,16 +316,16 @@ static bool parse_single_key(const char *notation, int *key_out, int *mods_out) 
                 break;
             }
         }
-        
+
         if (found_shift_char) {
             *mods_out = mods;
             return true;
         }
-        
+
         // Handle letter keys
         if (isalpha(c)) {
             *key_out = toupper(c);  // GLFW always uses uppercase for letter keys
-            
+
             // If the character in notation is uppercase, it means Shift is required
             if (isupper(c)) {
                 mods |= GLFW_MOD_SHIFT;
@@ -168,34 +359,34 @@ static bool parse_single_key(const char *notation, int *key_out, int *mods_out) 
             return false;
         }
     }
-    
+
     *mods_out = mods;
     return true;
 }
 
 bool parse_keychord_notation(const char *notation, KeyChord *chord) {
     if (!notation || !chord) return false;
-    
+
     memset(chord, 0, sizeof(KeyChord));
-    
+
     // Split by spaces for multi-key chords
     char *notation_copy = strdup(notation);
     char *token = strtok(notation_copy, " ");
-    
+
     while (token && chord->length < 4) {
         int key, mods;
         if (!parse_single_key(token, &key, &mods)) {
             free(notation_copy);
             return false;
         }
-        
+
         chord->keys[chord->length] = key;
         chord->mods[chord->length] = mods;
         chord->length++;
-        
+
         token = strtok(NULL, " ");
     }
-    
+
     free(notation_copy);
     return chord->length > 0;
 }
@@ -205,10 +396,10 @@ bool keychord_bind(KeyChordMap *map, const char *notation,
                    const char *description,
                    int action_type) {
     if (!map || !notation || !action) return false;
-    
+
     KeyChord chord;
     if (!parse_keychord_notation(notation, &chord)) return false;
-    
+
     // Check if binding already exists
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, &chord)) {
@@ -216,28 +407,28 @@ bool keychord_bind(KeyChordMap *map, const char *notation,
             if (map->bindings[i].action_type == ACTION_SCHEME_PROC) {
                 scm_gc_unprotect_object(map->bindings[i].action.scheme_proc);
             }
-            
+
             // Update binding
             map->bindings[i].action_type = ACTION_C_FUNCTION;
             map->bindings[i].action.c_action = action;
             map->bindings[i].action_type_flag |= action_type;
-            
+
             // Free and update description
             if (map->bindings[i].description) {
                 free(map->bindings[i].description);
             }
             map->bindings[i].description = description ? strdup(description) : NULL;
-            
+
             return true;
         }
     }
-    
+
     // Add new binding
     if (map->count >= map->capacity) {
         map->capacity *= 2;
         map->bindings = realloc(map->bindings, map->capacity * sizeof(KeyChordBinding));
     }
-    
+
     KeyChordBinding *binding = &map->bindings[map->count];
     binding->chord = chord;
     binding->action_type = ACTION_C_FUNCTION;
@@ -245,7 +436,7 @@ bool keychord_bind(KeyChordMap *map, const char *notation,
     binding->description = description ? strdup(description) : NULL;  // Always strdup!
     binding->notation = strdup(notation);
     binding->action_type_flag = action_type;
-    
+
     map->count++;
     return true;
 }
@@ -255,10 +446,10 @@ bool keychord_bind_scheme(KeyChordMap *map, const char *notation, SCM scheme_pro
     if (!map || !notation || !scm_is_true(scm_procedure_p(scheme_proc))) {
         return false;
     }
-    
+
     KeyChord chord;
     if (!parse_keychord_notation(notation, &chord)) return false;
-    
+
     // Check if binding already exists
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, &chord)) {
@@ -267,26 +458,26 @@ bool keychord_bind_scheme(KeyChordMap *map, const char *notation, SCM scheme_pro
             if (map->bindings[i].action_type == ACTION_SCHEME_PROC) {
                 scm_gc_unprotect_object(map->bindings[i].action.scheme_proc);
             }
-            
+
             map->bindings[i].action_type = ACTION_SCHEME_PROC;
             map->bindings[i].action.scheme_proc = scheme_proc;
             map->bindings[i].action_type_flag |= action_type;
-            
+
             // Protect the new procedure from GC
             scm_gc_protect_object(scheme_proc);
-            
+
             free(map->bindings[i].description);
             map->bindings[i].description = description ? strdup(description) : NULL;
             return true;
         }
     }
-    
+
     // Add new binding
     if (map->count >= map->capacity) {
         map->capacity *= 2;
         map->bindings = realloc(map->bindings, map->capacity * sizeof(KeyChordBinding));
     }
-    
+
     KeyChordBinding *binding = &map->bindings[map->count];
     binding->chord = chord;
     binding->action_type = ACTION_SCHEME_PROC;
@@ -294,30 +485,30 @@ bool keychord_bind_scheme(KeyChordMap *map, const char *notation, SCM scheme_pro
     binding->description = description ? strdup(description) : NULL;
     binding->notation = strdup(notation);
     binding->action_type_flag = action_type;
-    
+
     // Protect from GC
     scm_gc_protect_object(scheme_proc);
-    
+
     map->count++;
     return true;
 }
 
 bool keychord_unbind(KeyChordMap *map, const char *notation) {
     if (!map || !notation) return false;
-    
+
     KeyChord chord;
     if (!parse_keychord_notation(notation, &chord)) return false;
-    
+
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, &chord)) {
             // If it's a Scheme proc, unprotect it first!
             if (map->bindings[i].action_type == ACTION_SCHEME_PROC) {
                 scm_gc_unprotect_object(map->bindings[i].action.scheme_proc);
             }
-            
+
             free(map->bindings[i].description);
             free(map->bindings[i].notation);
-            
+
             // Move last binding to this position
             if (i < map->count - 1) {
                 map->bindings[i] = map->bindings[map->count - 1];
@@ -326,37 +517,43 @@ bool keychord_unbind(KeyChordMap *map, const char *notation) {
             return true;
         }
     }
-    
+
     return false;
 }
 
 KeyChordBinding *keychord_lookup_binding(KeyChordMap *map, const KeyChord *chord, int action_type) {
     if (!map || !chord) return NULL;
-    
+
     for (size_t i = 0; i < map->count; i++) {
         if (keychord_equal(&map->bindings[i].chord, chord) &&
             (map->bindings[i].action_type_flag & action_type)) {
             return &map->bindings[i];
         }
     }
-    
+
     return NULL;
 }
 
 // Helper to execute a binding
 static void execute_binding(KeyChordBinding *binding) {
     if (!binding) return;
-    
+    if (skip_next_binding_execution) {
+        skip_next_binding_execution = false;
+        return;
+    }
     if (binding->action_type == ACTION_C_FUNCTION) {
         binding->action.c_action();
     } else if (binding->action_type == ACTION_SCHEME_PROC) {
-        scm_call_0(binding->action.scheme_proc);
+        if (keychord_call_interactively)
+            keychord_call_interactively(binding->action.scheme_proc);
+        else
+            scm_call_0(binding->action.scheme_proc);
     }
 }
 
 bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
     if (!map) return false;
-    
+
     // Ignore standalone modifier key presses in chord building
     if (key == GLFW_KEY_LEFT_SHIFT   || key == GLFW_KEY_RIGHT_SHIFT   ||
         key == GLFW_KEY_LEFT_CONTROL || key == GLFW_KEY_RIGHT_CONTROL ||
@@ -364,20 +561,20 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
         key == GLFW_KEY_LEFT_SUPER   || key == GLFW_KEY_RIGHT_SUPER) {
         return false;
     }
-    
+
     double current_time = glfwGetTime();
-    
+
     // Create a chord for the current key press
     KeyChord single_key_chord;
     single_key_chord.keys[0] = key;
     single_key_chord.mods[0] = mods;
     single_key_chord.length = 1;
-    
+
     // Check what action types are bound to this key
     KeyChordBinding *press_binding = keychord_lookup_binding(map, &single_key_chord, GLFW_PRESS);
     KeyChordBinding *release_binding = keychord_lookup_binding(map, &single_key_chord, GLFW_RELEASE);
     KeyChordBinding *repeat_binding = keychord_lookup_binding(map, &single_key_chord, GLFW_REPEAT);
-    
+
     // If we're on PRESS but this key is ONLY bound to RELEASE or REPEAT, consume it
     if (action == GLFW_PRESS && !press_binding && (release_binding || repeat_binding)) {
         if (map->current_chord.length > 0) {
@@ -385,7 +582,7 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
         }
         return true;
     }
-    
+
     // Handle single-key bindings (when not building a multi-key chord)
     if (map->current_chord.length == 0) {
         KeyChordBinding *binding = keychord_lookup_binding(map, &single_key_chord, action);
@@ -394,24 +591,24 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
             if (internal_before_keychord_hook) {
                 internal_before_keychord_hook(binding->notation, binding);
             }
-            
+
             // Execute the action
             execute_binding(binding);
-            
+
             // Call AFTER hook
             if (internal_after_keychord_hook) {
                 internal_after_keychord_hook(binding->notation, binding);
             }
-            
+
             return true;
         }
     }
-    
+
     // Only build multi-key chords on PRESS
     if (action != GLFW_PRESS) {
         return false;
     }
-    
+
     // Check for chord timeout
     if (map->current_chord.length > 0) {
         if (current_time - map->last_key_time > map->chord_timeout) {
@@ -419,7 +616,7 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
             keychord_reset_state(map);
         }
     }
-    
+
     // Add key to current chord
     if (map->current_chord.length < 4) {
         map->current_chord.keys[map->current_chord.length] = key;
@@ -427,39 +624,39 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
         map->current_chord.length++;
         map->last_key_time = current_time;
     }
-    
+
     // Try to find a matching multi-key binding
     KeyChordBinding *multi_binding = keychord_lookup_binding(map, &map->current_chord, GLFW_PRESS);
-    
+
     if (multi_binding) {
         // Call BEFORE hook
         if (internal_before_keychord_hook) {
             internal_before_keychord_hook(multi_binding->notation, multi_binding);
         }
-        
+
         // Execute the action
         execute_binding(multi_binding);
-        
+
         // Call AFTER hook
         if (internal_after_keychord_hook) {
             internal_after_keychord_hook(multi_binding->notation, multi_binding);
         }
-        
+
         // Reset chord state
         keychord_reset_state(map);
         return true;
     }
-    
+
     // Check if this could be a prefix for a longer chord
     bool is_prefix = false;
     for (size_t i = 0; i < map->count; i++) {
         KeyChord *bound = &map->bindings[i].chord;
-        
+
         // Check if bound chord is longer than current
         if (bound->length <= map->current_chord.length) {
             continue;
         }
-        
+
         // Check if current chord matches the beginning of this binding
         bool matches = true;
         for (size_t j = 0; j < map->current_chord.length; j++) {
@@ -469,18 +666,18 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
                 break;
             }
         }
-        
+
         if (matches) {
             is_prefix = true;
             break;
         }
     }
-    
+
     if (is_prefix) {
         // We're in the middle of a chord - consume the key
         return true;
     }
-    
+
     // Not a match and not a prefix - reset and allow normal handling
     keychord_reset_state(map);
     return false;
@@ -488,27 +685,27 @@ bool keychord_process_key(KeyChordMap *map, int key, int action, int mods) {
 
 KeyChordBinding *keychord_find_binding(KeyChordMap *map, const char *notation) {
     if (!map || !notation) return NULL;
-    
+
     for (size_t i = 0; i < map->count; i++) {
-        if (map->bindings[i].notation && 
+        if (map->bindings[i].notation &&
             strcmp(map->bindings[i].notation, notation) == 0) {
             return &map->bindings[i];
         }
     }
-    
+
     return NULL;
 }
 
 void keymap_print_bindings(KeyChordMap *map) {
     if (!map) return;
-    
+
     printf("Key Chord Bindings:\n");
     printf("===================\n");
-    
+
     for (size_t i = 0; i < map->count; i++) {
         KeyChordBinding *binding = &map->bindings[i];
         printf("%-15s", binding->notation ? binding->notation : "Unknown");
-        
+
         if (binding->description) {
             printf(" - %s", binding->description);
         }
@@ -519,36 +716,36 @@ void keymap_print_bindings(KeyChordMap *map) {
 bool keychord_equal(const KeyChord *a, const KeyChord *b) {
     if (!a || !b) return false;
     if (a->length != b->length) return false;
-    
+
     for (size_t i = 0; i < a->length; i++) {
         int a_key = a->keys[i];
         int b_key = b->keys[i];
         int a_mods = a->mods[i];
         int b_mods = b->mods[i];
-        
+
         // Keys must match
         if (a_key != b_key) return false;
-        
+
         // For letter keys (A-Z), normalize shift handling
         if (a_key >= GLFW_KEY_A && a_key <= GLFW_KEY_Z) {
             // Extract non-shift modifiers
             int a_other_mods = a_mods & ~GLFW_MOD_SHIFT;
             int b_other_mods = b_mods & ~GLFW_MOD_SHIFT;
-            
+
             // Non-shift modifiers must match
             if (a_other_mods != b_other_mods) return false;
-            
+
             // Shift must match exactly
             bool a_has_shift = (a_mods & GLFW_MOD_SHIFT) != 0;
             bool b_has_shift = (b_mods & GLFW_MOD_SHIFT) != 0;
-            
+
             if (a_has_shift != b_has_shift) return false;
         } else {
             // For non-letter keys, all modifiers must match exactly
             if (a_mods != b_mods) return false;
         }
     }
-    
+
     return true;
 }
 
@@ -564,7 +761,6 @@ void keymap_reset_state() {
     keymap.current_chord.length = 0;
     keymap.last_key_time = 0.0;
 }
-
 
 // Keymap stack for layered keymaps (local maps have priority over global)
 KeyChordMap *keymap_stack[MAX_KEYMAP_STACK] = {NULL};
@@ -601,15 +797,15 @@ KeyChordMap* keymap_stack_get_local(void) {
 // Check if a chord is a prefix of any binding in a keymap
 static bool is_chord_prefix(KeyChordMap *map, const KeyChord *current_chord) {
     if (!map || !current_chord) return false;
-    
+
     for (size_t i = 0; i < map->count; i++) {
         KeyChord *bound = &map->bindings[i].chord;
-        
+
         // Check if bound chord is longer than current
         if (bound->length <= current_chord->length) {
             continue;
         }
-        
+
         // Check if current chord matches the beginning of this binding
         bool matches = true;
         for (size_t j = 0; j < current_chord->length; j++) {
@@ -619,17 +815,27 @@ static bool is_chord_prefix(KeyChordMap *map, const KeyChord *current_chord) {
                 break;
             }
         }
-        
+
         if (matches) {
             return true;
         }
     }
-    
+
     return false;
 }
 
 // Process key with keymap stack (local maps first, then global)
 bool keychord_process_key_with_stack(int key, int action, int mods) {
+    pending_input = true;
+    // Raw interceptor runs before modifier filtering and binding lookup
+    /* if (internal_raw_key_interceptor */
+    /*  && internal_raw_key_interceptor(key, action, mods)) */
+    /*     return true; */
+
+    for (int i = 0; i < raw_interceptor_count; i++)
+        if (raw_interceptors[i](key, action, mods))
+            return true;
+
     // Ignore standalone modifier keys
     if (key == GLFW_KEY_LEFT_SHIFT   || key == GLFW_KEY_RIGHT_SHIFT   ||
         key == GLFW_KEY_LEFT_CONTROL || key == GLFW_KEY_RIGHT_CONTROL ||
@@ -637,19 +843,19 @@ bool keychord_process_key_with_stack(int key, int action, int mods) {
         key == GLFW_KEY_LEFT_SUPER   || key == GLFW_KEY_RIGHT_SUPER) {
         return false;
     }
-    
+
     double current_time = glfwGetTime();
-    
+
     // Create a chord for the current key
     KeyChord single_key_chord;
     single_key_chord.keys[0] = key;
     single_key_chord.mods[0] = mods;
     single_key_chord.length = 1;
-    
+
     // Check if we're building a chord in any keymap
     bool building_chord = false;
     KeyChordMap *active_chord_map = NULL;
-    
+
     // Check local keymaps first
     for (int i = keymap_stack_count - 1; i >= 0; i--) {
         if (keymap_stack[i] && keymap_stack[i]->current_chord.length > 0) {
@@ -658,59 +864,59 @@ bool keychord_process_key_with_stack(int key, int action, int mods) {
             break;
         }
     }
-    
+
     // Check global keymap
     if (!building_chord && keymap.current_chord.length > 0) {
         building_chord = true;
         active_chord_map = &keymap;
     }
-    
+
     // Handle single-key bindings (when not building a chord)
     if (!building_chord) {
         // Check local keymaps first (top of stack has priority)
         for (int i = keymap_stack_count - 1; i >= 0; i--) {
             KeyChordMap *local = keymap_stack[i];
             if (!local) continue;
-            
+
             KeyChordBinding *binding = keychord_lookup_binding(local, &single_key_chord, action);
             if (binding) {
                 // Found in local keymap - execute it
                 if (internal_before_keychord_hook) {
                     internal_before_keychord_hook(binding->notation, binding);
                 }
-                
+
                 execute_binding(binding);
-                
+
                 if (internal_after_keychord_hook) {
                     internal_after_keychord_hook(binding->notation, binding);
                 }
-                
+
                 return true;
             }
         }
-        
+
         // Not found in any local keymap, check global
         KeyChordBinding *global_binding = keychord_lookup_binding(&keymap, &single_key_chord, action);
         if (global_binding) {
             if (internal_before_keychord_hook) {
                 internal_before_keychord_hook(global_binding->notation, global_binding);
             }
-            
+
             execute_binding(global_binding);
-            
+
             if (internal_after_keychord_hook) {
                 internal_after_keychord_hook(global_binding->notation, global_binding);
             }
-            
+
             return true;
         }
-        
+
         // No direct binding found, but check if this could start a multi-key chord
         // Only do this on PRESS
         if (action != GLFW_PRESS) {
             return false;
         }
-        
+
         // Check if this key is a prefix in any local keymap
         for (int i = keymap_stack_count - 1; i >= 0; i--) {
             if (keymap_stack[i] && is_chord_prefix(keymap_stack[i], &single_key_chord)) {
@@ -720,7 +926,7 @@ bool keychord_process_key_with_stack(int key, int action, int mods) {
                 return true;
             }
         }
-        
+
         // Check if it's a prefix in global keymap
         if (is_chord_prefix(&keymap, &single_key_chord)) {
             // Start building chord in global map
@@ -728,17 +934,17 @@ bool keychord_process_key_with_stack(int key, int action, int mods) {
             keymap.last_key_time = current_time;
             return true;
         }
-        
+
         // Not a binding and not a prefix
         return false;
     }
-    
+
     // We're building a multi-key chord
     // Only build multi-key chords on PRESS
     if (action != GLFW_PRESS) {
         return false;
     }
-    
+
     // Check for chord timeout
     if (active_chord_map && current_time - active_chord_map->last_key_time > active_chord_map->chord_timeout) {
         // Reset all keymaps on timeout
@@ -753,7 +959,7 @@ bool keychord_process_key_with_stack(int key, int action, int mods) {
         // Try processing this key again as a new chord
         return keychord_process_key_with_stack(key, action, mods);
     }
-    
+
     // Add key to the active chord map's current chord
     if (active_chord_map->current_chord.length < 4) {
         active_chord_map->current_chord.keys[active_chord_map->current_chord.length] = key;
@@ -761,31 +967,31 @@ bool keychord_process_key_with_stack(int key, int action, int mods) {
         active_chord_map->current_chord.length++;
         active_chord_map->last_key_time = current_time;
     }
-    
+
     // Try to find a matching multi-key binding
     KeyChordBinding *multi_binding = keychord_lookup_binding(active_chord_map, &active_chord_map->current_chord, GLFW_PRESS);
-    
+
     if (multi_binding) {
         if (internal_before_keychord_hook) {
             internal_before_keychord_hook(multi_binding->notation, multi_binding);
         }
-        
+
         execute_binding(multi_binding);
-        
+
         if (internal_after_keychord_hook) {
             internal_after_keychord_hook(multi_binding->notation, multi_binding);
         }
-        
+
         keychord_reset_state(active_chord_map);
         return true;
     }
-    
+
     // Check if this could be a prefix for a longer chord
     if (is_chord_prefix(active_chord_map, &active_chord_map->current_chord)) {
         // We're in the middle of a chord - consume the key
         return true;
     }
-    
+
     // Not a match and not a prefix - reset and allow normal handling
     keychord_reset_state(active_chord_map);
     return false;

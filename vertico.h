@@ -20,26 +20,26 @@ typedef void (*VerticoSelectCallback)(void* data);
 typedef struct {
     VerticoCandidate candidates[VERTICO_MAX_CANDIDATES];
     size_t candidate_count;
-    
+
     VerticoCandidate filtered[VERTICO_MAX_CANDIDATES];
     size_t filtered_count;
-    
+
     char input[VERTICO_INPUT_BUFFER_SIZE];
     size_t input_length;
-    
+
     size_t selected_index;
     int scroll_offset;
-    
+
     bool is_active;
     VerticoSelectCallback on_select;
-    
+
     KeyChordMap* saved_keymap;  // Store the previous keymap
     KeyChordMap vertico_keymap; // Vertico-specific keymap
-    
+
     char category[128];         // Category name (e.g., "keymap", "meshes")
-    
+
     Font* font;                 // Font for rendering
-    
+
     int count;          // Maximal number of candidates to show
     bool cycle;         // Enable cycling for ‘vertico-next’ and ‘vertico-previous’
     bool top;           // If vertico should be rendered at the top of the screen

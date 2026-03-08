@@ -1,4 +1,5 @@
 #include "window.h"
+#include "audio.h"
 #include "input.h"
 #include "keychords.h"
 #include "gltf_loader.h"
@@ -7,6 +8,7 @@
 #include "vulkan_setup.h"
 #include <stdio.h>
 #include "font.h"
+#include "audio.h"
 
 
 float delta_time;
@@ -40,85 +42,91 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     init_input();
     keymap_init(&keymap);
     init_free_type();
+    audio_init();
 
     // Default cursor mode is normal (visible)
     current_cursor_mode = GLFW_CURSOR_NORMAL;
     glfwSetInputMode(context.window, GLFW_CURSOR, current_cursor_mode);
-    
+
     createInstance(&context);
-    
+
     vec3 camera_pos = {0.0f, 3.0f, 0.0f};
     vec3 camera_target = {0.0f, 2.0f, 0.0f};
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
-    
+
     camera.active = true;
-    
+
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface\n");
         exit(EXIT_FAILURE);
     }
-    
+
     pickPhysicalDevice(&context);
     createLogicalDevice(&context);
     createSwapChain(&context);
     createImageViews(&context);
     createDepthResources(&context);
-    
+
     createRenderPass(&context);
-    
+
     createUniformBuffer(&context);
     createDescriptorSetLayout(&context);
-    
+
     createGraphicsPipeline(&context);
-    
+
     create2DDescriptorSetLayout(&context);
     create2DDescriptorPool(&context);
-    
+
     create3DTexturedGraphicsPipeline(&context);
-    
+
     create2DGraphicsPipeline(&context);
     createTextured2DGraphicsPipeline(&context);
     createLineGraphicsPipeline(&context);
+
+    // ADD THESE TWO LINES:
+    createSDF2DGraphicsPipeline(&context);
+    createSDF3DGraphicsPipeline(&context);
+
     renderer2D_init();
-    
+
     createDescriptorPool(&context);
     createDescriptorSet(&context);
-    
+
     createFramebuffers(&context);
     createCommandPool(&context);
-    
+
     renderer_init(
         context.device,
         context.physicalDevice,
         context.commandPool,
         context.graphicsQueue
     );
-    
+
     renderer_init_textured3D();
-    
+
     line_renderer_init(
         context.device,
         context.physicalDevice,
         context.commandPool,
         context.graphicsQueue
     );
-    
+
     clear_background((Color){0.0f, 0.0f, 0.0f, 1.0f});
 
     createCommandBuffers(&context);
     createSyncObjects(&context);
-    
+
     scene_init(&scene);
-    
+
     texture_pool_init();
-    
+
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
     float maxLineWidth = properties.limits.lineWidthRange[1];
     printf("MAX supported line width: %f\n", maxLineWidth);
 
     initThemes();
-    
+
     return context.window;
 }
 
@@ -134,9 +142,9 @@ void beginFrame() {
     float current_frame = getTime();
     delta_time = current_frame - last_frame;
     last_frame = current_frame;
-    
+
     animate_scene(&scene, current_frame);
-    
+
     camera_process_keyboard(&camera, context.window, delta_time);
     camera_update(&camera);
 
@@ -174,18 +182,18 @@ void endFrame() {
     renderer_upload_textured3D();
     line_renderer_upload();
     renderer2D_upload();
-    
+
     // RENDER FRAME
     uint32_t frameIndex = context.currentFrame;
     VkFence inFlightFence = context.inFlightFences[frameIndex];
     vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-    
+
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         context.device, context.swapChain, UINT64_MAX,
         context.imageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex
     );
-    
+
     // Only handle critical errors - resize is handled by callback
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapChain(&context);
@@ -194,20 +202,20 @@ void endFrame() {
         fprintf(stderr, "Failed to acquire swap chain image\n");
         exit(EXIT_FAILURE);
     }
-    
+
     if (context.imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         vkWaitForFences(context.device, 1, &context.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
     }
     context.imagesInFlight[imageIndex] = inFlightFence;
     vkResetFences(context.device, 1, &inFlightFence);
-    
+
     // Re-record command buffer with new geometry
     recordCommandBuffer(&context, imageIndex);
-    
+
     VkSemaphore waitSemaphores[] = { context.imageAvailableSemaphores[frameIndex] };
     VkSemaphore signalSemaphores[] = { context.renderFinishedSemaphores[imageIndex] };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    
+
     VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
@@ -218,12 +226,12 @@ void endFrame() {
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = signalSemaphores
     };
-    
+
     if (vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
         fprintf(stderr, "Failed to submit draw command buffer\n");
         exit(EXIT_FAILURE);
     }
-    
+
     VkPresentInfoKHR presentInfo = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
@@ -233,9 +241,9 @@ void endFrame() {
         .pImageIndices = &imageIndex,
         .pResults = NULL
     };
-    
+
     result = vkQueuePresentKHR(context.graphicsQueue, &presentInfo);
-    
+
     // Flag resize on suboptimal, actual recreation happens at frame start
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         context.framebufferResized = true;
@@ -244,20 +252,16 @@ void endFrame() {
         exit(EXIT_FAILURE);
     }
 
-    
+
     update_input();
     glfwPollEvents();
     context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 
-
-
 double getTime() {
     return glfwGetTime();
 }
-
-
 
 void setWindowPos(GLFWwindow* window, int x, int y) {
     glfwSetWindowPos(window, x, y);
@@ -365,19 +369,19 @@ void toggle_editor_mode() {
 
 void process_editor_movement(Camera* cam, float deltaTime) {
     if (!isMouseButtonDown(MOUSE_BUTTON_RIGHT)) return;
-    
+
     float speed = 5.0f * deltaTime;
-    
+
     vec3 forward, right;
-    
+
     glm_vec3_copy(cam->front, forward);
     glm_vec3_normalize(forward);
-    
+
     glm_vec3_cross(forward, cam->up, right);
     glm_vec3_normalize(right);
-    
+
     vec3 movement = {0.0f, 0.0f, 0.0f};
-    
+
     if (isKeyDown(KEY_W)) {
         vec3 temp;
         glm_vec3_scale(forward, speed, temp);
@@ -388,7 +392,7 @@ void process_editor_movement(Camera* cam, float deltaTime) {
         glm_vec3_scale(forward, -speed, temp);
         glm_vec3_add(movement, temp, movement);
     }
-    
+
     if (isKeyDown(KEY_A)) {
         vec3 temp;
         glm_vec3_scale(right, -speed, temp);
@@ -399,7 +403,7 @@ void process_editor_movement(Camera* cam, float deltaTime) {
         glm_vec3_scale(right, speed, temp);
         glm_vec3_add(movement, temp, movement);
     }
-    
+
     if (isKeyDown(KEY_SPACE)) {
         vec3 worldUp = {0.0f, 1.0f, 0.0f};
         vec3 temp;
@@ -412,6 +416,6 @@ void process_editor_movement(Camera* cam, float deltaTime) {
         glm_vec3_scale(worldUp, speed, temp);
         glm_vec3_sub(movement, temp, movement);
     }
-    
+
     glm_vec3_add(cam->position, movement, cam->position);
 }

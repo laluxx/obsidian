@@ -21,8 +21,8 @@ typedef struct {
 
 
 void recreateSwapChain(VulkanContext* context);
+void cleanupSwapChainResources(VulkanContext* context, VkSwapchainKHR oldSwapchain);
 void cleanupSwapChain(VulkanContext* context);
-
 
 void create2DDescriptorSetLayout(VulkanContext* context);
 void create2DDescriptorPool(VulkanContext *context);
@@ -41,6 +41,8 @@ void create2DGraphicsPipeline(VulkanContext *context);
 void create3DTexturedGraphicsPipeline(VulkanContext *context);
 void createLineGraphicsPipeline(VulkanContext *context);
 void createGraphicsPipeline(VulkanContext *context);
+void createSDF2DGraphicsPipeline(VulkanContext* context);
+void createSDF3DGraphicsPipeline(VulkanContext* context);
 void createFramebuffers(VulkanContext *context);
 void createCommandPool(VulkanContext *context);
 void createCommandBuffers(VulkanContext *context);
