@@ -444,7 +444,6 @@ void otherTestFunc() {
 
 #include "vertico.h"
 
-
 int main() {
     /* context.currentFrame = 0; */
 

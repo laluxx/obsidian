@@ -19,12 +19,18 @@ typedef struct {
 
 // Hash table for character storage
 #define FONT_HASH_SIZE 256
-
 typedef struct CharNode {
     uint32_t codepoint;
     Character character;
     struct CharNode *next;
 } CharNode;
+
+// Direct-mapped L1 character cache (power of 2 for fast modulo)
+#define CHAR_CACHE_SIZE 256
+typedef struct {
+    uint32_t codepoint;
+    Character *ch;
+} CharCacheEntry;
 
 typedef enum {
     FONT_RENDER_NORMAL,  // Uses regular texture pipeline
@@ -56,6 +62,7 @@ typedef struct {
     FontRenderMode render_mode;
     int sdf_spread;
     int display_size;
+    CharCacheEntry char_cache[CHAR_CACHE_SIZE];
 } Font;
 
 void init_free_type(void);
