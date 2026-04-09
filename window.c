@@ -71,21 +71,11 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
 
     createUniformBuffer(&context);
     createDescriptorSetLayout(&context);
-
-    createGraphicsPipeline(&context);
-
     create2DDescriptorSetLayout(&context);
     create2DDescriptorPool(&context);
 
-    create3DTexturedGraphicsPipeline(&context);
-
-    create2DGraphicsPipeline(&context);
-    createTextured2DGraphicsPipeline(&context);
-    createLineGraphicsPipeline(&context);
-
-    // ADD THESE TWO LINES:
-    createSDF2DGraphicsPipeline(&context);
-    createSDF3DGraphicsPipeline(&context);
+    createAllPipelineLayouts(&context);
+    createGraphicsPipelines(&context);
 
     renderer2D_init();
 
