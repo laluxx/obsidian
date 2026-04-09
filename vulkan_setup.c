@@ -1960,49 +1960,67 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
     fprintf(stdout, "Indirect buffer: %u draw slots\n", maxMeshes);
 }
 
-/* Call once after scene load and whenever meshes change.
-   Writes MeshGPUData SSBO for all frames + VkDrawIndirectCommand for each mesh. */
+void markMeshesSSBODirty(VulkanContext* ctx)
+{
+    ctx->ssboFramesDirty = MAX_FRAMES_IN_FLIGHT;
+}
+
 void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
 {
     uint32_t count = (uint32_t)meshes->count;
     ctx->indirectDrawCount = count;
 
-    MeshGPUData*                gpuData = malloc(count * sizeof(MeshGPUData));
-    VkDrawIndexedIndirectCommand* cmds  = (VkDrawIndexedIndirectCommand*)ctx->indirectBufferMapped;
+    /* Rebuild indirect buffer every time (it's HOST_VISIBLE, cheap to write) */
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)ctx->indirectBufferMapped;
 
     for (uint32_t i = 0; i < count; i++) {
         Mesh* m = &meshes->items[i];
 
-        /* skip dynamic (morph-target) meshes — drawn by meshes_draw() directly */
         if (m->megaBaseVertex == UINT32_MAX) {
             cmds[i].indexCount    = 0;
             cmds[i].instanceCount = 0;
             cmds[i].firstIndex    = 0;
             cmds[i].vertexOffset  = 0;
             cmds[i].firstInstance = i;
-            memset(&gpuData[i], 0, sizeof(MeshGPUData));
             continue;
         }
-
-        glm_mat4_copy(m->model, gpuData[i].model);
-        gpuData[i].textureIndex = (m->texture && m->texture->loaded)
-                                  ? (int)m->texture->bindlessSlot : -1;
-        gpuData[i].isUnlit      = m->is_unlit ? 1 : 0;
-        gpuData[i].alphaMode    = m->alpha_mode;
-        gpuData[i].alphaCutoff  = m->alpha_cutoff;
 
         cmds[i].indexCount    = m->indexCount;
         cmds[i].instanceCount = 1;
         cmds[i].firstIndex    = (m->megaBaseIndex == UINT32_MAX) ? 0 : m->megaBaseIndex;
         cmds[i].vertexOffset  = (int32_t)m->megaBaseVertex;
-        cmds[i].firstInstance = i;   /* gl_InstanceIndex == mesh index in SSBO */
+        cmds[i].firstInstance = i;
     }
 
-    /* Upload to all frames at once — SSBO is the same for static scenes */
-    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++)
-        memcpy(ctx->meshSSBOMapped[f], gpuData, count * sizeof(MeshGPUData));
+    /* Mark all in-flight frames as needing SSBO upload */
+    markMeshesSSBODirty(ctx);
+}
 
-    free(gpuData);
+/* Call once per frame from beginFrame — uploads SSBO only to currentFrame if dirty */
+void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
+{
+    if (ctx->ssboFramesDirty == 0) return;
+
+    uint32_t count = (uint32_t)meshes->count;
+    uint32_t f     = ctx->currentFrame;
+
+    MeshGPUData* dst = (MeshGPUData*)ctx->meshSSBOMapped[f];
+
+    for (uint32_t i = 0; i < count; i++) {
+        Mesh* m = &meshes->items[i];
+        if (m->megaBaseVertex == UINT32_MAX) {
+            memset(&dst[i], 0, sizeof(MeshGPUData));
+            continue;
+        }
+        glm_mat4_copy(m->model, dst[i].model);
+        dst[i].textureIndex = (m->texture && m->texture->loaded)
+                              ? (int)m->texture->bindlessSlot : -1;
+        dst[i].isUnlit      = m->is_unlit ? 1 : 0;
+        dst[i].alphaMode    = m->alpha_mode;
+        dst[i].alphaCutoff  = m->alpha_cutoff;
+    }
+
+    ctx->ssboFramesDirty--;
 }
 
 void clear_background(Color color) { context.clearColor = color; }

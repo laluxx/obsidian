@@ -128,6 +128,7 @@ typedef struct {
     VkDeviceMemory        indirectBufferMemory;
     void*                 indirectBufferMapped;
     uint32_t              indirectDrawCount;
+    uint32_t              ssboFramesDirty;    /* counts down from MAX_FRAMES_IN_FLIGHT to 0 */
 } VulkanContext;
 
 extern VulkanContext context;

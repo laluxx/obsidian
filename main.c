@@ -553,6 +553,7 @@ int main() {
         mat4 temp;
         glm_mat4_copy(scene.meshes.items[0].model, temp);
         glm_mat4_mul(offset_transform, temp, scene.meshes.items[0].model);
+        markMeshesSSBODirty(&context);
 
 
 

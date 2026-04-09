@@ -148,6 +148,7 @@ void beginFrame() {
     last_frame = current_frame;
 
     animate_scene(&scene, current_frame);
+    markMeshesSSBODirty(&context);  /* animations modified transforms */
 
     camera_process_keyboard(&camera, context.window, delta_time);
     camera_update(&camera);
@@ -161,8 +162,10 @@ void beginFrame() {
     if (moved > 0.01f) {
         sort_meshes_by_alpha(&scene.meshes, camera.position);
         glm_vec3_copy(camera.position, last_sort_pos);
+        markMeshesSSBODirty(&context);
     }
 
+    flushMeshSSBO(&context, &scene.meshes);
     updateUniformBuffer(&context);
 
     // Clear all render buffers

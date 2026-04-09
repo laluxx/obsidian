@@ -44,6 +44,8 @@ void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
 void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes);
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes);
 void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes);
+void markMeshesSSBODirty(VulkanContext* ctx);
+void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes);
 
 /* ── pipelines (all created in one batch call) ─── */
 void createAllPipelineLayouts(VulkanContext* context);   /* call before createGraphicsPipelines */
