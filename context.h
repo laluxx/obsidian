@@ -1,79 +1,90 @@
 #pragma once
-
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
-
 #include "common.h"
 #include <stdbool.h>
+
+#define MAX_FRAMES_IN_FLIGHT 2
+
 typedef struct {
-    GLFWwindow *window;
-    VkInstance instance;
-    VkPhysicalDevice physicalDevice;
-    VkDevice device;
-    VkQueue graphicsQueue;
-    VkSurfaceKHR surface;
-    VkSwapchainKHR swapChain;
-    VkImage *swapChainImages;
-    uint32_t swapChainImageCount;
-    VkFormat swapChainImageFormat;
-    VkExtent2D swapChainExtent;
-    VkImageView *swapChainImageViews;
-    VkRenderPass renderPass;
-    VkPipelineLayout pipelineLayout;
-    VkPipeline graphicsPipeline;
-    VkFramebuffer *swapChainFramebuffers;
-    VkCommandPool commandPool;
-    VkCommandBuffer *commandBuffers;
-    VkSemaphore *imageAvailableSemaphores;
-    VkFence *inFlightFences;
-    uint32_t currentFrame;
+    // ── core ────────────────────────────────────────────────────────
+    GLFWwindow*          window;
+    VkInstance           instance;
+    VkPhysicalDevice     physicalDevice;
+    VkDevice             device;
+    uint32_t             graphicsQueueFamily;
+    VkQueue              graphicsQueue;
+    VkSurfaceKHR         surface;
 
-    VkFence* imagesInFlight;
-    VkSemaphore* renderFinishedSemaphores;
-    VkDescriptorSetLayout descriptorSetLayout;
+    // ── swapchain ────────────────────────────────────────────────────
+    VkSwapchainKHR       swapChain;
+    VkImage*             swapChainImages;
+    uint32_t             swapChainImageCount;
+    VkFormat             swapChainImageFormat;
+    VkExtent2D           swapChainExtent;
+    VkImageView*         swapChainImageViews;
+    VkFramebuffer*       swapChainFramebuffers;
 
-    VkImage depthImage;
-    VkDeviceMemory depthImageMemory;
-    VkImageView depthImageView;
-    VkFormat depthFormat;
+    // ── render pass ──────────────────────────────────────────────────
+    VkRenderPass         renderPass;
 
-    // 2D rendering pipeline
-    VkPipeline graphicsPipeline2D;
-    VkPipelineLayout pipelineLayout2D;
+    // ── depth ────────────────────────────────────────────────────────
+    VkImage              depthImage;
+    VkDeviceMemory       depthImageMemory;
+    VkImageView          depthImageView;
+    VkFormat             depthFormat;
 
+    // ── descriptor layouts ───────────────────────────────────────────
+    VkDescriptorSetLayout descriptorSetLayout;    // set=0: UBO  (3D)
+    VkDescriptorSetLayout descriptorSetLayout2D;  // set=0/1: sampler
 
-    // Texture rendering pipeline
-    VkPipeline graphicsPipelineTextured2D;   // For textured shapes
+    // ── per-frame UBO resources (one per frame-in-flight) ───────────
+    VkBuffer             uniformBuffers[MAX_FRAMES_IN_FLIGHT];
+    VkDeviceMemory       uniformBuffersMemory[MAX_FRAMES_IN_FLIGHT];
+    void*                uboMapped[MAX_FRAMES_IN_FLIGHT];        // persistent map
+    VkDescriptorPool     descriptorPool;                         // UBO pool
+    VkDescriptorSet      descriptorSets[MAX_FRAMES_IN_FLIGHT];   // one per frame
 
-    // 2D vertex buffer
-    VkBuffer vertexBuffer2D;
-    VkDeviceMemory vertexBufferMemory2D;
-    VkPipelineLayout pipelineLayoutTextured2D;
+    // ── texture descriptor pool (2D / 3D textured / SDF) ────────────
+    VkDescriptorPool     descriptorPool2D;
 
-    // 2D descriptor set layout for textures - ADD THESE
-    VkDescriptorSetLayout descriptorSetLayout2D;
-    VkDescriptorPool descriptorPool2D;
-    VkDescriptorSet descriptorSet2D;
+    // ── pipeline layouts ─────────────────────────────────────────────
+    VkPipelineLayout     pipelineLayout;           // 3D solid + line
+    VkPipelineLayout     pipelineLayoutTextured3D; // 3D textured + SDF3D
+    VkPipelineLayout     pipelineLayout2D;         // 2D color
+    VkPipelineLayout     pipelineLayoutTextured2D; // 2D textured + SDF2D
+    // aliases — point to the same handles, never destroyed separately
+    VkPipelineLayout     pipelineLayoutLine;
+    VkPipelineLayout     pipelineLayoutSDF2D;
+    VkPipelineLayout     pipelineLayoutSDF3D;
 
+    // ── pipelines ────────────────────────────────────────────────────
+    VkPipeline           graphicsPipeline;           // 3D solid
+    VkPipeline           graphicsPipelineTextured3D; // 3D textured
+    VkPipeline           graphicsPipelineSDF3D;      // 3D SDF
+    VkPipeline           graphicsPipelineLine;       // 3D lines
+    VkPipeline           graphicsPipeline2D;         // 2D color
+    VkPipeline           graphicsPipelineTextured2D; // 2D textured
+    VkPipeline           graphicsPipelineSDF2D;      // 2D SDF
 
-    VkPipeline graphicsPipelineTextured3D;
-    VkPipelineLayout pipelineLayoutTextured3D;
+    // ── 2D vertex buffer ─────────────────────────────────────────────
+    VkBuffer             vertexBuffer2D;
+    VkDeviceMemory       vertexBufferMemory2D;
 
-    VkPipeline graphicsPipelineLine;
-    VkPipelineLayout pipelineLayoutLine;
+    // ── commands ─────────────────────────────────────────────────────
+    VkCommandPool        commandPool;
+    VkCommandBuffer*     commandBuffers;
 
-    VkPipeline graphicsPipelineBlend;
-    VkPipeline graphicsPipelineTextured3DBlend;
+    // ── sync ─────────────────────────────────────────────────────────
+    VkSemaphore*         imageAvailableSemaphores;
+    VkSemaphore*         renderFinishedSemaphores;
+    VkFence*             inFlightFences;
+    VkFence*             imagesInFlight;
+    uint32_t             currentFrame;
 
-    // SDF
-    VkPipeline graphicsPipelineSDF2D;
-    VkPipelineLayout pipelineLayoutSDF2D;
-
-    VkPipeline graphicsPipelineSDF3D;
-    VkPipelineLayout pipelineLayoutSDF3D;
-
-    Color clearColor;
-    bool framebufferResized;
+    // ── misc ─────────────────────────────────────────────────────────
+    Color                clearColor;
+    bool                 framebufferResized;
 } VulkanContext;
 
 extern VulkanContext context;

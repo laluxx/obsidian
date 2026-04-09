@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -std=c23 -Wall -Wextra -g -Ofast -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
+CFLAGS = -std=c23 -Wall -Wextra -g -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
 LDFLAGS = -lvulkan -lglfw -lX11 -lcglm -lm $(shell pkg-config --libs freetype2 guile-3.0)
 
 GLSLANG = glslangValidator

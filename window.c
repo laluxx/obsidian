@@ -144,13 +144,7 @@ void beginFrame() {
 
     sort_meshes_by_alpha(&scene.meshes, camera.position); // HERE
 
-    // Update camera uniform buffer
-    UniformBufferObject ubo;
-    glm_mat4_mul(camera.projection_matrix, camera.view_matrix, ubo.vp);
-    void *data;
-    vkMapMemory(context.device, uniformBufferMemory, 0, sizeof(ubo), 0, &data);
-    memcpy(data, &ubo, sizeof(ubo));
-    vkUnmapMemory(context.device, uniformBufferMemory);
+    updateUniformBuffer(&context);
 
     // Clear all render buffers
     renderer_clear();

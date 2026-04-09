@@ -50,11 +50,6 @@ static const char** validationLayers = NULL;
 
 bool ambientOcclusionEnabled = true;
 
-VkDescriptorPool    descriptorPool;
-VkDescriptorSet     descriptorSet;
-VkBuffer            uniformBuffer;
-VkDeviceMemory      uniformBufferMemory;
-
 static VkPipelineCache pipelineCache = VK_NULL_HANDLE;
 
 /// Helpers
@@ -275,6 +270,42 @@ void createInstance(VulkanContext* ctx)
     }
 }
 
+static uint32_t findGraphicsQueueFamily(VkPhysicalDevice dev)
+{
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(dev, &count, NULL);
+    VkQueueFamilyProperties* props = malloc(count * sizeof(*props));
+    vkGetPhysicalDeviceQueueFamilyProperties(dev, &count, props);
+    for (uint32_t i = 0; i < count; i++) {
+        if (props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            free(props);
+            return i;
+        }
+    }
+    free(props);
+    return UINT32_MAX;
+}
+
+static int scoreDevice(VkPhysicalDevice dev)
+{
+    VkPhysicalDeviceProperties props;
+    VkPhysicalDeviceMemoryProperties mem;
+    vkGetPhysicalDeviceProperties(dev, &props);
+    vkGetPhysicalDeviceMemoryProperties(dev, &mem);
+
+    if (findGraphicsQueueFamily(dev) == UINT32_MAX) return -1;
+
+    int score = 0;
+    if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)   score += 100000;
+    if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) score += 10000;
+
+    for (uint32_t i = 0; i < mem.memoryHeapCount; i++)
+        if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            score += (int)(mem.memoryHeaps[i].size / (1024 * 1024));
+
+    return score;
+}
+
 void pickPhysicalDevice(VulkanContext* ctx)
 {
     uint32_t count = 0;
@@ -283,8 +314,22 @@ void pickPhysicalDevice(VulkanContext* ctx)
 
     VkPhysicalDevice* devs = malloc(count * sizeof(*devs));
     vkEnumeratePhysicalDevices(ctx->instance, &count, devs);
-    ctx->physicalDevice = devs[0];   /* pick first — extend with scoring if needed */
+
+    VkPhysicalDevice best = VK_NULL_HANDLE;
+    int bestScore = -1;
+    for (uint32_t i = 0; i < count; i++) {
+        int s = scoreDevice(devs[i]);
+        if (s > bestScore) { bestScore = s; best = devs[i]; }
+    }
     free(devs);
+
+    if (best == VK_NULL_HANDLE) { fprintf(stderr, "No suitable GPU found\n"); exit(EXIT_FAILURE); }
+    ctx->physicalDevice = best;
+    ctx->graphicsQueueFamily = findGraphicsQueueFamily(best);
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(best, &props);
+    fprintf(stdout, "Selected GPU: %s\n", props.deviceName);
 }
 
 void createLogicalDevice(VulkanContext* ctx)
@@ -292,7 +337,7 @@ void createLogicalDevice(VulkanContext* ctx)
     float pri = 1.0f;
     VkDeviceQueueCreateInfo qci = {
         .sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = 0,
+        .queueFamilyIndex = ctx->graphicsQueueFamily,
         .queueCount       = 1,
         .pQueuePriorities = &pri
     };
@@ -320,7 +365,7 @@ void createLogicalDevice(VulkanContext* ctx)
         fprintf(stderr, "Failed to create logical device\n");
         exit(EXIT_FAILURE);
     }
-    vkGetDeviceQueue(ctx->device, 0, 0, &ctx->graphicsQueue);
+    vkGetDeviceQueue(ctx->device, ctx->graphicsQueueFamily, 0, &ctx->graphicsQueue);
 }
 
 /// SWAPCHAIN
@@ -509,14 +554,17 @@ void create2DDescriptorSetLayout(VulkanContext* ctx)
 
 void createDescriptorPool(VulkanContext* ctx)
 {
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
+    VkDescriptorPoolSize ps = {
+        .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = MAX_FRAMES_IN_FLIGHT
+    };
     VkDescriptorPoolCreateInfo ci = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .poolSizeCount = 1,
         .pPoolSizes    = &ps,
-        .maxSets       = 1
+        .maxSets       = MAX_FRAMES_IN_FLIGHT
     };
-    if (vkCreateDescriptorPool(ctx->device, &ci, NULL, &descriptorPool) != VK_SUCCESS) {
+    if (vkCreateDescriptorPool(ctx->device, &ci, NULL, &ctx->descriptorPool) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create descriptor pool\n");
         exit(EXIT_FAILURE);
     }
@@ -539,24 +587,37 @@ void create2DDescriptorPool(VulkanContext* ctx)
 
 void createDescriptorSet(VulkanContext* ctx)
 {
+    VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT];
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        layouts[i] = ctx->descriptorSetLayout;
+
     VkDescriptorSetAllocateInfo ai = {
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = descriptorPool,
-        .descriptorSetCount = 1,
-        .pSetLayouts        = &ctx->descriptorSetLayout
+        .descriptorPool     = ctx->descriptorPool,
+        .descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
+        .pSetLayouts        = layouts
     };
-    vkAllocateDescriptorSets(ctx->device, &ai, &descriptorSet);
+    if (vkAllocateDescriptorSets(ctx->device, &ai, ctx->descriptorSets) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate descriptor sets\n");
+        exit(EXIT_FAILURE);
+    }
 
-    VkDescriptorBufferInfo bi = { uniformBuffer, 0, sizeof(UniformBufferObject) };
-    VkWriteDescriptorSet   w  = {
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = descriptorSet,
-        .dstBinding      = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .pBufferInfo     = &bi
-    };
-    vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo bi = {
+            .buffer = ctx->uniformBuffers[i],
+            .offset = 0,
+            .range  = sizeof(UniformBufferObject)
+        };
+        VkWriteDescriptorSet w = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = ctx->descriptorSets[i],
+            .dstBinding      = 0,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo     = &bi
+        };
+        vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+    }
 }
 
 /// Pipeline layouts
@@ -856,8 +917,9 @@ void createCommandPool(VulkanContext* ctx)
 {
     VkCommandPoolCreateInfo ci = {
         .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = 0
+        .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
+                            VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = ctx->graphicsQueueFamily
     };
     if (vkCreateCommandPool(ctx->device, &ci, NULL, &ctx->commandPool) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create command pool\n");
@@ -974,31 +1036,40 @@ void createUniformBuffer(VulkanContext* ctx)
         .usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
-    vkCreateBuffer(ctx->device, &bi, NULL, &uniformBuffer);
 
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, uniformBuffer, &req);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (vkCreateBuffer(ctx->device, &bi, NULL, &ctx->uniformBuffers[i]) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create uniform buffer %u\n", i);
+            exit(EXIT_FAILURE);
+        }
 
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    };
-    vkAllocateMemory(ctx->device, &ai, NULL, &uniformBufferMemory);
-    vkBindBufferMemory(ctx->device, uniformBuffer, uniformBufferMemory, 0);
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(ctx->device, ctx->uniformBuffers[i], &req);
+
+        VkMemoryAllocateInfo ai = {
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize  = req.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        if (vkAllocateMemory(ctx->device, &ai, NULL, &ctx->uniformBuffersMemory[i]) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to allocate uniform buffer memory %u\n", i);
+            exit(EXIT_FAILURE);
+        }
+        vkBindBufferMemory(ctx->device, ctx->uniformBuffers[i], ctx->uniformBuffersMemory[i], 0);
+
+        /* persistent map — never unmapped until cleanup */
+        vkMapMemory(ctx->device, ctx->uniformBuffersMemory[i], 0,
+                    sizeof(UniformBufferObject), 0, &ctx->uboMapped[i]);
+    }
 }
 
 void updateUniformBuffer(VulkanContext* ctx)
 {
-    void* data;
-    if (vkMapMemory(ctx->device, uniformBufferMemory, 0, sizeof(UniformBufferObject), 0, &data) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to map uniform buffer\n"); return;
-    }
     UniformBufferObject ubo;
     glm_mat4_mul(camera.projection_matrix, camera.view_matrix, ubo.vp);
-    memcpy(data, &ubo, sizeof(ubo));
-    vkUnmapMemory(ctx->device, uniformBufferMemory);
+    memcpy(ctx->uboMapped[ctx->currentFrame], &ubo, sizeof(ubo));
 }
 
 /// Record command buffer
@@ -1047,7 +1118,8 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     /* ── 3D solid ── */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            ctx->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
+                            ctx->pipelineLayout, 0, 1,
+                            &ctx->descriptorSets[ctx->currentFrame], 0, NULL);
     meshes_draw(cmd, &scene.meshes);
     renderer_draw(cmd);
 
@@ -1058,7 +1130,8 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     if (ctx->graphicsPipelineLine && lineVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                ctx->pipelineLayoutLine, 0, 1, &descriptorSet, 0, NULL);
+                                ctx->pipelineLayoutLine, 0, 1,
+                                &ctx->descriptorSets[ctx->currentFrame], 0, NULL);
         line_renderer_draw(cmd);
     }
 
@@ -1289,24 +1362,27 @@ void cleanup(VulkanContext* ctx)
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
 
-    if (pipelineCache != VK_NULL_HANDLE) { vkDestroyPipelineCache(ctx->device, pipelineCache,             NULL); pipelineCache             = VK_NULL_HANDLE; }
+    if (pipelineCache != VK_NULL_HANDLE) { vkDestroyPipelineCache(ctx->device, pipelineCache,             NULL); pipelineCache                = VK_NULL_HANDLE; }
 
     /* 2D vertex buffer */
-    if (ctx->vertexBuffer2D)       { vkDestroyBuffer             (ctx->device, ctx->vertexBuffer2D,       NULL); ctx->vertexBuffer2D       = VK_NULL_HANDLE; }
-    if (ctx->vertexBufferMemory2D) { vkFreeMemory                (ctx->device, ctx->vertexBufferMemory2D, NULL); ctx->vertexBufferMemory2D = VK_NULL_HANDLE; }
+    if (ctx->vertexBuffer2D)       { vkDestroyBuffer             (ctx->device, ctx->vertexBuffer2D,       NULL); ctx->vertexBuffer2D          = VK_NULL_HANDLE; }
+    if (ctx->vertexBufferMemory2D) { vkFreeMemory                (ctx->device, ctx->vertexBufferMemory2D, NULL); ctx->vertexBufferMemory2D    = VK_NULL_HANDLE; }
 
-    if (ctx->renderPass)           { vkDestroyRenderPass         (ctx->device, ctx->renderPass,           NULL); ctx->renderPass           = VK_NULL_HANDLE; }
+    if (ctx->renderPass)           { vkDestroyRenderPass         (ctx->device, ctx->renderPass,           NULL); ctx->renderPass              = VK_NULL_HANDLE; }
 
-    /* uniform buffer + descriptor pool */
-    if (uniformBuffer)             { vkDestroyBuffer             (ctx->device, uniformBuffer,             NULL); uniformBuffer             = VK_NULL_HANDLE; }
-    if (uniformBufferMemory)       { vkFreeMemory                (ctx->device, uniformBufferMemory,       NULL); uniformBufferMemory       = VK_NULL_HANDLE; }
-    if (descriptorPool)            { vkDestroyDescriptorPool     (ctx->device, descriptorPool,            NULL); descriptorPool            = VK_NULL_HANDLE; }
-    if (ctx->descriptorSetLayout)  { vkDestroyDescriptorSetLayout(ctx->device, ctx->descriptorSetLayout,  NULL); ctx->descriptorSetLayout  = VK_NULL_HANDLE; }
+    /* per-frame uniform buffers — unmap then destroy */
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (ctx->uboMapped[i])            { vkUnmapMemory  (ctx->device, ctx->uniformBuffersMemory[i]);          ctx->uboMapped[i]            = NULL;           }
+        if (ctx->uniformBuffers[i])       { vkDestroyBuffer(ctx->device, ctx->uniformBuffers[i],          NULL); ctx->uniformBuffers[i]       = VK_NULL_HANDLE; }
+        if (ctx->uniformBuffersMemory[i]) { vkFreeMemory   (ctx->device, ctx->uniformBuffersMemory[i],    NULL); ctx->uniformBuffersMemory[i] = VK_NULL_HANDLE; }
+    }
+    if (ctx->descriptorPool)       { vkDestroyDescriptorPool     (ctx->device, ctx->descriptorPool,       NULL); ctx->descriptorPool          = VK_NULL_HANDLE; }
+    if (ctx->descriptorSetLayout)  { vkDestroyDescriptorSetLayout(ctx->device, ctx->descriptorSetLayout,  NULL); ctx->descriptorSetLayout     = VK_NULL_HANDLE; }
 
-    if (ctx->device)               { vkDestroyDevice             (ctx->device,                            NULL); ctx->device               = VK_NULL_HANDLE; }
-    if (ctx->surface)              { vkDestroySurfaceKHR         (ctx->instance, ctx->surface,            NULL); ctx->surface              = VK_NULL_HANDLE; }
-    if (ctx->instance)             { vkDestroyInstance           (ctx->instance,                          NULL); ctx->instance             = VK_NULL_HANDLE; }
-    if (ctx->window)               { glfwDestroyWindow           (ctx->window                                 ); ctx->window               = NULL; }
+    if (ctx->device)               { vkDestroyDevice             (ctx->device,                            NULL); ctx->device                  = VK_NULL_HANDLE; }
+    if (ctx->surface)              { vkDestroySurfaceKHR         (ctx->instance, ctx->surface,            NULL); ctx->surface                 = VK_NULL_HANDLE; }
+    if (ctx->instance)             { vkDestroyInstance           (ctx->instance,                          NULL); ctx->instance                = VK_NULL_HANDLE; }
+    if (ctx->window)               { glfwDestroyWindow           (ctx->window                                 ); ctx->window                  = NULL; }
     glfwTerminate();
 }
 

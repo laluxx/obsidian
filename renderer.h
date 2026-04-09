@@ -8,8 +8,6 @@
 #define MAX_VERTICES 65536 * 32
 #define MAX_TEXTURES 256  // Maximum number of textures we can handle
 
-extern VkDescriptorSet descriptorSet;
-
 typedef struct {
     vec3 pos;
     vec4 color;

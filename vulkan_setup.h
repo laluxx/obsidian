@@ -4,12 +4,7 @@
 #include <cglm/types.h>
 
 #define MAX_FRAMES_IN_FLIGHT 2
-
-extern VkDescriptorPool    descriptorPool;
-extern VkDescriptorSet     descriptorSet;
-extern VkBuffer            uniformBuffer;
-extern VkDeviceMemory      uniformBufferMemory;
-extern bool                ambientOcclusionEnabled;
+extern bool ambientOcclusionEnabled;
 
 typedef struct {
     mat4 vp;

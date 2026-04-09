@@ -504,8 +504,8 @@ void mesh(VkCommandBuffer cmd, Mesh* mesh) {
 
         // Bind descriptor sets
         VkDescriptorSet descriptorSets[2] = {
-            descriptorSet,              // Set 0: Camera UBO
-            mesh->texture->descriptorSet // Set 1: Texture
+            context.descriptorSets[context.currentFrame], // Set 0: Camera UBO
+            mesh->texture->descriptorSet                  // Set 1: Texture
         };
 
         vkCmdBindDescriptorSets(
@@ -1925,8 +1925,8 @@ void renderer_draw_textured3D(VkCommandBuffer cmd) {
 
         // Bind descriptor sets: Set 0 = UBO (camera), Set 1 = Texture
         VkDescriptorSet descriptorSets[2] = {
-            descriptorSet,                  // Set 0: Camera UBO
-            batch->texture->descriptorSet   // Set 1: Texture sampler
+            context.descriptorSets[context.currentFrame], // Set 0: Camera UBO
+            batch->texture->descriptorSet                 // Set 1: Texture sampler
         };
 
         vkCmdBindDescriptorSets(
