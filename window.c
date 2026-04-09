@@ -72,12 +72,10 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     createUniformBuffer(&context);
     createDescriptorSetLayout(&context);
     create2DDescriptorSetLayout(&context);
+    createBindlessDescriptorLayout(&context);
+    createBindlessDescriptorPool(&context);
+    createBindlessDescriptorSet(&context);
     create2DDescriptorPool(&context);
-
-    createAllPipelineLayouts(&context);
-    createGraphicsPipelines(&context);
-
-    renderer2D_init();
 
     createDescriptorPool(&context);
     createDescriptorSet(&context);
@@ -91,6 +89,20 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
         context.commandPool,
         context.graphicsQueue
     );
+
+    // 128 MB for static mesh geometry (Sponza + typical scenes fit in ~30–60 MB)
+    createMegaVertexBuffer(&context, 128ULL * 1024 * 1024);
+    // 32 MB dynamic budget: 2D UI + lines + morph-target meshes
+    createDynamicBuffers(&context, 32ULL * 1024 * 1024);
+
+    createMeshSSBO(&context, 4096);       // supports up to 4096 meshes
+    createIndirectPipelineLayout(&context);
+    createIndirectBuffer(&context, 4096);
+
+    createAllPipelineLayouts(&context);
+    createGraphicsPipelines(&context);
+
+    renderer2D_init();
 
     renderer_init_textured3D();
 

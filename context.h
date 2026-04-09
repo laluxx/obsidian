@@ -51,6 +51,7 @@ typedef struct {
     // ── pipeline layouts ─────────────────────────────────────────────
     VkPipelineLayout     pipelineLayout;           // 3D solid + line
     VkPipelineLayout     pipelineLayoutTextured3D; // 3D textured + SDF3D
+    VkPipelineLayout     pipelineLayoutIndirect;
     VkPipelineLayout     pipelineLayout2D;         // 2D color
     VkPipelineLayout     pipelineLayoutTextured2D; // 2D textured + SDF2D
     // aliases — point to the same handles, never destroyed separately
@@ -68,8 +69,9 @@ typedef struct {
     VkPipeline           graphicsPipelineSDF2D;      // 2D SDF
 
     // ── 2D vertex buffer ─────────────────────────────────────────────
-    VkBuffer             vertexBuffer2D;
-    VkDeviceMemory       vertexBufferMemory2D;
+    VkBuffer vertexBuffer2D;
+    VkDeviceMemory vertexBufferMemory2D;
+    void* vertexBuffer2DMapped;
 
     // ── commands ─────────────────────────────────────────────────────
     VkCommandPool        commandPool;
@@ -85,6 +87,44 @@ typedef struct {
     // ── misc ─────────────────────────────────────────────────────────
     Color                clearColor;
     bool                 framebufferResized;
+
+    // ── mega vertex buffer (static mesh geometry, DEVICE_LOCAL) ──
+    VkBuffer         megaVertexBuffer;
+    VkDeviceMemory   megaVertexBufferMemory;
+    VkDeviceSize     megaVertexBufferSize;
+    uint32_t         megaVertexBufferOffset; /* next free vertex index */
+
+    // ── per-frame dynamic buffers (2D, lines, morph) ──
+    // staging (HOST_VISIBLE|HOST_COHERENT, persistently mapped)
+    VkBuffer         dynamicStagingBuffer;
+    VkDeviceMemory   dynamicStagingMemory;
+    void*            dynamicStagingMapped;
+
+    // device-local target (GPU reads from here)
+    VkBuffer         dynamicDeviceBuffer;
+    VkDeviceMemory   dynamicDeviceMemory;
+    VkDeviceSize     dynamicBufferSize;
+
+    // ── bindless texture array ───────────────────────────────────────
+    VkDescriptorSetLayout bindlessSetLayout;
+    VkDescriptorPool      bindlessPool;
+    VkDescriptorSet       bindlessSet;          // one set, all textures
+    uint32_t              bindlessTextureCount;
+
+    // ── SSBO: per-mesh data (model matrix, texture index, flags) ─────
+    VkBuffer              meshSSBO[MAX_FRAMES_IN_FLIGHT];
+    VkDeviceMemory        meshSSBOMemory[MAX_FRAMES_IN_FLIGHT];
+    void*                 meshSSBOMapped[MAX_FRAMES_IN_FLIGHT];
+    VkDescriptorSetLayout ssboSetLayout;
+    VkDescriptorPool      ssboPool;
+    VkDescriptorSet       ssboSets[MAX_FRAMES_IN_FLIGHT];
+
+    // ── indirect draw buffer ────────────────────────────────────────
+    VkBuffer              indirectBuffer;
+    VkDeviceMemory        indirectBufferMemory;
+    void*                 indirectBufferMapped;
+    uint32_t              indirectDrawCount;
 } VulkanContext;
 
 extern VulkanContext context;
+

@@ -25,6 +25,7 @@
 
 #include "frag.frag.spv.h"
 #include "vert.vert.spv.h"
+#include "vert_indirect.vert.spv.h"
 #include "2D.vert.spv.h"
 #include "2D.frag.spv.h"
 #include "texture.frag.spv.h"
@@ -51,6 +52,9 @@ static const char** validationLayers = NULL;
 bool ambientOcclusionEnabled = true;
 
 static VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+
+VkPipeline pipelineIndirectSolid    = VK_NULL_HANDLE;
+VkPipeline pipelineIndirectTextured = VK_NULL_HANDLE;
 
 /// Helpers
 
@@ -346,16 +350,27 @@ void createLogicalDevice(VulkanContext* ctx)
        are listed here for future use; remove any your driver doesn't expose. */
     static const char* exts[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
     };
     static const uint32_t extCount = sizeof(exts) / sizeof(exts[0]);
+
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT indexingFeatures = {
+        .sType                                        = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT,
+        .pNext                                        = NULL,
+        .descriptorBindingPartiallyBound              = VK_TRUE,
+        .runtimeDescriptorArray                       = VK_TRUE,
+        .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE,
+        .shaderSampledImageArrayNonUniformIndexing    = VK_TRUE,
+    };
 
     VkPhysicalDeviceFeatures features = { .wideLines = VK_TRUE };
 
     VkDeviceCreateInfo ci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext                   = &indexingFeatures,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &qci,
-        .enabledExtensionCount   = extCount,   /* FIX: was hard-coded to 1 */
+        .enabledExtensionCount   = extCount,
         .ppEnabledExtensionNames = exts,
         .pEnabledFeatures        = &features,
         .enabledLayerCount       = VALIDATION_LAYERS_COUNT,
@@ -644,10 +659,7 @@ void createAllPipelineLayouts(VulkanContext* ctx)
         .offset     = 0,
         .size       = sizeof(PushConstants)
     };
-    VkDescriptorSetLayout tex3DSets[2] = {
-        ctx->descriptorSetLayout,
-        ctx->descriptorSetLayout2D
-    };
+    (void)0; /* tex3DSets removed — 3D textured layout now uses 3-set variant below */
 
     /* 2D no-texture */
     vkCreatePipelineLayout(ctx->device,
@@ -669,7 +681,7 @@ void createAllPipelineLayouts(VulkanContext* ctx)
     /* SDF2D reuses pipelineLayoutTextured2D — no separate field needed */
     ctx->pipelineLayoutSDF2D = ctx->pipelineLayoutTextured2D;
 
-    /* 3D solid / line (UBO only) */
+    /* 3D solid / line: set=0 UBO only, push constants for per-draw data */
     vkCreatePipelineLayout(ctx->device,
         &(VkPipelineLayoutCreateInfo){
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -678,18 +690,24 @@ void createAllPipelineLayouts(VulkanContext* ctx)
             .pushConstantRangeCount = 1,
             .pPushConstantRanges    = &pcRange
         }, NULL, &ctx->pipelineLayout);
-    ctx->pipelineLayoutLine = ctx->pipelineLayout;  /* same layout */
+    ctx->pipelineLayoutLine = ctx->pipelineLayout;
 
-    /* 3D textured / SDF3D (UBO + sampler) */
+    /* 3D textured / SDF3D: set=0 UBO, set=1 bindless array, push constants for per-mesh data.
+       No SSBO set here — the direct draw path uses push constants, not SSBO.
+       The indirect pipeline layout is created separately after createMeshSSBO().             */
+    VkDescriptorSetLayout tex3DAllSets[2] = {
+        ctx->descriptorSetLayout,
+        ctx->bindlessSetLayout,
+    };
     vkCreatePipelineLayout(ctx->device,
         &(VkPipelineLayoutCreateInfo){
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount         = 2,
-            .pSetLayouts            = tex3DSets,
+            .pSetLayouts            = tex3DAllSets,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges    = &pcRange
         }, NULL, &ctx->pipelineLayoutTextured3D);
-    ctx->pipelineLayoutSDF3D = ctx->pipelineLayoutTextured3D;  /* same layout */
+    ctx->pipelineLayoutSDF3D = ctx->pipelineLayoutTextured3D;
 }
 
 /// GRAPHICS PIPELINES
@@ -756,8 +774,6 @@ void createGraphicsPipelines(VulkanContext* ctx)
                                                        STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsTex2D)  };
     VkPipelineShaderStageCreateInfo ss2DSDF[2]    = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
                                                        STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsSDF2D)  };
-#undef STAGE
-
     /* ── 7 pipeline create-infos ────────────────────────────────────── */
     /*
        Index  Pipeline
@@ -856,11 +872,61 @@ void createGraphicsPipelines(VulkanContext* ctx)
         }
     };
 
+    /* indirect vertex shader module */
+    VkShaderModule vsIndirect = createShaderModule(ctx->device,
+                                    vert_indirect_vert_spv,
+                                    sizeof(vert_indirect_vert_spv));
+
+    VkPipelineShaderStageCreateInfo ssIndirectSolid[2] = {
+        STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsIndirect),
+        STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsColor)
+    };
+
+    VkPipelineShaderStageCreateInfo ssIndirectTex[2] = {
+        STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsIndirect),
+        STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsTex3D)
+    };
+
+    VkGraphicsPipelineCreateInfo pciIndirect[2] = {
+        /* indirect solid */
+        {
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .stageCount          = 2, .pStages             = ssIndirectSolid,
+            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &ia3D,
+            .pViewportState      = &kViewportState,
+            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
+            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
+            .pDynamicState       = &kDynamicState,
+            .layout              = ctx->pipelineLayoutIndirect,
+            .renderPass          = ctx->renderPass
+        },
+        /* indirect textured */
+        {
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .stageCount          = 2, .pStages             = ssIndirectTex,
+            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &ia3D,
+            .pViewportState      = &kViewportState,
+            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
+            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
+            .pDynamicState       = &kDynamicState,
+            .layout              = ctx->pipelineLayoutIndirect,
+            .renderPass          = ctx->renderPass
+        }
+    };
+
+    VkPipeline indirectPipelines[2];
     VkPipeline pipelines[7];
-    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 7, pci, NULL, pipelines) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 7, pci, NULL, pipelines) != VK_SUCCESS ||
+        vkCreateGraphicsPipelines(ctx->device, pipelineCache, 2, pciIndirect, NULL, indirectPipelines) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipelines\n");
         exit(EXIT_FAILURE);
     }
+
+    pipelineIndirectSolid    = indirectPipelines[0];
+    pipelineIndirectTextured = indirectPipelines[1];
+    vkDestroyShaderModule(ctx->device, vsIndirect, NULL);
+
+#undef STAGE
 
     ctx->graphicsPipeline          = pipelines[0];
     ctx->graphicsPipelineTextured3D= pipelines[1];
@@ -879,6 +945,33 @@ void createGraphicsPipelines(VulkanContext* ctx)
     vkDestroyShaderModule(ctx->device, fsTex3D, NULL);
     vkDestroyShaderModule(ctx->device, fsSDF2D, NULL);
     vkDestroyShaderModule(ctx->device, fsSDF3D, NULL);
+}
+
+/* Indirect pipeline layout — created AFTER createMeshSSBO so ssboSetLayout is valid */
+void createIndirectPipelineLayout(VulkanContext* ctx)
+{
+    VkPushConstantRange pcRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(PushConstants)
+    };
+    VkDescriptorSetLayout indirectSets[3] = {
+        ctx->descriptorSetLayout,
+        ctx->bindlessSetLayout,
+        ctx->ssboSetLayout
+    };
+    /* Store in a dedicated field — reuse pipelineLayout slot or add to context.
+       For now we reuse pipelineLayoutTextured3D for the indirect pipelines only
+       by creating a second layout and storing it in a static local.
+       We expose it via the extern below.                                        */
+    vkCreatePipelineLayout(ctx->device,
+        &(VkPipelineLayoutCreateInfo){
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount         = 3,
+            .pSetLayouts            = indirectSets,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges    = &pcRange
+        }, NULL, &ctx->pipelineLayoutIndirect);
 }
 
 /* Public wrappers kept for call-site compatibility */
@@ -1115,12 +1208,44 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
 
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
 
-    /* ── 3D solid ── */
+    /* ── INDIRECT PASS: all gltf meshes, SSBO-driven, mega buffer ── */
+    if (ctx->indirectDrawCount > 0) {
+        VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
+
+        /* bind UBO set=0, bindless set=1, SSBO set=2 — all once */
+        VkDescriptorSet indirectSets[3] = {
+            ctx->descriptorSets[ctx->currentFrame],
+            ctx->bindlessSet,
+            ctx->ssboSets[ctx->currentFrame]
+        };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                ctx->pipelineLayoutIndirect, 0, 3,
+                                indirectSets, 0, NULL);
+
+        /* one draw call for ALL indirect meshes */
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pipelineIndirectTextured);
+        vkCmdDrawIndirect(cmd, ctx->indirectBuffer, 0,
+                          ctx->indirectDrawCount, sizeof(VkDrawIndirectCommand));
+    }
+
+    /* ── Bind set=0 (UBO) + set=1 (bindless) for the direct draw pass ── */
+    VkDescriptorSet sets2[2] = {
+        ctx->descriptorSets[ctx->currentFrame],
+        ctx->bindlessSet,
+    };
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            ctx->pipelineLayoutTextured3D, 0, 2, sets2, 0, NULL);
+
+    /* ── gltf meshes (textured pipeline, bindless, push constants) ── */
+    meshes_draw(cmd, &scene.meshes);
+
+    /* ── procedural geometry (sphere, cube, etc.) — solid color pipeline ── */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             ctx->pipelineLayout, 0, 1,
                             &ctx->descriptorSets[ctx->currentFrame], 0, NULL);
-    meshes_draw(cmd, &scene.meshes);
     renderer_draw(cmd);
 
     /* ── 3D textured ── */
@@ -1262,13 +1387,25 @@ void recreateSwapChain(VulkanContext* ctx)
     if (caps.maxImageCount > 0 && imgCount > caps.maxImageCount)
         imgCount = caps.maxImageCount;
 
+    VkExtent2D ext;
+    if (caps.currentExtent.width != UINT32_MAX) {
+        ext = caps.currentExtent;
+    } else {
+        ext.width  = (uint32_t)w;
+        ext.height = (uint32_t)h;
+        ext.width  = ext.width  < caps.minImageExtent.width  ? caps.minImageExtent.width  :
+                     ext.width  > caps.maxImageExtent.width  ? caps.maxImageExtent.width  : ext.width;
+        ext.height = ext.height < caps.minImageExtent.height ? caps.minImageExtent.height :
+                     ext.height > caps.maxImageExtent.height ? caps.maxImageExtent.height : ext.height;
+    }
+
     VkSwapchainCreateInfoKHR ci = {
         .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface          = ctx->surface,
         .minImageCount    = imgCount,
         .imageFormat      = ctx->swapChainImageFormat,
         .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-        .imageExtent      = { (uint32_t)w, (uint32_t)h },
+        .imageExtent      = ext,
         .imageArrayLayers = 1,
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -1286,7 +1423,7 @@ void recreateSwapChain(VulkanContext* ctx)
     cleanupSwapChainResources(ctx, oldSwapchain);
 
     ctx->swapChain       = newSwapchain;
-    ctx->swapChainExtent = (VkExtent2D){ (uint32_t)w, (uint32_t)h };
+    ctx->swapChainExtent = ext;
 
     vkGetSwapchainImagesKHR(ctx->device, ctx->swapChain, &ctx->swapChainImageCount, NULL);
     ctx->swapChainImages = malloc(ctx->swapChainImageCount * sizeof(VkImage));
@@ -1313,8 +1450,10 @@ void cleanup(VulkanContext* ctx)
     texture_pool_cleanup(ctx);
 
     /* descriptor resources */
-    if (ctx->descriptorSetLayout2D) { vkDestroyDescriptorSetLayout(ctx->device, ctx->descriptorSetLayout2D, NULL); ctx->descriptorSetLayout2D = VK_NULL_HANDLE; }
-    if (ctx->descriptorPool2D)      { vkDestroyDescriptorPool(ctx->device, ctx->descriptorPool2D, NULL);            ctx->descriptorPool2D      = VK_NULL_HANDLE; }
+    if (ctx->descriptorSetLayout2D) { vkDestroyDescriptorSetLayout(ctx->device, ctx->descriptorSetLayout2D, NULL);  ctx->descriptorSetLayout2D = VK_NULL_HANDLE; }
+    if (ctx->descriptorPool2D)      { vkDestroyDescriptorPool(ctx->device, ctx->descriptorPool2D,           NULL);  ctx->descriptorPool2D      = VK_NULL_HANDLE; }
+    if (ctx->bindlessSetLayout)     { vkDestroyDescriptorSetLayout(ctx->device, ctx->bindlessSetLayout,     NULL);  ctx->bindlessSetLayout     = VK_NULL_HANDLE; }
+    if (ctx->bindlessPool)          { vkDestroyDescriptorPool(ctx->device, ctx->bindlessPool,               NULL);  ctx->bindlessPool          = VK_NULL_HANDLE; }
 
     /* command buffers */
     if (ctx->commandBuffers && ctx->commandPool) {
@@ -1342,6 +1481,8 @@ void cleanup(VulkanContext* ctx)
     /* pipelines */
 #define DESTROY_PIPELINE(p)       if (ctx->p) { vkDestroyPipeline      (ctx->device, ctx->p, NULL); ctx->p = VK_NULL_HANDLE; }
 #define DESTROY_LAYOUT(l)         if (ctx->l) { vkDestroyPipelineLayout(ctx->device, ctx->l, NULL); ctx->l = VK_NULL_HANDLE; }
+    if (pipelineIndirectSolid)    { vkDestroyPipeline(ctx->device, pipelineIndirectSolid,    NULL); pipelineIndirectSolid    = VK_NULL_HANDLE; }
+    if (pipelineIndirectTextured) { vkDestroyPipeline(ctx->device, pipelineIndirectTextured, NULL); pipelineIndirectTextured = VK_NULL_HANDLE; }
     DESTROY_PIPELINE(graphicsPipeline)
     DESTROY_PIPELINE(graphicsPipeline2D)
     DESTROY_PIPELINE(graphicsPipelineTextured2D)
@@ -1359,6 +1500,7 @@ void cleanup(VulkanContext* ctx)
     DESTROY_LAYOUT(pipelineLayout2D)
     DESTROY_LAYOUT(pipelineLayoutTextured2D)
     DESTROY_LAYOUT(pipelineLayoutTextured3D)
+    DESTROY_LAYOUT(pipelineLayoutIndirect)
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
 
@@ -1379,6 +1521,27 @@ void cleanup(VulkanContext* ctx)
     if (ctx->descriptorPool)       { vkDestroyDescriptorPool     (ctx->device, ctx->descriptorPool,       NULL); ctx->descriptorPool          = VK_NULL_HANDLE; }
     if (ctx->descriptorSetLayout)  { vkDestroyDescriptorSetLayout(ctx->device, ctx->descriptorSetLayout,  NULL); ctx->descriptorSetLayout     = VK_NULL_HANDLE; }
 
+    /* mega vertex buffer */
+    if (ctx->megaVertexBuffer)       { vkDestroyBuffer(ctx->device, ctx->megaVertexBuffer,       NULL); ctx->megaVertexBuffer       = VK_NULL_HANDLE; }
+    if (ctx->megaVertexBufferMemory) { vkFreeMemory   (ctx->device, ctx->megaVertexBufferMemory, NULL); ctx->megaVertexBufferMemory = VK_NULL_HANDLE; }
+
+    /* dynamic buffers */
+    if (ctx->dynamicStagingMapped)   { vkUnmapMemory  (ctx->device, ctx->dynamicStagingMemory);         ctx->dynamicStagingMapped   = NULL;           }
+    if (ctx->dynamicStagingBuffer)   { vkDestroyBuffer(ctx->device, ctx->dynamicStagingBuffer,   NULL); ctx->dynamicStagingBuffer   = VK_NULL_HANDLE; }
+    if (ctx->dynamicStagingMemory)   { vkFreeMemory   (ctx->device, ctx->dynamicStagingMemory,   NULL); ctx->dynamicStagingMemory   = VK_NULL_HANDLE; }
+    if (ctx->dynamicDeviceBuffer)    { vkDestroyBuffer(ctx->device, ctx->dynamicDeviceBuffer,    NULL); ctx->dynamicDeviceBuffer    = VK_NULL_HANDLE; }
+    if (ctx->dynamicDeviceMemory)    { vkFreeMemory   (ctx->device, ctx->dynamicDeviceMemory,    NULL); ctx->dynamicDeviceMemory    = VK_NULL_HANDLE; }
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (ctx->meshSSBOMapped[i])   { vkUnmapMemory(ctx->device, ctx->meshSSBOMemory[i]);                        ctx->meshSSBOMapped[i]   = NULL;           }
+        if (ctx->meshSSBO[i])         { vkDestroyBuffer(ctx->device, ctx->meshSSBO[i],         NULL);              ctx->meshSSBO[i]         = VK_NULL_HANDLE; }
+        if (ctx->meshSSBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->meshSSBOMemory[i],   NULL);              ctx->meshSSBOMemory[i]   = VK_NULL_HANDLE; }
+    }
+    if (ctx->ssboSetLayout)        { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout,        NULL); ctx->ssboSetLayout        = VK_NULL_HANDLE; }
+    if (ctx->ssboPool)             { vkDestroyDescriptorPool     (ctx->device, ctx->ssboPool,             NULL); ctx->ssboPool             = VK_NULL_HANDLE; }
+    if (ctx->indirectBuffer)       { vkDestroyBuffer             (ctx->device, ctx->indirectBuffer,       NULL); ctx->indirectBuffer       = VK_NULL_HANDLE; }
+    if (ctx->indirectBufferMemory) { vkFreeMemory                (ctx->device, ctx->indirectBufferMemory, NULL); ctx->indirectBufferMemory = VK_NULL_HANDLE; }
+
     if (ctx->device)               { vkDestroyDevice             (ctx->device,                            NULL); ctx->device                  = VK_NULL_HANDLE; }
     if (ctx->surface)              { vkDestroySurfaceKHR         (ctx->instance, ctx->surface,            NULL); ctx->surface                 = VK_NULL_HANDLE; }
     if (ctx->instance)             { vkDestroyInstance           (ctx->instance,                          NULL); ctx->instance                = VK_NULL_HANDLE; }
@@ -1388,6 +1551,365 @@ void cleanup(VulkanContext* ctx)
 
 
 /// Misc
+
+/// Mega vertex buffer + dynamic buffer helpers
+
+void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue,
+                VkBuffer src, VkBuffer dst, VkDeviceSize size,
+                VkDeviceSize srcOffset, VkDeviceSize dstOffset)
+{
+    VkCommandBuffer cmd = beginSingleTimeCommands(device, pool);
+    VkBufferCopy region = { .srcOffset = srcOffset, .dstOffset = dstOffset, .size = size };
+    vkCmdCopyBuffer(cmd, src, dst, 1, &region);
+    endSingleTimeCommands(device, pool, queue, cmd);
+}
+
+void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size)
+{
+    ctx->megaVertexBufferSize   = size;
+    ctx->megaVertexBufferOffset = 0;
+
+    /* DEVICE_LOCAL — GPU-only, fastest possible vertex reads */
+    VkBufferCreateInfo bci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = size,
+        .usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    if (vkCreateBuffer(ctx->device, &bci, NULL, &ctx->megaVertexBuffer) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create mega vertex buffer\n"); exit(EXIT_FAILURE);
+    }
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, ctx->megaVertexBuffer, &req);
+    VkMemoryAllocateInfo ai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    };
+    if (vkAllocateMemory(ctx->device, &ai, NULL, &ctx->megaVertexBufferMemory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate mega vertex buffer memory\n"); exit(EXIT_FAILURE);
+    }
+    vkBindBufferMemory(ctx->device, ctx->megaVertexBuffer, ctx->megaVertexBufferMemory, 0);
+    fprintf(stdout, "Mega vertex buffer: %.1f MB (DEVICE_LOCAL)\n",
+            (double)size / (1024.0 * 1024.0));
+}
+
+/* Upload vertices into the mega buffer, return the BASE VERTEX INDEX for DrawIndexed/Draw offset.
+   Uses a temporary staging buffer so the final data lives in DEVICE_LOCAL memory. */
+uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount)
+{
+    VkDeviceSize uploadSize = vertexCount * sizeof(Vertex);
+    VkDeviceSize byteOffset = (VkDeviceSize)ctx->megaVertexBufferOffset * sizeof(Vertex);
+
+    if (byteOffset + uploadSize > ctx->megaVertexBufferSize) {
+        fprintf(stderr, "Mega vertex buffer overflow! Increase size.\n");
+        return UINT32_MAX;
+    }
+
+    /* Temporary staging buffer */
+    VkBuffer       stagingBuf;
+    VkDeviceMemory stagingMem;
+    VkBufferCreateInfo bci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = uploadSize,
+        .usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+    VkMemoryAllocateInfo ai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+    vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
+    vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+
+    void* mapped;
+    vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+    memcpy(mapped, vertices, uploadSize);
+    vkUnmapMemory(ctx->device, stagingMem);
+
+    copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue,
+               stagingBuf, ctx->megaVertexBuffer, uploadSize, 0, byteOffset);
+
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+    vkFreeMemory(ctx->device, stagingMem, NULL);
+
+    uint32_t baseVertex = ctx->megaVertexBufferOffset;
+    ctx->megaVertexBufferOffset += vertexCount;
+    return baseVertex;
+}
+
+void createDynamicBuffers(VulkanContext* ctx, VkDeviceSize size)
+{
+    ctx->dynamicBufferSize = size;
+
+    /* Staging: HOST_VISIBLE | HOST_COHERENT, persistently mapped */
+    VkBufferCreateInfo bci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = size,
+        .usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->dynamicStagingBuffer);
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, ctx->dynamicStagingBuffer, &req);
+    VkMemoryAllocateInfo ai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->dynamicStagingMemory);
+    vkBindBufferMemory(ctx->device, ctx->dynamicStagingBuffer, ctx->dynamicStagingMemory, 0);
+    vkMapMemory(ctx->device, ctx->dynamicStagingMemory, 0, size, 0, &ctx->dynamicStagingMapped);
+
+    /* Device-local target */
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->dynamicDeviceBuffer);
+    vkGetBufferMemoryRequirements(ctx->device, ctx->dynamicDeviceBuffer, &req);
+    ai.allocationSize  = req.size;
+    ai.memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->dynamicDeviceMemory);
+    vkBindBufferMemory(ctx->device, ctx->dynamicDeviceBuffer, ctx->dynamicDeviceMemory, 0);
+
+    fprintf(stdout, "Dynamic buffers: %.1f MB staging + %.1f MB device-local\n",
+            (double)size/(1024*1024), (double)size/(1024*1024));
+}
+
+/// Bindless texture array
+
+void createBindlessDescriptorLayout(VulkanContext* ctx)
+{
+    /* One binding: array of MAX_TEXTURES combined-image-samplers,
+       all accessible from the fragment stage.
+       VARIABLE_DESCRIPTOR_COUNT lets us allocate fewer than MAX_TEXTURES
+       at pool/set creation time without validation errors.               */
+    VkDescriptorSetLayoutBinding binding = {
+        .binding            = 0,
+        .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount    = MAX_TEXTURES,
+        .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .pImmutableSamplers = NULL
+    };
+
+    VkDescriptorBindingFlagsEXT bindingFlags =
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT |
+        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT;
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT bindingFlagsCI = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT,
+        .bindingCount  = 1,
+        .pBindingFlags = &bindingFlags,
+    };
+
+    VkDescriptorSetLayoutCreateInfo ci = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext        = &bindingFlagsCI,
+        .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT_EXT,
+        .bindingCount = 1,
+        .pBindings    = &binding
+    };
+    if (vkCreateDescriptorSetLayout(ctx->device, &ci, NULL, &ctx->bindlessSetLayout) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create bindless descriptor set layout\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void createBindlessDescriptorPool(VulkanContext* ctx)
+{
+    VkDescriptorPoolSize ps = {
+        .type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = MAX_TEXTURES
+    };
+    VkDescriptorPoolCreateInfo ci = {
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        /* UPDATE_AFTER_BIND lets us write slots incrementally as textures load */
+        .flags         = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+        .maxSets       = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes    = &ps
+    };
+    if (vkCreateDescriptorPool(ctx->device, &ci, NULL, &ctx->bindlessPool) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create bindless descriptor pool\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void createBindlessDescriptorSet(VulkanContext* ctx)
+{
+    VkDescriptorSetAllocateInfo ai = {
+        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool     = ctx->bindlessPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts        = &ctx->bindlessSetLayout
+    };
+    if (vkAllocateDescriptorSets(ctx->device, &ai, &ctx->bindlessSet) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate bindless descriptor set\n");
+        exit(EXIT_FAILURE);
+    }
+    ctx->bindlessTextureCount = 0;
+}
+
+/* Call once per texture after it's loaded to register it into the bindless array.
+   Returns the slot index the shader will use.                                     */
+void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
+                             VkImageView view, VkSampler sampler)
+{
+    VkDescriptorImageInfo img = {
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageView   = view,
+        .sampler     = sampler
+    };
+    VkWriteDescriptorSet w = {
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = ctx->bindlessSet,
+        .dstBinding      = 0,
+        .dstArrayElement = slot,          /* write into slot N of the array */
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .pImageInfo      = &img
+    };
+    vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+    ctx->bindlessTextureCount = slot + 1;
+}
+
+/// SSBO + Indirect draw
+
+void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
+{
+    VkDeviceSize size = maxMeshes * sizeof(MeshGPUData);
+
+    VkDescriptorSetLayoutBinding b = {
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+    };
+    VkDescriptorSetLayoutCreateInfo lci = {
+        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &b
+    };
+    vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->ssboSetLayout);
+
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT };
+    VkDescriptorPoolCreateInfo pci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps
+    };
+    vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->ssboPool);
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkBufferCreateInfo bci = {
+            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size        = size,
+            .usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->meshSSBO[i]);
+
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(ctx->device, ctx->meshSSBO[i], &req);
+        VkMemoryAllocateInfo ai = {
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize  = req.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        vkAllocateMemory(ctx->device, &ai, NULL, &ctx->meshSSBOMemory[i]);
+        vkBindBufferMemory(ctx->device, ctx->meshSSBO[i], ctx->meshSSBOMemory[i], 0);
+        vkMapMemory(ctx->device, ctx->meshSSBOMemory[i], 0, size, 0, &ctx->meshSSBOMapped[i]);
+
+        /* Allocate + write descriptor set */
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = ctx->ssboPool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &ctx->ssboSetLayout
+        };
+        vkAllocateDescriptorSets(ctx->device, &dsai, &ctx->ssboSets[i]);
+
+        VkDescriptorBufferInfo dbi = {
+            .buffer = ctx->meshSSBO[i], .offset = 0, .range = size
+        };
+        VkWriteDescriptorSet w = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = ctx->ssboSets[i],
+            .dstBinding      = 0,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo     = &dbi
+        };
+        vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+    }
+    fprintf(stdout, "Mesh SSBO: %.1f MB x%d frames\n",
+            (double)size/(1024*1024), MAX_FRAMES_IN_FLIGHT);
+}
+
+void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
+{
+    VkDeviceSize size = maxMeshes * sizeof(VkDrawIndirectCommand);
+    VkBufferCreateInfo bci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = size,
+        .usage       = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->indirectBuffer);
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, ctx->indirectBuffer, &req);
+    VkMemoryAllocateInfo ai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->indirectBufferMemory);
+    vkBindBufferMemory(ctx->device, ctx->indirectBuffer, ctx->indirectBufferMemory, 0);
+    vkMapMemory(ctx->device, ctx->indirectBufferMemory, 0, size, 0, &ctx->indirectBufferMapped);
+    fprintf(stdout, "Indirect buffer: %u draw slots\n", maxMeshes);
+}
+
+/* Call once after scene load and whenever meshes change.
+   Writes MeshGPUData SSBO for all frames + VkDrawIndirectCommand for each mesh. */
+void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
+{
+    uint32_t count = (uint32_t)meshes->count;
+    ctx->indirectDrawCount = count;
+
+    MeshGPUData*          gpuData  = malloc(count * sizeof(MeshGPUData));
+    VkDrawIndirectCommand* cmds    = (VkDrawIndirectCommand*)ctx->indirectBufferMapped;
+
+    for (uint32_t i = 0; i < count; i++) {
+        Mesh* m = &meshes->items[i];
+
+        glm_mat4_copy(m->model, gpuData[i].model);
+        gpuData[i].textureIndex = (m->texture && m->texture->loaded)
+                                  ? (int)m->texture->bindlessSlot : -1;
+        gpuData[i].isUnlit      = m->is_unlit ? 1 : 0;
+        gpuData[i].alphaMode    = m->alpha_mode;
+        gpuData[i].alphaCutoff  = m->alpha_cutoff;
+
+        cmds[i].vertexCount   = m->vertexCount;
+        cmds[i].instanceCount = 1;
+        cmds[i].firstVertex   = (m->megaBaseVertex == UINT32_MAX) ? 0 : m->megaBaseVertex;
+        cmds[i].firstInstance = i;   /* gl_InstanceIndex == mesh index in SSBO */
+    }
+
+    /* Upload to all frames at once — SSBO is the same for static scenes */
+    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++)
+        memcpy(ctx->meshSSBOMapped[f], gpuData, count * sizeof(MeshGPUData));
+
+    free(gpuData);
+}
 
 void clear_background(Color color) { context.clearColor = color; }
 void toggle_ambient_occlusion(void) { ambientOcclusionEnabled = !ambientOcclusionEnabled; }

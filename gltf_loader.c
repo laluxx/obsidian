@@ -2,6 +2,7 @@
 #include "gltf_loader.h"
 #include <string.h>
 #include "context.h"
+#include "vulkan_setup.h"
 
 static int32_t gltf_texture_indices[MAX_TEXTURES];
 static size_t gltf_texture_count = 0;
@@ -376,36 +377,42 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
     }
 
-    // Create Vulkan vertex buffer
-    VkBufferCreateInfo bufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = final_vertex_count * sizeof(Vertex),
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
+    /* Upload into the global DEVICE_LOCAL mega buffer.
+       Morph-target meshes keep their own HOST_VISIBLE buffer so
+       mesh_update_morph() can still map/copy them each frame.       */
+    mesh.vertexBuffer       = VK_NULL_HANDLE;
+    mesh.vertexBufferMemory = VK_NULL_HANDLE;
+    mesh.megaBaseVertex     = UINT32_MAX;
 
-    vkCreateBuffer(context.device, &bufferInfo, NULL, &mesh.vertexBuffer);
-
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(context.device, mesh.vertexBuffer, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = memRequirements.size,
-        .memoryTypeIndex = findMemoryType(
-            context.physicalDevice,
-            memRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        )
-    };
-
-    vkAllocateMemory(context.device, &allocInfo, NULL, &mesh.vertexBufferMemory);
-    vkBindBufferMemory(context.device, mesh.vertexBuffer, mesh.vertexBufferMemory, 0);
-
-    void* data_ptr;
-    vkMapMemory(context.device, mesh.vertexBufferMemory, 0, bufferInfo.size, 0, &data_ptr);
-    memcpy(data_ptr, final_vertices, final_vertex_count * sizeof(Vertex));
-    vkUnmapMemory(context.device, mesh.vertexBufferMemory);
+    if (mesh.morph_data) {
+        /* dynamic mesh: own HOST_VISIBLE buffer, mapped every frame */
+        VkBufferCreateInfo bufferInfo = {
+            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size        = final_vertex_count * sizeof(Vertex),
+            .usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(context.device, &bufferInfo, NULL, &mesh.vertexBuffer);
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(context.device, mesh.vertexBuffer, &mr);
+        VkMemoryAllocateInfo ai = {
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize  = mr.size,
+            .memoryTypeIndex = findMemoryType(context.physicalDevice, mr.memoryTypeBits,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        vkAllocateMemory(context.device, &ai, NULL, &mesh.vertexBufferMemory);
+        vkBindBufferMemory(context.device, mesh.vertexBuffer, mesh.vertexBufferMemory, 0);
+        void* ptr;
+        vkMapMemory(context.device, mesh.vertexBufferMemory, 0, bufferInfo.size, 0, &ptr);
+        memcpy(ptr, final_vertices, final_vertex_count * sizeof(Vertex));
+        vkUnmapMemory(context.device, mesh.vertexBufferMemory);
+    } else {
+        /* static mesh: goes into DEVICE_LOCAL mega buffer — fastest GPU path */
+        mesh.megaBaseVertex = megaBufferAllocate(&context,
+                                                 final_vertices,
+                                                 (uint32_t)final_vertex_count);
+    }
 
     free(final_vertices);
 
@@ -649,6 +656,10 @@ bool load_gltf(const char* filepath, Scene* scene) {
            instance->mesh_count,
            instance->mesh_start_index,
            instance->mesh_start_index + instance->mesh_count - 1);
+
+    /* Rebuild indirect draw commands after every GLTF load so the
+       indirect pass stays in sync with the current mesh list.      */
+    updateMeshSSBOAndIndirect(&context, &scene->meshes);
 
     return true;
 }

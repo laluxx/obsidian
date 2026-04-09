@@ -30,13 +30,14 @@ void renderer2D_upload();
 void renderer2D_draw(VkCommandBuffer cmd);
 
 typedef struct {
-    VkImage image;
-    VkDeviceMemory memory;
-    VkImageView view;
-    VkSampler sampler;
-    VkDescriptorSet descriptorSet;  // Each texture has its own descriptor set
-    uint32_t width, height;
-    bool loaded;
+    VkImage         image;
+    VkDeviceMemory  memory;
+    VkImageView     view;
+    VkSampler       sampler;
+    VkDescriptorSet descriptorSet;   // kept for legacy 2D per-batch path
+    uint32_t        bindlessSlot;    // index into the bindless texture array
+    uint32_t        width, height;
+    bool            loaded;
 } Texture2D;
 
 typedef struct {
@@ -66,9 +67,9 @@ extern uint32_t vertex_count_3D_textured;
 extern Texture3DBatch texture3DBatches[MAX_TEXTURES];
 extern uint32_t texture3DBatchCount;
 
-
 static VkBuffer vertexBuffer3D_textured;
 static VkDeviceMemory vertexBufferMemory3D_textured;
+static void* vertexBuffer3D_texturedMapped = NULL;
 
 
 void renderer_init_textured3D();
@@ -95,12 +96,22 @@ int32_t texture_pool_add(VulkanContext* context, const char* filename);
 Texture2D* texture_pool_get(int32_t index);
 
 typedef struct {
-    mat4 model;
-    int ambientOcclusionEnabled;
-    int isUnlit;
-    int alphaMode;
+    mat4  model;
+    int   ambientOcclusionEnabled;
+    int   isUnlit;
+    int   alphaMode;
     float alphaCutoff;
+    int   textureIndex;   // bindless slot; -1 = no texture
 } PushConstants;
+
+/* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */
+typedef struct {
+    mat4  model;
+    int   textureIndex;
+    int   isUnlit;
+    int   alphaMode;
+    float alphaCutoff;
+} MeshGPUData;
 
 extern PushConstants pushConstants;
 
@@ -120,21 +131,23 @@ typedef struct {
 } MorphData;
 
 typedef struct {
-    VkBuffer vertexBuffer;
-    VkDeviceMemory vertexBufferMemory;
-    uint32_t vertexCount;
-    mat4 model;              // World transform
-    mat4 local_transform;    // Local transform (for animation)
-    void* node;              // cgltf_node* (stored as void* to avoid header dependency)
-    char *name;
-    int32_t textureIndex;    // Index into texture pool (-1 = no texture)
-    Texture2D* texture;      // Direct pointer for convenience
-    int32_t materialIndex;   // Index into material pool (-1 = no material)
-    MorphData *morph_data;
-    bool is_unlit;           // 1 = skip lighting, 0 = apply lighting
-
-    int alpha_mode;          // 0 = OPAQUE, 1 = MASK, 2 = BLEND
-    float alpha_cutoff;      // For MASK mode
+    /* If megaBaseVertex != UINT32_MAX the mesh lives in the global mega buffer.
+       Otherwise it owns its own vertexBuffer (morph targets / dynamic meshes). */
+    uint32_t         megaBaseVertex;      /* base vertex offset in mega buffer   */
+    VkBuffer         vertexBuffer;        /* VK_NULL_HANDLE for mega-buffer meshes */
+    VkDeviceMemory   vertexBufferMemory;  /* VK_NULL_HANDLE for mega-buffer meshes */
+    uint32_t         vertexCount;
+    mat4  model;
+    mat4  local_transform;
+    void* node;
+    char* name;
+    int32_t  textureIndex;
+    Texture2D* texture;
+    int32_t  materialIndex;
+    MorphData* morph_data;
+    bool is_unlit;
+    int  alpha_mode;
+    float alpha_cutoff;
 } Mesh;
 
 typedef struct {

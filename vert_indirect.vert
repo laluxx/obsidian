@@ -17,6 +17,17 @@ layout(push_constant) uniform PushConstants {
     int   textureIndex;
 } pc;
 
+struct MeshData {
+    mat4  model;
+    int   textureIndex;
+    int   isUnlit;
+    int   alphaMode;
+    float alphaCutoff;
+};
+layout(set = 2, binding = 0) readonly buffer MeshSSBO {
+    MeshData meshes[];
+} meshSSBO;
+
 layout(location = 0) out vec4  fragColor;
 layout(location = 1) out vec3  fragNormal;
 layout(location = 2) out vec3  fragWorldPos;
@@ -28,17 +39,19 @@ layout(location = 7) out flat float fragAlphaCutoff;
 layout(location = 8) out flat int   fragTextureIndex;
 
 void main() {
-    vec4 worldPos = pc.model * vec4(inPosition, 1.0);
+    MeshData mesh = meshSSBO.meshes[gl_InstanceIndex];
+
+    vec4 worldPos = mesh.model * vec4(inPosition, 1.0);
     gl_Position   = ubo.vp * worldPos;
 
-    mat3 normalMatrix = mat3(transpose(inverse(pc.model)));
+    mat3 normalMatrix = mat3(transpose(inverse(mesh.model)));
     fragNormal      = normalize(normalMatrix * inNormal);
     fragWorldPos    = worldPos.xyz;
     fragColor       = inColor;
     fragTexCoord    = inTexCoord;
-    fragTextureIndex            = pc.textureIndex;
-    fragIsUnlit                 = pc.isUnlit;
-    fragAlphaMode               = pc.alphaMode;
-    fragAlphaCutoff             = pc.alphaCutoff;
+    fragTextureIndex            = mesh.textureIndex;
+    fragIsUnlit                 = mesh.isUnlit;
+    fragAlphaMode               = mesh.alphaMode;
+    fragAlphaCutoff             = mesh.alphaCutoff;
     fragAmbientOcclusionEnabled = pc.ambientOcclusionEnabled;
 }

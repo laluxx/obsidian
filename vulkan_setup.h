@@ -1,5 +1,6 @@
 #pragma once
 #include "context.h"
+#include "renderer.h"
 #include <stdbool.h>
 #include <cglm/types.h>
 
@@ -33,10 +34,24 @@ void create2DDescriptorSetLayout(VulkanContext* context);
 void createDescriptorPool(VulkanContext* context);
 void create2DDescriptorPool(VulkanContext* context);
 void createDescriptorSet(VulkanContext* context);
+void createBindlessDescriptorLayout(VulkanContext* context);
+void createBindlessDescriptorPool(VulkanContext* context);
+void createBindlessDescriptorSet(VulkanContext* context);
+void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
+                             VkImageView view, VkSampler sampler);
+
+/* ── SSBO + indirect ───────────────────────────────────────────── */
+void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes);
+void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes);
+void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes);
 
 /* ── pipelines (all created in one batch call) ─── */
 void createAllPipelineLayouts(VulkanContext* context);   /* call before createGraphicsPipelines */
-void createGraphicsPipelines(VulkanContext* context);    /* creates all 7 pipelines at once     */
+void createIndirectPipelineLayout(VulkanContext* context); /* call after createMeshSSBO */
+void createGraphicsPipelines(VulkanContext* context);
+/* handle for the indirect (SSBO-driven) pipeline variants */
+extern VkPipeline pipelineIndirectSolid;
+extern VkPipeline pipelineIndirectTextured;
 
 /* Legacy stubs — kept for call-site compatibility; each is a no-op because
    createGraphicsPipelines() already handles all of them.                   */
@@ -68,4 +83,15 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex);
 /* ── misc ──────────────────────────────────────── */
 void clear_background(Color color);
 void cleanup(VulkanContext* context);
+uint32_t findMemoryType(VkPhysicalDevice physDev, uint32_t typeFilter, VkMemoryPropertyFlags props);
+VkCommandBuffer beginSingleTimeCommands(VkDevice device, VkCommandPool pool);
+void endSingleTimeCommands(VkDevice device, VkCommandPool pool, VkQueue queue, VkCommandBuffer cmd);
+void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue,
+                VkBuffer src, VkBuffer dst, VkDeviceSize size, VkDeviceSize srcOffset, VkDeviceSize dstOffset);
 void toggle_ambient_occlusion(void);
+
+/* ── mega-buffer / dynamic buffer helpers ─────── */
+void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size);
+void createDynamicBuffers(VulkanContext* ctx, VkDeviceSize size);
+uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount);
+void dynamicBufferUploadAndCopy(VulkanContext* ctx, void* data, VkDeviceSize size, VkDeviceSize dstOffset);
