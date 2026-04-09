@@ -134,9 +134,13 @@ typedef struct {
     /* If megaBaseVertex != UINT32_MAX the mesh lives in the global mega buffer.
        Otherwise it owns its own vertexBuffer (morph targets / dynamic meshes). */
     uint32_t         megaBaseVertex;      /* base vertex offset in mega buffer   */
+    uint32_t         megaBaseIndex;       /* base index offset in mega index buffer; UINT32_MAX = no indices */
     VkBuffer         vertexBuffer;        /* VK_NULL_HANDLE for mega-buffer meshes */
     VkDeviceMemory   vertexBufferMemory;  /* VK_NULL_HANDLE for mega-buffer meshes */
+    VkBuffer         indexBuffer;         /* VK_NULL_HANDLE for mega-buffer meshes */
+    VkDeviceMemory   indexBufferMemory;   /* VK_NULL_HANDLE for mega-buffer meshes */
     uint32_t         vertexCount;
+    uint32_t         indexCount;          /* 0 = non-indexed draw */
     mat4  model;
     mat4  local_transform;
     void* node;

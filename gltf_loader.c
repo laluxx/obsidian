@@ -311,51 +311,53 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     // Load morph targets BEFORE expanding indices
     mesh.morph_data = load_morph_targets(prim);
 
-    // Expand indices or use vertices directly
-    Vertex* final_vertices = NULL;
-    size_t final_vertex_count = 0;
+    /* For static meshes: keep vertices and indices separate — no expansion.
+       For morph-target meshes: expansion is still required so the CPU can
+       remap per-frame without an index fetch.                               */
+    Vertex*   final_vertices    = NULL;
+    uint32_t* final_indices     = NULL;
+    size_t    final_vertex_count = 0;
+    size_t    final_index_count  = 0;
 
-    if (indices) {
-        final_vertex_count = index_count;
-        final_vertices = malloc(final_vertex_count * sizeof(Vertex));
-
-        // Expand vertices AND store the index mapping for morphing
-        if (mesh.morph_data) {
+    if (mesh.morph_data) {
+        /* morph path: expand as before so mesh_update_morph works */
+        if (indices) {
+            final_vertex_count = index_count;
+            final_vertices = malloc(final_vertex_count * sizeof(Vertex));
             mesh.morph_data->index_map = malloc(index_count * sizeof(uint32_t));
-        }
 
-        for (size_t i = 0; i < index_count; i++) {
-            final_vertices[i] = vertices[indices[i]];
-
-            // Store which original vertex this expanded vertex came from
-            if (mesh.morph_data) {
+            for (size_t i = 0; i < index_count; i++) {
+                final_vertices[i] = vertices[indices[i]];
                 mesh.morph_data->index_map[i] = indices[i];
             }
-        }
-
-        // Store base vertices for morphing (unexpanded)
-        if (mesh.morph_data) {
             mesh.morph_data->base_vertices = malloc(vertex_count * sizeof(Vertex));
             memcpy(mesh.morph_data->base_vertices, vertices, vertex_count * sizeof(Vertex));
             mesh.morph_data->base_vertex_count = vertex_count;
-        }
 
-        free(vertices);
-        free(indices);
+            free(vertices);
+            free(indices);
+            indices = NULL;
+        } else {
+            final_vertices     = vertices;
+            final_vertex_count = vertex_count;
+            mesh.morph_data->base_vertices = malloc(vertex_count * sizeof(Vertex));
+            memcpy(mesh.morph_data->base_vertices, vertices, vertex_count * sizeof(Vertex));
+            mesh.morph_data->base_vertex_count = vertex_count;
+            mesh.morph_data->index_map = NULL;
+        }
+        final_index_count = 0; /* morph meshes are non-indexed draws */
+        final_indices     = NULL;
     } else {
-        final_vertices = vertices;
+        /* static path: keep raw arrays, no expansion */
+        final_vertices     = vertices;
         final_vertex_count = vertex_count;
-
-        // No indices, so identity mapping
-        if (mesh.morph_data) {
-            mesh.morph_data->base_vertices = malloc(vertex_count * sizeof(Vertex));
-            memcpy(mesh.morph_data->base_vertices, vertices, vertex_count * sizeof(Vertex));
-            mesh.morph_data->base_vertex_count = vertex_count;
-            mesh.morph_data->index_map = NULL;  // No mapping needed
-        }
+        final_indices      = indices;   /* may be NULL for non-indexed primitives */
+        final_index_count  = index_count;
+        indices = NULL; /* ownership transferred */
     }
 
-    mesh.vertexCount = final_vertex_count;
+    mesh.vertexCount = (uint32_t)(mesh.morph_data ? final_vertex_count : final_vertex_count);
+    mesh.indexCount  = (uint32_t)final_index_count;
 
     // Load texture if present
     if (prim->material && prim->material->has_pbr_metallic_roughness) {
@@ -377,15 +379,14 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
     }
 
-    /* Upload into the global DEVICE_LOCAL mega buffer.
-       Morph-target meshes keep their own HOST_VISIBLE buffer so
-       mesh_update_morph() can still map/copy them each frame.       */
     mesh.vertexBuffer       = VK_NULL_HANDLE;
     mesh.vertexBufferMemory = VK_NULL_HANDLE;
+    mesh.indexBuffer        = VK_NULL_HANDLE;
+    mesh.indexBufferMemory  = VK_NULL_HANDLE;
     mesh.megaBaseVertex     = UINT32_MAX;
+    mesh.megaBaseIndex      = UINT32_MAX;
 
     if (mesh.morph_data) {
-        /* dynamic mesh: own HOST_VISIBLE buffer, mapped every frame */
         VkBufferCreateInfo bufferInfo = {
             .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .size        = final_vertex_count * sizeof(Vertex),
@@ -408,10 +409,16 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         memcpy(ptr, final_vertices, final_vertex_count * sizeof(Vertex));
         vkUnmapMemory(context.device, mesh.vertexBufferMemory);
     } else {
-        /* static mesh: goes into DEVICE_LOCAL mega buffer — fastest GPU path */
+        /* static mesh: vertices into mega vertex buffer, indices into mega index buffer */
         mesh.megaBaseVertex = megaBufferAllocate(&context,
                                                  final_vertices,
                                                  (uint32_t)final_vertex_count);
+        if (final_indices && final_index_count > 0) {
+            mesh.megaBaseIndex = megaIndexBufferAllocate(&context,
+                                                         final_indices,
+                                                         (uint32_t)final_index_count);
+        }
+        free(final_indices);
     }
 
     free(final_vertices);

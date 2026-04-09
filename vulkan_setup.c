@@ -1212,6 +1212,7 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     if (ctx->indirectDrawCount > 0) {
         VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
+        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
         /* bind UBO set=0, bindless set=1, SSBO set=2 — all once */
         VkDescriptorSet indirectSets[3] = {
@@ -1223,11 +1224,11 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
                                 ctx->pipelineLayoutIndirect, 0, 3,
                                 indirectSets, 0, NULL);
 
-        /* one draw call for ALL indirect meshes */
+        /* one indexed draw call for ALL indirect meshes */
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           pipelineIndirectTextured);
-        vkCmdDrawIndirect(cmd, ctx->indirectBuffer, 0,
-                          ctx->indirectDrawCount, sizeof(VkDrawIndirectCommand));
+        vkCmdDrawIndexedIndirect(cmd, ctx->indirectBuffer, 0,
+                                 ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
     }
 
     /* ── Bind set=0 (UBO) + set=1 (bindless) for the direct draw pass ── */
@@ -1524,6 +1525,9 @@ void cleanup(VulkanContext* ctx)
     /* mega vertex buffer */
     if (ctx->megaVertexBuffer)       { vkDestroyBuffer(ctx->device, ctx->megaVertexBuffer,       NULL); ctx->megaVertexBuffer       = VK_NULL_HANDLE; }
     if (ctx->megaVertexBufferMemory) { vkFreeMemory   (ctx->device, ctx->megaVertexBufferMemory, NULL); ctx->megaVertexBufferMemory = VK_NULL_HANDLE; }
+    /* mega index buffer */
+    if (ctx->megaIndexBuffer)        { vkDestroyBuffer(ctx->device, ctx->megaIndexBuffer,        NULL); ctx->megaIndexBuffer        = VK_NULL_HANDLE; }
+    if (ctx->megaIndexBufferMemory)  { vkFreeMemory   (ctx->device, ctx->megaIndexBufferMemory,  NULL); ctx->megaIndexBufferMemory  = VK_NULL_HANDLE; }
 
     /* dynamic buffers */
     if (ctx->dynamicStagingMapped)   { vkUnmapMemory  (ctx->device, ctx->dynamicStagingMemory);         ctx->dynamicStagingMapped   = NULL;           }
@@ -1643,6 +1647,84 @@ uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t verte
     uint32_t baseVertex = ctx->megaVertexBufferOffset;
     ctx->megaVertexBufferOffset += vertexCount;
     return baseVertex;
+}
+
+void createMegaIndexBuffer(VulkanContext* ctx, VkDeviceSize size)
+{
+    ctx->megaIndexBufferSize   = size;
+    ctx->megaIndexBufferOffset = 0;
+
+    VkBufferCreateInfo bci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = size,
+        .usage       = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    if (vkCreateBuffer(ctx->device, &bci, NULL, &ctx->megaIndexBuffer) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create mega index buffer\n"); exit(EXIT_FAILURE);
+    }
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, ctx->megaIndexBuffer, &req);
+    VkMemoryAllocateInfo ai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    };
+    if (vkAllocateMemory(ctx->device, &ai, NULL, &ctx->megaIndexBufferMemory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate mega index buffer memory\n"); exit(EXIT_FAILURE);
+    }
+    vkBindBufferMemory(ctx->device, ctx->megaIndexBuffer, ctx->megaIndexBufferMemory, 0);
+    fprintf(stdout, "Mega index buffer: %.1f MB (DEVICE_LOCAL)\n",
+            (double)size / (1024.0 * 1024.0));
+}
+
+/* Upload indices into the mega index buffer. Returns the BASE INDEX (firstIndex for DrawIndexed). */
+uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t indexCount)
+{
+    VkDeviceSize uploadSize = indexCount * sizeof(uint32_t);
+    VkDeviceSize byteOffset = (VkDeviceSize)ctx->megaIndexBufferOffset * sizeof(uint32_t);
+
+    if (byteOffset + uploadSize > ctx->megaIndexBufferSize) {
+        fprintf(stderr, "Mega index buffer overflow! Increase size.\n");
+        return UINT32_MAX;
+    }
+
+    VkBuffer       stagingBuf;
+    VkDeviceMemory stagingMem;
+    VkBufferCreateInfo bci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = uploadSize,
+        .usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+    VkMemoryAllocateInfo ai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+    vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
+    vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+
+    void* mapped;
+    vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+    memcpy(mapped, indices, uploadSize);
+    vkUnmapMemory(ctx->device, stagingMem);
+
+    copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue,
+               stagingBuf, ctx->megaIndexBuffer, uploadSize, 0, byteOffset);
+
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+    vkFreeMemory(ctx->device, stagingMem, NULL);
+
+    uint32_t baseIndex = ctx->megaIndexBufferOffset;
+    ctx->megaIndexBufferOffset += indexCount;
+    return baseIndex;
 }
 
 void createDynamicBuffers(VulkanContext* ctx, VkDeviceSize size)
@@ -1855,7 +1937,7 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
 
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
 {
-    VkDeviceSize size = maxMeshes * sizeof(VkDrawIndirectCommand);
+    VkDeviceSize size = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
     VkBufferCreateInfo bci = {
         .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size        = size,
@@ -1885,11 +1967,22 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
     uint32_t count = (uint32_t)meshes->count;
     ctx->indirectDrawCount = count;
 
-    MeshGPUData*          gpuData  = malloc(count * sizeof(MeshGPUData));
-    VkDrawIndirectCommand* cmds    = (VkDrawIndirectCommand*)ctx->indirectBufferMapped;
+    MeshGPUData*                gpuData = malloc(count * sizeof(MeshGPUData));
+    VkDrawIndexedIndirectCommand* cmds  = (VkDrawIndexedIndirectCommand*)ctx->indirectBufferMapped;
 
     for (uint32_t i = 0; i < count; i++) {
         Mesh* m = &meshes->items[i];
+
+        /* skip dynamic (morph-target) meshes — drawn by meshes_draw() directly */
+        if (m->megaBaseVertex == UINT32_MAX) {
+            cmds[i].indexCount    = 0;
+            cmds[i].instanceCount = 0;
+            cmds[i].firstIndex    = 0;
+            cmds[i].vertexOffset  = 0;
+            cmds[i].firstInstance = i;
+            memset(&gpuData[i], 0, sizeof(MeshGPUData));
+            continue;
+        }
 
         glm_mat4_copy(m->model, gpuData[i].model);
         gpuData[i].textureIndex = (m->texture && m->texture->loaded)
@@ -1898,9 +1991,10 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
         gpuData[i].alphaMode    = m->alpha_mode;
         gpuData[i].alphaCutoff  = m->alpha_cutoff;
 
-        cmds[i].vertexCount   = m->vertexCount;
+        cmds[i].indexCount    = m->indexCount;
         cmds[i].instanceCount = 1;
-        cmds[i].firstVertex   = (m->megaBaseVertex == UINT32_MAX) ? 0 : m->megaBaseVertex;
+        cmds[i].firstIndex    = (m->megaBaseIndex == UINT32_MAX) ? 0 : m->megaBaseIndex;
+        cmds[i].vertexOffset  = (int32_t)m->megaBaseVertex;
         cmds[i].firstInstance = i;   /* gl_InstanceIndex == mesh index in SSBO */
     }
 

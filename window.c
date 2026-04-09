@@ -92,6 +92,8 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
 
     // 128 MB for static mesh geometry (Sponza + typical scenes fit in ~30–60 MB)
     createMegaVertexBuffer(&context, 128ULL * 1024 * 1024);
+    // 64 MB for indices — much smaller than vertices (4 bytes vs 32 bytes per entry)
+    createMegaIndexBuffer(&context, 64ULL * 1024 * 1024);
     // 32 MB dynamic budget: 2D UI + lines + morph-target meshes
     createDynamicBuffers(&context, 32ULL * 1024 * 1024);
 
@@ -154,7 +156,12 @@ void beginFrame() {
         process_editor_movement(&camera, delta_time);
     }
 
-    sort_meshes_by_alpha(&scene.meshes, camera.position); // HERE
+    static vec3 last_sort_pos = {0};
+    float moved = glm_vec3_distance2(camera.position, last_sort_pos);
+    if (moved > 0.01f) {
+        sort_meshes_by_alpha(&scene.meshes, camera.position);
+        glm_vec3_copy(camera.position, last_sort_pos);
+    }
 
     updateUniformBuffer(&context);
 
@@ -182,8 +189,6 @@ void endFrame() {
     // RENDER FRAME
     uint32_t frameIndex = context.currentFrame;
     VkFence inFlightFence = context.inFlightFences[frameIndex];
-    vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         context.device, context.swapChain, UINT64_MAX,
@@ -198,6 +203,8 @@ void endFrame() {
         fprintf(stderr, "Failed to acquire swap chain image\n");
         exit(EXIT_FAILURE);
     }
+
+    vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
 
     if (context.imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         vkWaitForFences(context.device, 1, &context.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);

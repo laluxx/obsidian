@@ -92,6 +92,8 @@ void toggle_ambient_occlusion(void);
 
 /* ── mega-buffer / dynamic buffer helpers ─────── */
 void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size);
+void createMegaIndexBuffer(VulkanContext* ctx, VkDeviceSize size);
 void createDynamicBuffers(VulkanContext* ctx, VkDeviceSize size);
 uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount);
+uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t indexCount);
 void dynamicBufferUploadAndCopy(VulkanContext* ctx, void* data, VkDeviceSize size, VkDeviceSize dstOffset);

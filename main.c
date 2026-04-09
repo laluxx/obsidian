@@ -455,17 +455,17 @@ int main() {
     /* load_obj("./assets/cow.obj", "cow", blue); */
 
     // Load textures
-    /* int32_t tex1 = texture_pool_add(&context, "./assets/textures/puta.jpg"); */
-    /* int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_01.png"); */
-    /* int32_t tex3 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_05.png"); */
-    /* int32_t tex4 = texture_pool_add(&context, "./assets/textures/prototype/Dark/texture_03.png"); */
-    /* int32_t tex5 = texture_pool_add(&context, "./assets/textures/pengu.png"); */
+    int32_t tex1 = texture_pool_add(&context, "./assets/textures/puta.jpg");
+    int32_t tex2 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_01.png");
+    int32_t tex3 = texture_pool_add(&context, "./assets/textures/prototype/Orange/texture_05.png");
+    int32_t tex4 = texture_pool_add(&context, "./assets/textures/prototype/Dark/texture_03.png");
+    int32_t tex5 = texture_pool_add(&context, "./assets/textures/pengu.png");
 
-    /* Texture2D* texture1 = texture_pool_get(tex1); */
-    /* Texture2D* texture2 = texture_pool_get(tex2); */
-    /* Texture2D* texture3 = texture_pool_get(tex3); */
-    /* Texture2D* texture4 = texture_pool_get(tex4); */
-    /* Texture2D* texture5 = texture_pool_get(tex5); */
+    Texture2D* texture1 = texture_pool_get(tex1);
+    Texture2D* texture2 = texture_pool_get(tex2);
+    Texture2D* texture3 = texture_pool_get(tex3);
+    Texture2D* texture4 = texture_pool_get(tex4);
+    Texture2D* texture5 = texture_pool_get(tex5);
 
     /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
     /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
@@ -474,8 +474,8 @@ int main() {
     /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/UnlitTest.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene); // PASS */
-    /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT */
-    /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS */
+    load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT
+    load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS
     /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene); // FIXME ANIMATION CHANNELS */
     /* load_gltf("./assets/gltf/Box.glb", &scene); // PASS */
@@ -493,7 +493,7 @@ int main() {
 
     Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
 
-    /* Font *jetbrains_sdf = load_font_sdf("./assets/fonts/JetBrainsMono-Regular.ttf", 81, 2); */
+    Font *jetbrains_sdf = load_font_sdf("./assets/fonts/JetBrainsMono-Regular.ttf", 81, 2);
     /* save_font_atlas_png(jetbrains_sdf, "sdf_atlas_debug.png"); */
 
     registerKeyCallback(key_callback);
@@ -519,7 +519,7 @@ int main() {
     while (!windowShouldClose()) {
         beginFrame();
 
-        /* vertico_render(); */
+        vertico_render();
 
         // 3D GEOMETRY
         /* vec3 v0 = { -0.03f, -0.03f, 0.0f }; */
@@ -533,7 +533,7 @@ int main() {
         /* triangle(v3, center, v0, YELLOW); */
 
 
-        /* sphere((vec3){0, 0, 30}, 5, 80, 80, YELLOW); */
+        sphere((vec3){0, 0, 30}, 5, 16, 16, YELLOW);
 
         // Rotate the cow
         /* static float cow_rotation = 0.0f; */
@@ -545,71 +545,71 @@ int main() {
 
         // For the first cube, we need to: translate THEN rotate
         // So we need to rebuild the transform with translation first
-        /* mat4 offset_transform; */
-        /* glm_mat4_identity(offset_transform); */
-        /* glm_translate(offset_transform, (vec3){5.0f, 0.0f, 0.0f}); */
+        mat4 offset_transform;
+        glm_mat4_identity(offset_transform);
+        glm_translate(offset_transform, (vec3){5.0f, 0.0f, 0.0f});
 
-        /* // Multiply: offset * animation = translate then rotate */
-        /* mat4 temp; */
-        /* glm_mat4_copy(scene.meshes.items[0].model, temp); */
-        /* glm_mat4_mul(offset_transform, temp, scene.meshes.items[0].model); */
+        // Multiply: offset * animation = translate then rotate
+        mat4 temp;
+        glm_mat4_copy(scene.meshes.items[0].model, temp);
+        glm_mat4_mul(offset_transform, temp, scene.meshes.items[0].model);
 
 
 
-        /* text(jetbrains, "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", 150, 50, WHITE); */
+        text(jetbrains, "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", 150, 50, WHITE);
 
-        /* // Draw 3D text at world position */
-        /* text3D(jetbrains, "Hello 3D!", (vec3){0.0f, 5.0f, 10.0f}, 6, WHITE); */
-        /* text3D(jetbrains, "Press SPACE", (vec3){0.0f, 4.5f, 10.0f}, 6, RED); */
+        // Draw 3D text at world position
+        text3D(jetbrains, "Hello 3D!", (vec3){0.0f, 5.0f, 10.0f}, 6, WHITE);
+        text3D(jetbrains, "Press SPACE", (vec3){0.0f, 4.5f, 10.0f}, 6, RED);
 
         // Test 2D SDF text
 
         // Test 2D SDF text
         double time = glfwGetTime();
 
-        /* // Center of the screen - use actual Vulkan swapchain dimensions */
-        /* int screenWidth = context.swapChainExtent.width; */
-        /* int screenHeight = context.swapChainExtent.height; */
-        /* float centerX = screenWidth / 2.0f; */
-        /* float centerY = screenHeight / 2.0f; */
+        // Center of the screen - use actual Vulkan swapchain dimensions
+        int screenWidth = context.swapChainExtent.width;
+        int screenHeight = context.swapChainExtent.height;
+        float centerX = screenWidth / 2.0f;
+        float centerY = screenHeight / 2.0f;
 
-        /* // Adjusted scaling - less small, still big */
-        /* float minScale = 0.5f; // 50% - not too small */
-        /* float maxScale = 8.0f; // 800% - still big */
-        /* float scaleFactor = */
-        /*     minScale + (maxScale - minScale) * (0.5f + 0.5f * sin(time)); */
-        /* float size = 40.0f * scaleFactor; // Scales between 20 and 320 */
+        // Adjusted scaling - less small, still big
+        float minScale = 0.5f; // 50% - not too small
+        float maxScale = 8.0f; // 800% - still big
+        float scaleFactor =
+            minScale + (maxScale - minScale) * (0.5f + 0.5f * sin(time));
+        float size = 40.0f * scaleFactor; // Scales between 20 and 320
 
-        /* // Calculate scale factor for character rendering */
-        /* float characterScale = 1.0f; */
-        /* if (jetbrains_sdf->ascent > 0) { */
-        /*   characterScale = size / (float)jetbrains_sdf->ascent; */
-        /* } else if (jetbrains_sdf->display_size > 0) { */
-        /*   characterScale = size / (float)jetbrains_sdf->display_size; */
-        /* } */
+        // Calculate scale factor for character rendering
+        float characterScale = 1.0f;
+        if (jetbrains_sdf->ascent > 0) {
+          characterScale = size / (float)jetbrains_sdf->ascent;
+        } else if (jetbrains_sdf->display_size > 0) {
+          characterScale = size / (float)jetbrains_sdf->display_size;
+        }
 
-        /* // Get text width at current scale */
-        /* const char *text = "SDF 2D Text - Scalable!"; */
-        /* float textWidth = */
-        /*     measure_text_width(jetbrains_sdf, text, characterScale); */
+        // Get text width at current scale
+        const char *text = "SDF 2D Text - Scalable!";
+        float textWidth =
+            measure_text_width(jetbrains_sdf, text, characterScale);
 
-        /* // Calculate left position to keep text centered */
-        /* float posX = centerX - textWidth / 2.0f; */
+        // Calculate left position to keep text centered
+        float posX = centerX - textWidth / 2.0f;
 
-        /* // For vertical centering, get text height too */
-        /* float textHeight = */
-        /*     (jetbrains_sdf->ascent + jetbrains_sdf->descent) * characterScale; */
-        /* float posY = centerY - textHeight / 2.0f; */
+        // For vertical centering, get text height too
+        float textHeight =
+            (jetbrains_sdf->ascent + jetbrains_sdf->descent) * characterScale;
+        float posY = centerY - textHeight / 2.0f;
 
-        /* // Draw the text */
-        /* text_with_size(jetbrains_sdf, text, posX, posY, GREEN, size); */
+        // Draw the text
+        text_with_size(jetbrains_sdf, text, posX, posY, GREEN, size);
 
         /* double time = glfwGetTime(); */
         /* float size = 40.0f * (3.5f + 1.0f * sin(time)); // scales between 20 and 80 */
         /* text_with_size(jetbrains_sdf, "SDF 2D Text - Scalable!", 150, 150, GREEN, size); */
 
         // Test 3D SDF text
-        /* text3D(jetbrains_sdf, "SDF 3D!", (vec3){0.0f, 6.0f, 10.0f}, 6, CYAN); */
+        text3D(jetbrains_sdf, "SDF 3D!", (vec3){0.0f, 6.0f, 10.0f}, 6, CYAN);
 
         // 2D GEOMETRY
         quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);
@@ -622,8 +622,8 @@ int main() {
 
 
 
-        /* texture2D((vec2){100, 200}, (vec2){200, 200}, texture1, WHITE); */
-        /* texture2D((vec2){500, 200}, (vec2){150, 150}, texture2, WHITE); */
+        texture2D((vec2){100, 200}, (vec2){200, 200}, texture1, WHITE);
+        texture2D((vec2){500, 200}, (vec2){150, 150}, texture2, WHITE);
         /* texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE); */
 
 
@@ -673,88 +673,9 @@ int main() {
         /* } */
 
         // Billboards
-        /* texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE); */
-        /* texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture5, WHITE); */
-        /* texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE); */
-
-
-        /* // Upload all geometry to GPU */
-        /* renderer_upload(); */
-        /* renderer_upload_textured3D();  // ADD THIS */
-        /* line_renderer_upload(); */
-        /* renderer2D_upload(); */
-
-
-
-        /* // RENDER FRAME */
-        /* uint32_t frameIndex = context.currentFrame; */
-        /* VkFence inFlightFence = context.inFlightFences[frameIndex]; */
-        /* vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX); */
-
-        /* uint32_t imageIndex; */
-        /* VkResult result = vkAcquireNextImageKHR( */
-        /*                                         context.device, context.swapChain, UINT64_MAX, */
-        /*                                         context.imageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex */
-        /*                                         ); */
-
-        /* if (result == VK_ERROR_OUT_OF_DATE_KHR) { */
-        /*     continue; */
-        /* } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) { */
-        /*     fprintf(stderr, "Failed to acquire swap chain image\n"); */
-        /*     exit(EXIT_FAILURE); */
-        /* } */
-
-        /* if (context.imagesInFlight[imageIndex] != VK_NULL_HANDLE) { */
-        /*     vkWaitForFences(context.device, 1, &context.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX); */
-        /* } */
-        /* context.imagesInFlight[imageIndex] = inFlightFence; */
-        /* vkResetFences(context.device, 1, &inFlightFence); */
-
-        /* // Re-record command buffer with new geometry */
-        /* recordCommandBuffer(&context, imageIndex); */
-
-        /* VkSemaphore waitSemaphores[] = { context.imageAvailableSemaphores[frameIndex] }; */
-        /* VkSemaphore signalSemaphores[] = { context.renderFinishedSemaphores[imageIndex] }; */
-        /* VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT }; */
-
-        /* VkSubmitInfo submitInfo = { */
-        /*     .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, */
-        /*     .waitSemaphoreCount = 1, */
-        /*     .pWaitSemaphores = waitSemaphores, */
-        /*     .pWaitDstStageMask = waitStages, */
-        /*     .commandBufferCount = 1, */
-        /*     .pCommandBuffers = &context.commandBuffers[imageIndex], */
-        /*     .signalSemaphoreCount = 1, */
-        /*     .pSignalSemaphores = signalSemaphores */
-        /* }; */
-
-        /* if (vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) { */
-        /*     fprintf(stderr, "Failed to submit draw command buffer\n"); */
-        /*     exit(EXIT_FAILURE); */
-        /* } */
-
-        /* VkPresentInfoKHR presentInfo = { */
-        /*     .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, */
-        /*     .waitSemaphoreCount = 1, */
-        /*     .pWaitSemaphores = signalSemaphores, */
-        /*     .swapchainCount = 1, */
-        /*     .pSwapchains = &context.swapChain, */
-        /*     .pImageIndices = &imageIndex, */
-        /*     .pResults = NULL */
-        /* }; */
-
-        /* result = vkQueuePresentKHR(context.graphicsQueue, &presentInfo); */
-
-        /* if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) { */
-        /*     // Handle swapchain recreation */
-        /* } else if (result != VK_SUCCESS) { */
-        /*     fprintf(stderr, "Failed to present swap chain image\n"); */
-        /*     exit(EXIT_FAILURE); */
-        /* } */
-
-        /* update_input(); */
-        /* glfwPollEvents(); */
-        /* context.currentFrame = (context.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT; */
+        texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE);
+        texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture5, WHITE);
+        texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE);
 
         endFrame();
     }

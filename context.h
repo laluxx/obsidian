@@ -92,7 +92,11 @@ typedef struct {
     VkBuffer         megaVertexBuffer;
     VkDeviceMemory   megaVertexBufferMemory;
     VkDeviceSize     megaVertexBufferSize;
-    uint32_t         megaVertexBufferOffset; /* next free vertex index */
+    uint32_t         megaVertexBufferOffset;
+    VkBuffer         megaIndexBuffer;
+    VkDeviceMemory   megaIndexBufferMemory;
+    VkDeviceSize     megaIndexBufferSize;
+    uint32_t         megaIndexBufferOffset; /* next free vertex index */
 
     // ── per-frame dynamic buffers (2D, lines, morph) ──
     // staging (HOST_VISIBLE|HOST_COHERENT, persistently mapped)

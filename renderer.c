@@ -622,6 +622,8 @@ void mesh_update_morph(Mesh* mesh) {
 void mesh_destroy(VkDevice device, Mesh* mesh) {
     if (mesh->vertexBuffer) vkDestroyBuffer(device, mesh->vertexBuffer, NULL);
     if (mesh->vertexBufferMemory) vkFreeMemory(device, mesh->vertexBufferMemory, NULL);
+    if (mesh->indexBuffer) vkDestroyBuffer(device, mesh->indexBuffer, NULL);
+    if (mesh->indexBufferMemory) vkFreeMemory(device, mesh->indexBufferMemory, NULL);
 
     if (mesh->morph_data) {
         for (size_t t = 0; t < mesh->morph_data->target_count; t++) {
