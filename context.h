@@ -132,9 +132,11 @@ typedef struct {
     VkDescriptorSet       ssboSets[MAX_FRAMES_IN_FLIGHT];
 
     // ── indirect draw buffer ────────────────────────────────────────
-    VkBuffer              indirectBuffer;
-    VkDeviceMemory        indirectBufferMemory;
-    void*                 indirectBufferMapped;
+    VkBuffer         indirectBuffer;       /* GPU-written output, read by draw */
+    VkDeviceMemory   indirectBufferMemory;
+    VkBuffer         srcIndirectBuffer;    /* CPU-written source, read by compute */
+    VkDeviceMemory   srcIndirectBufferMemory;
+    void*            srcIndirectBufferMapped;
     uint32_t              indirectDrawCount;
     uint32_t              ssboFramesDirty;    /* counts down from MAX_FRAMES_IN_FLIGHT to 0 */
 } VulkanContext;

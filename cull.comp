@@ -1,6 +1,5 @@
 #version 450
-#extension GL_EXT_nonuniform_qualifier : enable
-
+#extension GL_ARB_shader_draw_parameters : enable
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 struct MeshData {
@@ -25,24 +24,26 @@ layout(set = 0, binding = 0) readonly buffer MeshSSBO {
     MeshData meshes[];
 };
 
-layout(set = 0, binding = 1) buffer DrawSSBO {
-    DrawCommand draws[];
+layout(set = 0, binding = 1) readonly buffer SourceDrawSSBO {
+    DrawCommand srcDraws[];
 };
 
-layout(set = 0, binding = 2) uniform FrustumUBO {
+layout(set = 0, binding = 2) writeonly buffer DstDrawSSBO {
+    DrawCommand dstDraws[];
+};
+
+layout(set = 0, binding = 3) uniform FrustumUBO {
     vec4     planes[6];
     uint     meshCount;
 };
 
-bool testAABB(vec4 aabbMin, vec4 aabbMax) {
+bool testAABB(vec3 aabbMin, vec3 aabbMax) {
     for (int i = 0; i < 6; i++) {
         vec3 n = planes[i].xyz;
-        /* p-vertex: corner of AABB most positive along plane normal */
         vec3 p;
         p.x = n.x >= 0.0 ? aabbMax.x : aabbMin.x;
         p.y = n.y >= 0.0 ? aabbMax.y : aabbMin.y;
         p.z = n.z >= 0.0 ? aabbMax.z : aabbMin.z;
-        /* if p-vertex is outside this plane, AABB is fully culled */
         if (dot(n, p) + planes[i].w < 0.0) return false;
     }
     return true;
@@ -52,12 +53,17 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= meshCount) return;
 
-    /* meshes with instanceCount==0 set at CPU side (morph/dynamic) stay 0 */
-    if (draws[idx].instanceCount == 0) return;
+    DrawCommand src = srcDraws[idx];
+
+    /* slots with no geometry stay invisible */
+    if (src.indexCount == 0) {
+        dstDraws[idx] = src;
+        dstDraws[idx].instanceCount = 0;
+        return;
+    }
 
     MeshData m = meshes[idx];
 
-    /* transform AABB into world space — expand by testing all 8 corners */
     vec3 corners[8];
     corners[0] = vec3(m.aabbMin.x, m.aabbMin.y, m.aabbMin.z);
     corners[1] = vec3(m.aabbMax.x, m.aabbMin.y, m.aabbMin.z);
@@ -76,6 +82,7 @@ void main() {
         worldMax = max(worldMax, w);
     }
 
-    bool visible = testAABB(vec4(worldMin, 0.0), vec4(worldMax, 0.0));
-    draws[idx].instanceCount = visible ? 1 : 0;
+    /* copy src verbatim, only cull instanceCount */
+    dstDraws[idx] = src;
+    dstDraws[idx].instanceCount = testAABB(worldMin, worldMax) ? 1 : 0;
 }

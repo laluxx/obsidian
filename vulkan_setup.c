@@ -964,7 +964,7 @@ void createIndirectPipelineLayout(VulkanContext* ctx)
 void createComputeCullPipeline(VulkanContext* ctx)
 {
     /* ── descriptor set layout ─────────────────────────────────────── */
-    VkDescriptorSetLayoutBinding bindings[3] = {
+    VkDescriptorSetLayoutBinding bindings[4] = {
         /* binding 0: mesh SSBO (readonly) */
         {
             .binding         = 0,
@@ -972,24 +972,32 @@ void createComputeCullPipeline(VulkanContext* ctx)
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
         },
-        /* binding 1: indirect draw SSBO (readwrite) */
+        /* binding 1: source draw commands (readonly, CPU-written) */
         {
             .binding         = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
         },
-        /* binding 2: frustum UBO */
+        /* binding 2: destination draw commands (writeonly, GPU-read) */
         {
             .binding         = 2,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
+        },
+        /* binding 3: frustum UBO */
+        {
+            .binding         = 3,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
         }
     };
+
     VkDescriptorSetLayoutCreateInfo lci = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 3,
+        .bindingCount = 4,
         .pBindings    = bindings
     };
     vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->computeCullSetLayout);
@@ -1049,7 +1057,7 @@ void createComputeCullPipeline(VulkanContext* ctx)
 
     /* ── descriptor pool ────────────────────────────────────────────── */
     VkDescriptorPoolSize poolSizes[2] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 2 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 3 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT     }
     };
     VkDescriptorPoolCreateInfo pci = {
@@ -1076,18 +1084,18 @@ void createComputeCullPipeline(VulkanContext* ctx)
     /* write descriptors — SSBO sizes known from createMeshSSBO/createIndirectBuffer */
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorBufferInfo ssboInfo = {
-            .buffer = ctx->meshSSBO[i], .offset = 0,
-            .range  = VK_WHOLE_SIZE
+            .buffer = ctx->meshSSBO[i], .offset = 0, .range = VK_WHOLE_SIZE
         };
-        VkDescriptorBufferInfo indirectInfo = {
-            .buffer = ctx->indirectBuffer, .offset = 0,
-            .range  = VK_WHOLE_SIZE
+        VkDescriptorBufferInfo srcInfo = {
+            .buffer = ctx->srcIndirectBuffer, .offset = 0, .range = VK_WHOLE_SIZE
+        };
+        VkDescriptorBufferInfo dstInfo = {
+            .buffer = ctx->indirectBuffer, .offset = 0, .range = VK_WHOLE_SIZE
         };
         VkDescriptorBufferInfo uboInfo = {
-            .buffer = ctx->frustumUBOBuffer[i], .offset = 0,
-            .range  = VK_WHOLE_SIZE
+            .buffer = ctx->frustumUBOBuffer[i], .offset = 0, .range = VK_WHOLE_SIZE
         };
-        VkWriteDescriptorSet writes[3] = {
+        VkWriteDescriptorSet writes[4] = {
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = ctx->computeCullSets[i],
@@ -1102,18 +1110,26 @@ void createComputeCullPipeline(VulkanContext* ctx)
                 .dstBinding      = 1,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 .descriptorCount = 1,
-                .pBufferInfo     = &indirectInfo
+                .pBufferInfo     = &srcInfo
             },
             {
                 .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet          = ctx->computeCullSets[i],
                 .dstBinding      = 2,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo     = &dstInfo
+            },
+            {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet          = ctx->computeCullSets[i],
+                .dstBinding      = 3,
                 .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 .descriptorCount = 1,
                 .pBufferInfo     = &uboInfo
             }
         };
-        vkUpdateDescriptorSets(ctx->device, 3, writes, 0, NULL);
+        vkUpdateDescriptorSets(ctx->device, 4, writes, 0, NULL);
     }
 
     fprintf(stdout, "Compute frustum cull pipeline created\n");
@@ -1125,8 +1141,7 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
 
     uint32_t f = ctx->currentFrame;
 
-    /* ── extract frustum planes from VP matrix ──────────────────────── */
-    /* Gribb-Hartmann method — works for any projection */
+    /* ── upload frustum planes ──────────────────────────────────────── */
     typedef struct { vec4 planes[6]; uint32_t meshCount; uint32_t _pad[3]; } FrustumUBO;
     FrustumUBO ubo;
     ubo.meshCount = ctx->indirectDrawCount;
@@ -1134,50 +1149,33 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
     mat4 vp;
     glm_mat4_mul(camera.projection_matrix, camera.view_matrix, vp);
 
-    /* Each plane: row3 ± rowN of the VP matrix */
-    /* Left   */ ubo.planes[0][0]=vp[0][3]+vp[0][0]; ubo.planes[0][1]=vp[1][3]+vp[1][0]; ubo.planes[0][2]=vp[2][3]+vp[2][0]; ubo.planes[0][3]=vp[3][3]+vp[3][0];
-    /* Right  */ ubo.planes[1][0]=vp[0][3]-vp[0][0]; ubo.planes[1][1]=vp[1][3]-vp[1][0]; ubo.planes[1][2]=vp[2][3]-vp[2][0]; ubo.planes[1][3]=vp[3][3]-vp[3][0];
-    /* Bottom */ ubo.planes[2][0]=vp[0][3]+vp[0][1]; ubo.planes[2][1]=vp[1][3]+vp[1][1]; ubo.planes[2][2]=vp[2][3]+vp[2][1]; ubo.planes[2][3]=vp[3][3]+vp[3][1];
-    /* Top    */ ubo.planes[3][0]=vp[0][3]-vp[0][1]; ubo.planes[3][1]=vp[1][3]-vp[1][1]; ubo.planes[3][2]=vp[2][3]-vp[2][1]; ubo.planes[3][3]=vp[3][3]-vp[3][1];
-    /* Near   */ ubo.planes[4][0]=vp[0][3]+vp[0][2]; ubo.planes[4][1]=vp[1][3]+vp[1][2]; ubo.planes[4][2]=vp[2][3]+vp[2][2]; ubo.planes[4][3]=vp[3][3]+vp[3][2];
-    /* Far    */ ubo.planes[5][0]=vp[0][3]-vp[0][2]; ubo.planes[5][1]=vp[1][3]-vp[1][2]; ubo.planes[5][2]=vp[2][3]-vp[2][2]; ubo.planes[5][3]=vp[3][3]-vp[3][2];
+    /* Gribb-Hartmann plane extraction */
+    ubo.planes[0][0]=vp[0][3]+vp[0][0]; ubo.planes[0][1]=vp[1][3]+vp[1][0]; ubo.planes[0][2]=vp[2][3]+vp[2][0]; ubo.planes[0][3]=vp[3][3]+vp[3][0];
+    ubo.planes[1][0]=vp[0][3]-vp[0][0]; ubo.planes[1][1]=vp[1][3]-vp[1][0]; ubo.planes[1][2]=vp[2][3]-vp[2][0]; ubo.planes[1][3]=vp[3][3]-vp[3][0];
+    ubo.planes[2][0]=vp[0][3]+vp[0][1]; ubo.planes[2][1]=vp[1][3]+vp[1][1]; ubo.planes[2][2]=vp[2][3]+vp[2][1]; ubo.planes[2][3]=vp[3][3]+vp[3][1];
+    ubo.planes[3][0]=vp[0][3]-vp[0][1]; ubo.planes[3][1]=vp[1][3]-vp[1][1]; ubo.planes[3][2]=vp[2][3]-vp[2][1]; ubo.planes[3][3]=vp[3][3]-vp[3][1];
+    ubo.planes[4][0]=vp[0][3]+vp[0][2]; ubo.planes[4][1]=vp[1][3]+vp[1][2]; ubo.planes[4][2]=vp[2][3]+vp[2][2]; ubo.planes[4][3]=vp[3][3]+vp[3][2];
+    ubo.planes[5][0]=vp[0][3]-vp[0][2]; ubo.planes[5][1]=vp[1][3]-vp[1][2]; ubo.planes[5][2]=vp[2][3]-vp[2][2]; ubo.planes[5][3]=vp[3][3]-vp[3][2];
 
-    /* normalize planes */
     for (int i = 0; i < 6; i++) {
         float len = sqrtf(ubo.planes[i][0]*ubo.planes[i][0] +
                           ubo.planes[i][1]*ubo.planes[i][1] +
                           ubo.planes[i][2]*ubo.planes[i][2]);
         if (len > 0.0f) {
-            ubo.planes[i][0] /= len;
-            ubo.planes[i][1] /= len;
-            ubo.planes[i][2] /= len;
-            ubo.planes[i][3] /= len;
+            ubo.planes[i][0] /= len; ubo.planes[i][1] /= len;
+            ubo.planes[i][2] /= len; ubo.planes[i][3] /= len;
         }
     }
-
     memcpy(ctx->frustumUBOMapped[f], &ubo, sizeof(FrustumUBO));
 
-    /* ── reset indirect buffer to instanceCount=1 for all static meshes ── */
-    /* We do this on CPU since the buffer is HOST_VISIBLE|HOST_COHERENT     */
-    {
-        VkDrawIndexedIndirectCommand* cmds =
-            (VkDrawIndexedIndirectCommand*)ctx->indirectBufferMapped;
-        for (uint32_t i = 0; i < ctx->indirectDrawCount; i++) {
-            /* Only reset meshes that are valid static draws.
-               Slots with indexCount==0 are morph/dynamic and must stay 0. */
-            if (cmds[i].indexCount > 0 && cmds[i].firstIndex != UINT32_MAX)
-                cmds[i].instanceCount = 1;
-        }
-    }
-
-    /* ── barrier: host write → compute read ────────────────────────── */
+    /* ── barrier: host write (frustum UBO) → compute read ──────────── */
     VkBufferMemoryBarrier hostBarrier = {
         .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
         .srcAccessMask       = VK_ACCESS_HOST_WRITE_BIT,
-        .dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask       = VK_ACCESS_SHADER_READ_BIT,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .buffer              = ctx->indirectBuffer,
+        .buffer              = ctx->frustumUBOBuffer[f],
         .offset              = 0,
         .size                = VK_WHOLE_SIZE
     };
@@ -1186,7 +1184,7 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 0, NULL, 1, &hostBarrier, 0, NULL);
 
-    /* ── dispatch compute ───────────────────────────────────────────── */
+    /* ── dispatch compute — reads srcIndirectBuffer, writes indirectBuffer ── */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->computeCullPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             ctx->computeCullPipelineLayout, 0, 1,
@@ -1195,8 +1193,8 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
     uint32_t groupCount = (ctx->indirectDrawCount + 63) / 64;
     vkCmdDispatch(cmd, groupCount, 1, 1);
 
-    /* ── barrier: compute write → indirect read ─────────────────────── */
-    VkBufferMemoryBarrier barrier = {
+    /* ── barrier: compute write → indirect draw read ────────────────── */
+    VkBufferMemoryBarrier drawBarrier = {
         .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
         .srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT,
         .dstAccessMask       = VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
@@ -1209,7 +1207,7 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
     vkCmdPipelineBarrier(cmd,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-        0, 0, NULL, 1, &barrier, 0, NULL);
+        0, 0, NULL, 1, &drawBarrier, 0, NULL);
 }
 
 void create2DGraphicsPipeline(VulkanContext* ctx)        { /* handled by createGraphicsPipelines */ }
@@ -1794,10 +1792,13 @@ void cleanup(VulkanContext* ctx)
         if (ctx->meshSSBO[i])         { vkDestroyBuffer(ctx->device, ctx->meshSSBO[i],         NULL);              ctx->meshSSBO[i]         = VK_NULL_HANDLE; }
         if (ctx->meshSSBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->meshSSBOMemory[i],   NULL);              ctx->meshSSBOMemory[i]   = VK_NULL_HANDLE; }
     }
-    if (ctx->ssboSetLayout)        { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout,        NULL); ctx->ssboSetLayout        = VK_NULL_HANDLE; }
-    if (ctx->ssboPool)             { vkDestroyDescriptorPool     (ctx->device, ctx->ssboPool,             NULL); ctx->ssboPool             = VK_NULL_HANDLE; }
-    if (ctx->indirectBuffer)       { vkDestroyBuffer             (ctx->device, ctx->indirectBuffer,       NULL); ctx->indirectBuffer       = VK_NULL_HANDLE; }
-    if (ctx->indirectBufferMemory) { vkFreeMemory                (ctx->device, ctx->indirectBufferMemory, NULL); ctx->indirectBufferMemory = VK_NULL_HANDLE; }
+    if (ctx->ssboSetLayout)           { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout,        NULL); ctx->ssboSetLayout        = VK_NULL_HANDLE; }
+    if (ctx->ssboPool)                { vkDestroyDescriptorPool     (ctx->device, ctx->ssboPool,             NULL); ctx->ssboPool             = VK_NULL_HANDLE; }
+    if (ctx->srcIndirectBufferMapped) { vkUnmapMemory  (ctx->device, ctx->srcIndirectBufferMemory);              ctx->srcIndirectBufferMapped = NULL;           }
+    if (ctx->srcIndirectBuffer)       { vkDestroyBuffer(ctx->device, ctx->srcIndirectBuffer,        NULL);       ctx->srcIndirectBuffer       = VK_NULL_HANDLE; }
+    if (ctx->srcIndirectBufferMemory) { vkFreeMemory   (ctx->device, ctx->srcIndirectBufferMemory,  NULL);       ctx->srcIndirectBufferMemory = VK_NULL_HANDLE; }
+    if (ctx->indirectBuffer)          { vkDestroyBuffer(ctx->device, ctx->indirectBuffer,           NULL);       ctx->indirectBuffer          = VK_NULL_HANDLE; }
+    if (ctx->indirectBufferMemory)    { vkFreeMemory   (ctx->device, ctx->indirectBufferMemory,     NULL);       ctx->indirectBufferMemory    = VK_NULL_HANDLE; }
 
     if (ctx->device)               { vkDestroyDevice             (ctx->device,                            NULL); ctx->device                  = VK_NULL_HANDLE; }
     if (ctx->surface)              { vkDestroySurfaceKHR         (ctx->instance, ctx->surface,            NULL); ctx->surface                 = VK_NULL_HANDLE; }
@@ -2191,27 +2192,57 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
 {
     VkDeviceSize size = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
-    VkBufferCreateInfo bci = {
-        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = size,
-        .usage       = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
-                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->indirectBuffer);
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, ctx->indirectBuffer, &req);
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    };
-    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->indirectBufferMemory);
-    vkBindBufferMemory(ctx->device, ctx->indirectBuffer, ctx->indirectBufferMemory, 0);
-    vkMapMemory(ctx->device, ctx->indirectBufferMemory, 0, size, 0, &ctx->indirectBufferMapped);
-    fprintf(stdout, "Indirect buffer: %u draw slots\n", maxMeshes);
+
+    /* Source buffer: CPU writes original draw commands, compute reads */
+    {
+        VkBufferCreateInfo bci = {
+            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size        = size,
+            .usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->srcIndirectBuffer);
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(ctx->device, ctx->srcIndirectBuffer, &req);
+        VkMemoryAllocateInfo ai = {
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize  = req.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        vkAllocateMemory(ctx->device, &ai, NULL, &ctx->srcIndirectBufferMemory);
+        vkBindBufferMemory(ctx->device, ctx->srcIndirectBuffer,
+                           ctx->srcIndirectBufferMemory, 0);
+        vkMapMemory(ctx->device, ctx->srcIndirectBufferMemory, 0, size, 0,
+                    &ctx->srcIndirectBufferMapped);
+    }
+
+    /* Destination buffer: compute writes, GPU draw reads — DEVICE_LOCAL */
+    {
+        VkBufferCreateInfo bci = {
+            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size        = size,
+            .usage       = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->indirectBuffer);
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(ctx->device, ctx->indirectBuffer, &req);
+        VkMemoryAllocateInfo ai = {
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize  = req.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+        };
+        vkAllocateMemory(ctx->device, &ai, NULL, &ctx->indirectBufferMemory);
+        vkBindBufferMemory(ctx->device, ctx->indirectBuffer,
+                           ctx->indirectBufferMemory, 0);
+    }
+
+    fprintf(stdout, "Indirect buffers: %u draw slots (src HOST_VISIBLE, dst DEVICE_LOCAL)\n",
+            maxMeshes);
 }
 
 void markMeshesSSBODirty(VulkanContext* ctx)
@@ -2225,7 +2256,7 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
     ctx->indirectDrawCount = count;
 
     /* Rebuild indirect buffer every time (it's HOST_VISIBLE, cheap to write) */
-    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)ctx->indirectBufferMapped;
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)ctx->srcIndirectBufferMapped;
 
     for (uint32_t i = 0; i < count; i++) {
         Mesh* m = &meshes->items[i];
