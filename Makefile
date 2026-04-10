@@ -34,11 +34,11 @@ all: $(SPV_HEADERS) $(EXECUTABLE)
 
 # Compile shaders to SPIR-V
 %.vert.spv: %.vert
-	$(GLSLANG) -V --target-env vulkan1.1 $< -o $@
+	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
 %.frag.spv: %.frag
-	$(GLSLANG) -V --target-env vulkan1.1 $< -o $@
+	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
 %.comp.spv: %.comp
-	$(GLSLANG) -V --target-env vulkan1.1 $< -o $@
+	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
 
 # Convert SPIR-V to C header
 %.spv.h: %.spv

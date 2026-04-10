@@ -34,9 +34,6 @@ void recreateSwapChain(VulkanContext* context);
 void cleanupSwapChain(VulkanContext* context);
 void cleanupSwapChainResources(VulkanContext* context, VkSwapchainKHR oldSwapchain);
 
-/* ── render pass ───────────────────────────────── */
-void createRenderPass(VulkanContext* context);
-
 /* ── descriptor layouts / pools ───────────────── */
 void createDescriptorSetLayout(VulkanContext* context);
 void create2DDescriptorSetLayout(VulkanContext* context);
@@ -79,8 +76,7 @@ void createTextured2DGraphicsPipeline(VulkanContext* context);
 void create3DTexturedGraphicsPipeline(VulkanContext* context);
 void createLineGraphicsPipeline(VulkanContext* context);
 
-/* ── framebuffers / commands / sync ────────────── */
-void createFramebuffers(VulkanContext* context);
+/* ── commands / sync ────────────── */
 void createCommandPool(VulkanContext* context);
 void createCommandBuffers(VulkanContext* context);
 void createSyncObjects(VulkanContext* context);

@@ -2,6 +2,7 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include "common.h"
+#include "render_graph.h"
 #include <stdbool.h>
 
 #define MAX_FRAMES_IN_FLIGHT 2
@@ -17,16 +18,12 @@ typedef struct {
     VkSurfaceKHR         surface;
 
     // ── swapchain ────────────────────────────────────────────────────
-    VkSwapchainKHR       swapChain;
-    VkImage*             swapChainImages;
-    uint32_t             swapChainImageCount;
-    VkFormat             swapChainImageFormat;
-    VkExtent2D           swapChainExtent;
-    VkImageView*         swapChainImageViews;
-    VkFramebuffer*       swapChainFramebuffers;
-
-    // ── render pass ──────────────────────────────────────────────────
-    VkRenderPass         renderPass;
+    VkSwapchainKHR        swapChain;
+    VkImage* swapChainImages;
+    uint32_t              swapChainImageCount;
+    VkFormat              swapChainImageFormat;
+    VkExtent2D            swapChainExtent;
+    VkImageView* swapChainImageViews;
 
     // ── depth ────────────────────────────────────────────────────────
     VkImage              depthImage;
@@ -191,6 +188,8 @@ typedef struct {
     uint32_t         ssboFramesDirty;    /* counts down from MAX_FRAMES_IN_FLIGHT to 0 */
     uint64_t*        meshDirtyBits;      /* one bit per mesh, per frame */
     uint32_t         meshDirtyCapacity;  /* in bits */
+
+    RgGraph* renderGraph;
 } VulkanContext;
 
 extern VulkanContext context;

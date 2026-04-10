@@ -65,8 +65,6 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     createImageViews(&context);
     createDepthResources(&context);
 
-    createRenderPass(&context);
-
     createUniformBuffer(&context);
     createDescriptorSetLayout(&context);
     create2DDescriptorSetLayout(&context);
@@ -78,7 +76,6 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     createDescriptorPool(&context);
     createDescriptorSet(&context);
 
-    createFramebuffers(&context);
     createCommandPool(&context);
 
     renderer_init(

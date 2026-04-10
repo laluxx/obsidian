@@ -254,11 +254,11 @@ void createInstance(VulkanContext* ctx)
 #endif
     VkApplicationInfo appInfo = {
         .sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName   = "Revox",
+        .pApplicationName   = "Obsidian",
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-        .pEngineName        = "No Engine",
+        .pEngineName        = "Obsidian Engine",
         .engineVersion      = VK_MAKE_VERSION(1, 0, 0),
-        .apiVersion         = VK_API_VERSION_1_1
+        .apiVersion         = VK_API_VERSION_1_3
     };
     uint32_t     glfwExtCount = 0;
     const char** glfwExt      = glfwGetRequiredInstanceExtensions(&glfwExtCount);
@@ -373,7 +373,14 @@ void createLogicalDevice(VulkanContext* ctx)
         .pNext                = indexingFeatures.pNext,
         .shaderDrawParameters = VK_TRUE,
     };
-    indexingFeatures.pNext = &features11;
+
+    VkPhysicalDeviceVulkan13Features features13 = {
+        .sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext            = &features11,
+        .dynamicRendering = VK_TRUE,
+        .shaderDemoteToHelperInvocation = VK_TRUE,
+    };
+    indexingFeatures.pNext = &features13;
 
     VkDeviceCreateInfo ci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -472,71 +479,7 @@ void createImageViews(VulkanContext* ctx)
     }
 }
 
-/// Render pass
 
-void createRenderPass(VulkanContext* ctx)
-{
-    VkAttachmentDescription attachments[2] = {
-        /* color */
-        {
-            .format         = ctx->swapChainImageFormat,
-            .samples        = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-        },
-        /* depth */
-        {
-            .format         = ctx->depthFormat,
-            .samples        = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-        }
-    };
-    VkAttachmentReference colorRef = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depthRef = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount    = 1,
-        .pColorAttachments       = &colorRef,
-        .pDepthStencilAttachment = &depthRef
-    };
-
-    /* FIX: include depth stage in the subpass dependency */
-    VkSubpassDependency dep = {
-        .srcSubpass    = VK_SUBPASS_EXTERNAL,
-        .dstSubpass    = 0,
-        .srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        .dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        .srcAccessMask = 0,
-        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-    };
-
-    VkRenderPassCreateInfo ci = {
-        .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 2,
-        .pAttachments    = attachments,
-        .subpassCount    = 1,
-        .pSubpasses      = &subpass,
-        .dependencyCount = 1,
-        .pDependencies   = &dep
-    };
-    if (vkCreateRenderPass(ctx->device, &ci, NULL, &ctx->renderPass) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create render pass\n");
-        exit(EXIT_FAILURE);
-    }
-}
 
 /// Descriptor layouts / Pools
 
@@ -769,6 +712,14 @@ void createGraphicsPipelines(VulkanContext* ctx)
     VkPipelineDepthStencilStateCreateInfo depthSkybox = makeDepth(true, false);
     depthSkybox.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
+    VkFormat colorFormat = ctx->swapChainImageFormat;
+    VkPipelineRenderingCreateInfo pipelineRenderingCI = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &colorFormat,
+        .depthAttachmentFormat = ctx->depthFormat,
+    };
+
     /*
        Index  Pipeline
        0      3D PBR triangles  (direct + indirect, same pipeline)
@@ -780,6 +731,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
         /* 0: 3D PBR triangles */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = &pipelineRenderingCI,
             .stageCount          = 2, .pStages             = ssPBR,
             .pVertexInputState   = &vi3D, .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
@@ -787,11 +739,11 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
             .pDynamicState       = &kDynamicState,
             .layout              = ctx->pipelineLayout,
-            .renderPass          = ctx->renderPass
         },
         /* 1: 3D PBR lines */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = &pipelineRenderingCI,
             .stageCount          = 2, .pStages             = ssPBR,
             .pVertexInputState   = &vi3D, .pInputAssemblyState = &iaLine,
             .pViewportState      = &kViewportState,
@@ -799,11 +751,11 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pColorBlendState    = &blend,  .pDepthStencilState= &depth3D,
             .pDynamicState       = &kDynamicState,
             .layout              = ctx->pipelineLayout,
-            .renderPass          = ctx->renderPass
         },
         /* 2: 2D unified (color + texture, driven by textureIndex) */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = &pipelineRenderingCI,
             .stageCount          = 2, .pStages             = ss2DColor,
             .pVertexInputState   = &vi2D, .pInputAssemblyState = &ia2D,
             .pViewportState      = &kViewportState,
@@ -811,11 +763,11 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pColorBlendState    = &blend, .pDepthStencilState = &depth2D,
             .pDynamicState       = &kDynamicState,
             .layout              = ctx->pipelineLayoutTextured2D,
-            .renderPass          = ctx->renderPass
         },
         /* 3: Skybox */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = &pipelineRenderingCI,
             .stageCount          = 2, .pStages             = ssSkybox,
             .pVertexInputState   = &(VkPipelineVertexInputStateCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO },
             .pInputAssemblyState = &ia3D,
@@ -824,7 +776,6 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pColorBlendState    = &blend, .pDepthStencilState = &depthSkybox,
             .pDynamicState       = &kDynamicState,
             .layout              = skyboxPipelineLayout,
-            .renderPass          = ctx->renderPass
         }
     };
 
@@ -1018,13 +969,12 @@ void createComputeCullPipeline(VulkanContext* ctx)
     fprintf(stdout, "Compute frustum cull pipeline created\n");
 }
 
-void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
+static void updateFrustumUBO(VulkanContext* ctx)
 {
     if (ctx->indirectDrawCount == 0) return;
 
     uint32_t f = ctx->currentFrame;
 
-    /* ── upload frustum planes ──────────────────────────────────────── */
     typedef struct { vec4 planes[6]; uint32_t meshCount; uint32_t _pad[3]; } FrustumUBO;
     FrustumUBO ubo;
     ubo.meshCount = ctx->indirectDrawCount;
@@ -1032,7 +982,6 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
     mat4 vp;
     glm_mat4_mul(camera.projection_matrix, camera.view_matrix, vp);
 
-    /* Gribb-Hartmann plane extraction */
     for (int j = 0; j < 4; j++) {
         ubo.planes[0][j] = vp[j][3] + vp[j][0]; ubo.planes[1][j] = vp[j][3] - vp[j][0];
         ubo.planes[2][j] = vp[j][3] + vp[j][1]; ubo.planes[3][j] = vp[j][3] - vp[j][1];
@@ -1040,56 +989,85 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
     }
 
     for (int i = 0; i < 6; i++) {
-        float len = sqrtf(ubo.planes[i][0]*ubo.planes[i][0] +
-                          ubo.planes[i][1]*ubo.planes[i][1] +
-                          ubo.planes[i][2]*ubo.planes[i][2]);
+        float len = sqrtf(ubo.planes[i][0]*ubo.planes[i][0] + ubo.planes[i][1]*ubo.planes[i][1] + ubo.planes[i][2]*ubo.planes[i][2]);
         if (len > 0.0f) {
             ubo.planes[i][0] /= len; ubo.planes[i][1] /= len;
             ubo.planes[i][2] /= len; ubo.planes[i][3] /= len;
         }
     }
     memcpy(ctx->frustumUBOMapped[f], &ubo, sizeof(FrustumUBO));
+}
 
-    /* ── barrier: host write (frustum UBO) → compute read ──────────── */
-    VkBufferMemoryBarrier hostBarrier = {
-        .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-        .srcAccessMask       = VK_ACCESS_HOST_WRITE_BIT,
-        .dstAccessMask       = VK_ACCESS_SHADER_READ_BIT,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .buffer              = ctx->frustumUBOBuffer[f],
-        .offset              = 0,
-        .size                = VK_WHOLE_SIZE
-    };
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_HOST_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0, 0, NULL, 1, &hostBarrier, 0, NULL);
-
-    /* ── dispatch compute — reads srcIndirectBuffer, writes indirectBuffer ── */
+static void execute_cull_pass(VkCommandBuffer cmd, void* user_data)
+{
+    VulkanContext* ctx = (VulkanContext*)user_data;
+    if (ctx->indirectDrawCount == 0) return;
+    uint32_t f = ctx->currentFrame;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->computeCullPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            ctx->computeCullPipelineLayout, 0, 1,
-                            &ctx->computeCullSets[f], 0, NULL);
-
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->computeCullPipelineLayout, 0, 1, &ctx->computeCullSets[f], 0, NULL);
     uint32_t groupCount = (ctx->indirectDrawCount + 63) / 64;
     vkCmdDispatch(cmd, groupCount, 1, 1);
+}
 
-    /* ── barrier: compute write → indirect draw read ────────────────── */
-    VkBufferMemoryBarrier drawBarrier = {
-        .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-        .srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT,
-        .dstAccessMask       = VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .buffer              = ctx->indirectBuffer,
-        .offset              = 0,
-        .size                = VK_WHOLE_SIZE
+static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
+{
+    VulkanContext* ctx = (VulkanContext*)user_data;
+
+    VkViewport viewport = {
+        .width    = (float)ctx->swapChainExtent.width,
+        .height   = (float)ctx->swapChainExtent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f
     };
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-        0, 0, NULL, 1, &drawBarrier, 0, NULL);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor = { {0,0}, ctx->swapChainExtent };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
+    pushConstants.iblEnabled = (ctx->iblLoaded && iblLightingEnabled) ? 1 : 0;
+
+    CTX_LIGHTING(ctx)->iblEnabled = (ctx->iblLoaded && iblLightingEnabled) ? 1 : 0;
+    CTX_LIGHTING(ctx)->ambientIntensity = 1.0f;
+
+    updateLightingUBO(ctx);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipeline);
+
+    VkDescriptorSet gltfSets[4] = {
+        ctx->descriptorSets[ctx->currentFrame],
+        ctx->bindlessSet,
+        ctx->ssboSets[ctx->currentFrame],
+        ctx->lightingSets[ctx->currentFrame],
+    };
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
+
+    pushConstants.meshIndex = -1;
+    vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+
+    if (ctx->indirectDrawCount > 0) {
+        VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
+        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexedIndirect(cmd, ctx->indirectBuffer, 0, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+    }
+
+    VkDescriptorSet immSet = imm_ssbo_get_set(ctx->currentFrame);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 2, 1, &immSet, 0, NULL);
+    renderer_draw(cmd);
+
+    if (lineVertexCount > 0) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
+        line_renderer_draw(cmd);
+    }
+
+    if (skyboxEnabled && iblSkyboxView != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
+        VkDescriptorSet skyboxSets[2] = { ctx->descriptorSets[ctx->currentFrame], ctx->lightingSets[ctx->currentFrame] };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 2, skyboxSets, 0, NULL);
+        vkCmdDraw(cmd, 36, 1, 0, 0);
+    }
+
+    renderer2D_draw(cmd);
 }
 
 void create2DGraphicsPipeline(VulkanContext* ctx)        { /* handled by createGraphicsPipelines */ }
@@ -1098,27 +1076,6 @@ void create3DTexturedGraphicsPipeline(VulkanContext* ctx){ /* handled by createG
 void createLineGraphicsPipeline(VulkanContext* ctx)      { /* handled by createGraphicsPipelines */ }
 
 /// Framebuffers / Command pool / Command buffers
-
-void createFramebuffers(VulkanContext* ctx)
-{
-    ctx->swapChainFramebuffers = malloc(ctx->swapChainImageCount * sizeof(VkFramebuffer));
-    for (uint32_t i = 0; i < ctx->swapChainImageCount; i++) {
-        VkImageView atts[2] = { ctx->swapChainImageViews[i], ctx->depthImageView };
-        VkFramebufferCreateInfo ci = {
-            .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass      = ctx->renderPass,
-            .attachmentCount = 2,
-            .pAttachments    = atts,
-            .width           = ctx->swapChainExtent.width,
-            .height          = ctx->swapChainExtent.height,
-            .layers          = 1
-        };
-        if (vkCreateFramebuffer(ctx->device, &ci, NULL, &ctx->swapChainFramebuffers[i]) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create framebuffer %u\n", i);
-            exit(EXIT_FAILURE);
-        }
-    }
-}
 
 void createCommandPool(VulkanContext* ctx)
 {
@@ -1276,106 +1233,56 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
 
     VkCommandBufferBeginInfo bi = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        /* ONE_TIME_SUBMIT is more efficient for buffers re-recorded every frame */
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
     };
     if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) {
         fprintf(stderr, "Failed to begin command buffer\n"); exit(EXIT_FAILURE);
     }
 
-    VkClearValue clearValues[2] = {
-        { .color        = {{ctx->clearColor.r, ctx->clearColor.g,
-                            ctx->clearColor.b, ctx->clearColor.a}} },
-        { .depthStencil = {1.0f, 0} }
-    };
-    VkRenderPassBeginInfo rpi = {
-        .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass      = ctx->renderPass,
-        .framebuffer     = ctx->swapChainFramebuffers[imageIndex],
-        .renderArea      = { {0,0}, ctx->swapChainExtent },
-        .clearValueCount = 2,
-        .pClearValues    = clearValues
-    };
-
-    /* ── FRUSTUM CULLING: must run BEFORE render pass ───────────────── */
-    dispatchFrustumCull(ctx, cmd);
-
-    vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
-
-    VkViewport viewport = {
-        .width    = (float)ctx->swapChainExtent.width,
-        .height   = (float)ctx->swapChainExtent.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    VkRect2D scissor = { {0,0}, ctx->swapChainExtent };
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-    pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
-    pushConstants.iblEnabled = (ctx->iblLoaded && iblLightingEnabled) ? 1 : 0;
-
-    CTX_LIGHTING(ctx)->iblEnabled = (ctx->iblLoaded && iblLightingEnabled) ? 1 : 0;
-    CTX_LIGHTING(ctx)->ambientIntensity = 1.0f; // Ensure IBL isn't multiplied by 0!
-
-    updateLightingUBO(ctx);
-
-    /* ── Bind the 4 descriptor sets once — valid for ALL 3D draws ───────
-       set=0  UBO
-       set=1  bindless texture array
-       set=2  GLTF mesh SSBO  (indirect pass uses gl_BaseInstanceARB)
-       set=3  lighting UBO                                                 */
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipeline);
-
-    VkDescriptorSet gltfSets[4] = {
-        ctx->descriptorSets[ctx->currentFrame],
-        ctx->bindlessSet,
-        ctx->ssboSets[ctx->currentFrame],
-        ctx->lightingSets[ctx->currentFrame],
-    };
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
-
-    /* indirect = -1 in meshIndex means use gl_BaseInstanceARB */
-    pushConstants.meshIndex = -1;
-    vkCmdPushConstants(cmd, ctx->pipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(PushConstants), &pushConstants);
-
-    /* ── INDIRECT PASS: GLTF meshes ─────────────────────────────────── */
-    if (ctx->indirectDrawCount > 0) {
-        VkDeviceSize zero = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
-        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexedIndirect(cmd, ctx->indirectBuffer, 0,
-                                 ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+    if (!ctx->renderGraph) {
+        ctx->renderGraph = rg_create();
     }
+    rg_reset(ctx->renderGraph);
 
-    /* ── DIRECT PASS: immediate-mode (sphere, cube, etc.) ───────────────
-       Swap set=2 to the imm SSBO — sets 0,1,3 stay the same             */
-    VkDescriptorSet immSet = imm_ssbo_get_set(ctx->currentFrame);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            ctx->pipelineLayout, 2, 1, &immSet, 0, NULL);
-    renderer_draw(cmd);
+    updateFrustumUBO(ctx);
 
-    /* ── 3D lines ────────────────────────────────────────────────────── */
-    if (lineVertexCount > 0) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
-        line_renderer_draw(cmd);
-    }
+    uint32_t f = ctx->currentFrame;
 
-    /* ── Skybox ─────────────────────────────────────────────────────── */
-    if (skyboxEnabled && iblSkyboxView != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
-        VkDescriptorSet skyboxSets[2] = { ctx->descriptorSets[ctx->currentFrame], ctx->lightingSets[ctx->currentFrame] };
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 2, skyboxSets, 0, NULL);
-        vkCmdDraw(cmd, 36, 1, 0, 0);
-    }
+    // 1. Import Resources
+    RgResId swapchainImg = rg_import_image(ctx->renderGraph, "Swapchain", ctx->swapChainImages[imageIndex], ctx->swapChainImageViews[imageIndex], ctx->swapChainImageFormat, ctx->swapChainExtent.width, ctx->swapChainExtent.height, VK_IMAGE_LAYOUT_UNDEFINED);
+    RgResId depthImg = rg_import_image(ctx->renderGraph, "Depth", ctx->depthImage, ctx->depthImageView, ctx->depthFormat, ctx->swapChainExtent.width, ctx->swapChainExtent.height, VK_IMAGE_LAYOUT_UNDEFINED);
+    RgResId indirectBuf = rg_import_buffer(ctx->renderGraph, "IndirectBuffer", ctx->indirectBuffer);
+    RgResId frustumUBO = rg_import_buffer(ctx->renderGraph, "FrustumUBO", ctx->frustumUBOBuffer[f]);
 
-    /* ── 2D ─────────────────────────────────────────────────────────── */
-    renderer2D_draw(cmd);
+    // 2. Define Culling Pass
+    RgPass* cullPass = rg_add_pass(ctx->renderGraph, "FrustumCull");
+    rg_pass_read_buffer(cullPass, frustumUBO, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    rg_pass_write_buffer(cullPass, indirectBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+    rg_pass_execute(cullPass, execute_cull_pass, ctx);
 
-    vkCmdEndRenderPass(cmd);
+    // 3. Define Main Geometry Pass
+    RgPass* mainPass = rg_add_pass(ctx->renderGraph, "MainForward");
+    rg_pass_read_buffer(mainPass, indirectBuf, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    rg_pass_color_attachment(mainPass, swapchainImg, true, ctx->clearColor);
+    rg_pass_depth_attachment(mainPass, depthImg, true);
+    rg_pass_execute(mainPass, execute_main_pass, ctx);
+
+    // 4. Execute the Graph!
+    rg_execute(ctx->renderGraph, cmd);
+
+    /* Transition color image to presentable format */
+    VkImageMemoryBarrier presentBarrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = ctx->swapChainImages[imageIndex],
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, .dstAccessMask = 0
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         0, 0, NULL, 0, NULL, 1, &presentBarrier);
+
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         fprintf(stderr, "Failed to record command buffer\n"); exit(EXIT_FAILURE);
     }
@@ -1447,12 +1354,6 @@ void cleanupSwapChainResources(VulkanContext* ctx, VkSwapchainKHR oldSwapchain)
 {
     vkDeviceWaitIdle(ctx->device);
 
-    if (ctx->swapChainFramebuffers) {
-        for (uint32_t i = 0; i < ctx->swapChainImageCount; i++)
-            vkDestroyFramebuffer(ctx->device, ctx->swapChainFramebuffers[i], NULL);
-        free(ctx->swapChainFramebuffers);
-        ctx->swapChainFramebuffers = NULL;
-    }
     if (ctx->commandBuffers && ctx->commandPool) {
         vkFreeCommandBuffers(ctx->device, ctx->commandPool,
                              ctx->swapChainImageCount, ctx->commandBuffers);
@@ -1544,7 +1445,6 @@ void recreateSwapChain(VulkanContext* ctx)
 
     createImageViews(ctx);
     createDepthResources(ctx);
-    createFramebuffers(ctx);
     createCommandBuffers(ctx);
 
     camera.aspect_ratio = (float)ctx->swapChainExtent.width / (float)ctx->swapChainExtent.height;
@@ -1657,8 +1557,6 @@ void cleanup(VulkanContext* ctx)
         if (ctx->vertexBufferMemory2D[i]) { vkFreeMemory   (ctx->device, ctx->vertexBufferMemory2D[i], NULL); ctx->vertexBufferMemory2D[i] = VK_NULL_HANDLE; }
     }
 
-    if (ctx->renderPass)           { vkDestroyRenderPass         (ctx->device, ctx->renderPass,           NULL); ctx->renderPass              = VK_NULL_HANDLE; }
-
     /* per-frame uniform buffers — unmap then destroy */
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (ctx->uboMapped[i])            { vkUnmapMemory  (ctx->device, ctx->uniformBuffersMemory[i]);          ctx->uboMapped[i]            = NULL;           }
@@ -1696,7 +1594,9 @@ void cleanup(VulkanContext* ctx)
     if (ctx->indirectBuffer)          { vkDestroyBuffer(ctx->device, ctx->indirectBuffer,           NULL);       ctx->indirectBuffer          = VK_NULL_HANDLE; }
     if (ctx->indirectBufferMemory)    { vkFreeMemory   (ctx->device, ctx->indirectBufferMemory,     NULL);       ctx->indirectBufferMemory    = VK_NULL_HANDLE; }
 
-    if (ctx->device)               { vkDestroyDevice             (ctx->device,                            NULL); ctx->device                  = VK_NULL_HANDLE; }
+    if (ctx->renderGraph)          { rg_destroy(ctx->renderGraph); ctx->renderGraph = NULL; }
+
+    if (ctx->device)               { vkDestroyDevice             (ctx->device,                             NULL); ctx->device                  = VK_NULL_HANDLE; }
     if (ctx->surface)              { vkDestroySurfaceKHR         (ctx->instance, ctx->surface,            NULL); ctx->surface                 = VK_NULL_HANDLE; }
     if (ctx->instance)             { vkDestroyInstance           (ctx->instance,                          NULL); ctx->instance                = VK_NULL_HANDLE; }
     if (ctx->window)               { glfwDestroyWindow           (ctx->window                                 ); ctx->window                  = NULL; }
