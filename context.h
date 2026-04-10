@@ -77,9 +77,9 @@ typedef struct {
     VkPipeline           graphicsPipelineSDF2D;      // 2D SDF
 
     // ── 2D vertex buffer ─────────────────────────────────────────────
-    VkBuffer vertexBuffer2D;
-    VkDeviceMemory vertexBufferMemory2D;
-    void* vertexBuffer2DMapped;
+    VkBuffer         vertexBuffer2D[MAX_FRAMES_IN_FLIGHT];
+    VkDeviceMemory   vertexBufferMemory2D[MAX_FRAMES_IN_FLIGHT];
+    void*            vertexBuffer2DMapped[MAX_FRAMES_IN_FLIGHT];
 
     // ── commands ─────────────────────────────────────────────────────
     VkCommandPool        commandPool;
@@ -137,8 +137,41 @@ typedef struct {
     // ── bindless texture array ───────────────────────────────────────
     VkDescriptorSetLayout bindlessSetLayout;
     VkDescriptorPool      bindlessPool;
-    VkDescriptorSet       bindlessSet;          // one set, all textures
+    VkDescriptorSet       bindlessSet;
     uint32_t              bindlessTextureCount;
+
+    // ── IBL resources ────────────────────────────────────────────────
+    // All three are registered into the bindless array at fixed slots:
+    //   IBL_IRRADIANCE_SLOT      = MAX_TEXTURES - 3
+    //   IBL_PREFILTER_SLOT       = MAX_TEXTURES - 2
+    //   IBL_BRDF_LUT_SLOT        = MAX_TEXTURES - 1
+    VkImage              iblIrradianceImage;
+    VkDeviceMemory       iblIrradianceMemory;
+    VkImageView          iblIrradianceView;
+    VkSampler            iblIrradianceSampler;
+
+    VkImage              iblPrefilterImage;
+    VkDeviceMemory       iblPrefilterMemory;
+    VkImageView          iblPrefilterView;
+    VkSampler            iblPrefilterSampler;
+
+    VkImage              iblBrdfLutImage;
+    VkDeviceMemory       iblBrdfLutMemory;
+    VkImageView          iblBrdfLutView;
+    VkSampler            iblBrdfLutSampler;
+
+    bool                 iblLoaded;
+
+    // ── scene lighting UBO ───────────────────────────────────────────
+    VkDescriptorSetLayout lightingSetLayout;
+    VkDescriptorPool      lightingPool;
+    VkDescriptorSet       lightingSets[MAX_FRAMES_IN_FLIGHT];
+    VkBuffer              lightingUBO[MAX_FRAMES_IN_FLIGHT];
+    VkDeviceMemory        lightingUBOMemory[MAX_FRAMES_IN_FLIGHT];
+    void*                 lightingUBOMapped[MAX_FRAMES_IN_FLIGHT];
+    /* LightingData is defined in renderer.h — use a raw byte buffer here
+       to break the circular dependency. Cast to LightingData* at use sites. */
+    uint8_t               lightingDataRaw[512];  // sizeof(LightingData) <= 512
 
     // ── SSBO: per-mesh data (model matrix, texture index, flags) ─────
     VkBuffer              meshSSBO[MAX_FRAMES_IN_FLIGHT];

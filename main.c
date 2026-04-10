@@ -474,16 +474,17 @@ int main() {
     /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/UnlitTest.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene); // PASS */
-    load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT
-    load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS
+    /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT */
+    /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene); // FIXME ANIMATION CHANNELS */
     /* load_gltf("./assets/gltf/Box.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/Corset.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/CesiumMan.glb", &scene); // FIXME RIG */
     /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO Materials */
-    load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS
+    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS */
     /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
+    load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // FIXME
     /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */
     /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene); // PASS FIXME FLICKER ? */
     /* load_gltf("./assets/gltf/Fox.glb", &scene); // FIXME ANIMATIONS */
@@ -492,9 +493,6 @@ int main() {
     /* load_gltf("./assets/gltf/Avocado.glb", &scene); // PASS */
 
     Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
-
-    Font *jetbrains_sdf = load_font_sdf("./assets/fonts/JetBrainsMono-Regular.ttf", 81, 2);
-    /* save_font_atlas_png(jetbrains_sdf, "sdf_atlas_debug.png"); */
 
     registerKeyCallback(key_callback);
     registerScrollCallback(scroll_callback);
@@ -574,44 +572,6 @@ int main() {
         float centerX = screenWidth / 2.0f;
         float centerY = screenHeight / 2.0f;
 
-        // Adjusted scaling - less small, still big
-        float minScale = 0.5f; // 50% - not too small
-        float maxScale = 8.0f; // 800% - still big
-        float scaleFactor =
-            minScale + (maxScale - minScale) * (0.5f + 0.5f * sin(time));
-        float size = 40.0f * scaleFactor; // Scales between 20 and 320
-
-        // Calculate scale factor for character rendering
-        float characterScale = 1.0f;
-        if (jetbrains_sdf->ascent > 0) {
-          characterScale = size / (float)jetbrains_sdf->ascent;
-        } else if (jetbrains_sdf->display_size > 0) {
-          characterScale = size / (float)jetbrains_sdf->display_size;
-        }
-
-        // Get text width at current scale
-        const char *text = "SDF 2D Text - Scalable!";
-        float textWidth =
-            measure_text_width(jetbrains_sdf, text, characterScale);
-
-        // Calculate left position to keep text centered
-        float posX = centerX - textWidth / 2.0f;
-
-        // For vertical centering, get text height too
-        float textHeight =
-            (jetbrains_sdf->ascent + jetbrains_sdf->descent) * characterScale;
-        float posY = centerY - textHeight / 2.0f;
-
-        // Draw the text
-        text_with_size(jetbrains_sdf, text, posX, posY, GREEN, size);
-
-        /* double time = glfwGetTime(); */
-        /* float size = 40.0f * (3.5f + 1.0f * sin(time)); // scales between 20 and 80 */
-        /* text_with_size(jetbrains_sdf, "SDF 2D Text - Scalable!", 150, 150, GREEN, size); */
-
-        // Test 3D SDF text
-        text3D(jetbrains_sdf, "SDF 3D!", (vec3){0.0f, 6.0f, 10.0f}, 6, CYAN);
-
         // 2D GEOMETRY
         quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);
         quad2D((vec2){70, 10}, (vec2){50, 50}, WHITE);
@@ -619,8 +579,6 @@ int main() {
         quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN);
 
         fps(jetbrains, 500, 500, RED);
-
-
 
 
         texture2D((vec2){100, 200}, (vec2){200, 200}, texture1, WHITE);
@@ -674,9 +632,9 @@ int main() {
         /* } */
 
         // Billboards
-        texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE);
-        texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture5, WHITE);
-        texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE);
+        /* texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE); */
+        /* texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture5, WHITE); */
+        /* texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE); */
 
         endFrame();
     }

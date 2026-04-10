@@ -55,115 +55,6 @@ static void cache_character(Font* font, uint32_t codepoint, Character ch) {
     font->char_table[hash] = node;
 }
 
-// Edge point for distance calculation
-typedef struct {
-    float x, y;
-} EdgePoint;
-
-// Grid cell for spatial partitioning
-typedef struct {
-    int* edge_indices;
-    int count;
-    int capacity;
-} GridCell;
-
-// Fast, high-quality SDF using distance transform
-// This gives the distinctive smooth SDF look efficiently
-
-static void generate_sdf(unsigned char* bitmap, int width, int height,
-                        unsigned char* sdf_output, int sdf_width, int sdf_height,
-                        int spread) {
-
-    printf("  [SDF] Generating %dx%d -> %dx%d, spread=%d\n",
-           width, height, sdf_width, sdf_height, spread);
-
-    float radius = (float)spread;
-
-    // Step 1: For each output pixel, compute EXACT distance to nearest edge
-    // This is the key: we check EVERY pixel, not just edges
-
-    for (int out_y = 0; out_y < sdf_height; out_y++) {
-        for (int out_x = 0; out_x < sdf_width; out_x++) {
-            // Map to input coordinates
-            float center_x = (float)(out_x - spread) + 0.5f;
-            float center_y = (float)(out_y - spread) + 0.5f;
-
-            // Sample the center point to determine inside/outside
-            bool is_inside = false;
-            if (center_x >= 0 && center_x < width && center_y >= 0 && center_y < height) {
-                int cx = (int)center_x;
-                int cy = (int)center_y;
-                if (cx >= 0 && cx < width && cy >= 0 && cy < height) {
-                    is_inside = bitmap[cx + cy * width] > 127;
-                }
-            }
-
-            // Find minimum distance to opposite value
-            // This is the CRITICAL part: we search ALL nearby pixels
-            float min_distance = radius * 2.0f; // Start with max possible
-
-            // Search in a square region around this pixel
-            int search_radius = (int)ceilf(radius) + 2;
-
-            for (int sy = -search_radius; sy <= search_radius; sy++) {
-                for (int sx = -search_radius; sx <= search_radius; sx++) {
-                    int sample_x = (int)center_x + sx;
-                    int sample_y = (int)center_y + sy;
-
-                    // Skip out of bounds
-                    if (sample_x < 0 || sample_x >= width ||
-                        sample_y < 0 || sample_y >= height) {
-                        // Treat out of bounds as "outside"
-                        if (is_inside) {
-                            float dx = sx;
-                            float dy = sy;
-                            float dist = sqrtf(dx * dx + dy * dy);
-                            if (dist < min_distance) {
-                                min_distance = dist;
-                            }
-                        }
-                        continue;
-                    }
-
-                    bool sample_inside = bitmap[sample_x + sample_y * width] > 127;
-
-                    // We only care about pixels with OPPOSITE state
-                    if (sample_inside != is_inside) {
-                        float dx = sx;
-                        float dy = sy;
-                        float dist = sqrtf(dx * dx + dy * dy);
-
-                        if (dist < min_distance) {
-                            min_distance = dist;
-                        }
-                    }
-                }
-            }
-
-            // Clamp distance to radius
-            min_distance = fminf(min_distance, radius);
-
-            // Normalize to 0-1 range
-            float normalized = min_distance / radius;
-
-            // Encode as SDF:
-            // Inside: 0.5 to 1.0 (0.5 at edge, 1.0 at center)
-            // Outside: 0.0 to 0.5 (0.0 far away, 0.5 at edge)
-            float alpha;
-            if (is_inside) {
-                alpha = 0.5f + (normalized * 0.5f);
-            } else {
-                alpha = 0.5f - (normalized * 0.5f);
-            }
-
-            alpha = fmaxf(0.0f, fminf(1.0f, alpha));
-            sdf_output[out_x + out_y * sdf_width] = (unsigned char)(alpha * 255.0f);
-        }
-    }
-
-    printf("  [SDF] Complete\n");
-}
-
 // Grow the atlas to accommodate more glyphs
 bool grow_atlas(Font* font) {
     unsigned int new_width = font->width;
@@ -218,84 +109,29 @@ bool grow_atlas(Font* font) {
     font->needs_update = false;
     return true;
 }
-// Add debug output to load_glyph to verify SDF generation
 
-// Fix 2: Proper monochrome loading for SDF, grayscale for normal
 static bool load_glyph(Font* font, uint32_t codepoint, Character *out_char) {
-    FT_Int32 load_flags;
-
-    if (font->render_mode == FONT_RENDER_SDF) {
-        // SDF: Load as 1-bit monochrome for clean edges
-        load_flags = FT_LOAD_TARGET_MONO;
-    } else {
-        // Normal: Load with antialiasing
-        load_flags = FT_LOAD_RENDER;
-    }
-
-    if (FT_Load_Char(font->face, codepoint, load_flags)) {
+    if (FT_Load_Char(font->face, codepoint, FT_LOAD_RENDER)) {
         fprintf(stderr, "Failed to load glyph U+%04X\n", codepoint);
         return false;
     }
 
     FT_GlyphSlot glyph = font->face->glyph;
 
-    // Render if needed
     if (glyph->format != FT_GLYPH_FORMAT_BITMAP) {
-        FT_Render_Mode render_mode = (font->render_mode == FONT_RENDER_SDF)
-                                      ? FT_RENDER_MODE_MONO
-                                      : FT_RENDER_MODE_NORMAL;
-        if (FT_Render_Glyph(glyph, render_mode)) {
+        if (FT_Render_Glyph(glyph, FT_RENDER_MODE_NORMAL)) {
             fprintf(stderr, "Failed to render glyph\n");
             return false;
         }
     }
 
-    unsigned char* temp_bitmap = NULL;
-    int bitmap_width = glyph->bitmap.width;
-    int bitmap_height = glyph->bitmap.rows;
-    unsigned char* source_bitmap = glyph->bitmap.buffer;
-
-    // Convert monochrome to 8-bit for SDF processing
-    if (font->render_mode == FONT_RENDER_SDF && glyph->bitmap.pixel_mode == FT_PIXEL_MODE_MONO) {
-        int pitch = abs(glyph->bitmap.pitch);
-        temp_bitmap = (unsigned char*)malloc(bitmap_width * bitmap_height);
-
-        for (int y = 0; y < bitmap_height; y++) {
-            for (int x = 0; x < bitmap_width; x++) {
-                int byte_index = y * pitch + (x >> 3);
-                int bit_index = 7 - (x & 7);
-                unsigned char bit = (glyph->bitmap.buffer[byte_index] >> bit_index) & 1;
-                temp_bitmap[x + y * bitmap_width] = bit ? 255 : 0;
-            }
-        }
-        source_bitmap = temp_bitmap;
-    }
-
-    unsigned int final_width = bitmap_width;
-    unsigned int final_height = bitmap_height;
-    unsigned char* final_bitmap = source_bitmap;
-    unsigned char* sdf_bitmap = NULL;
+    unsigned int final_width = glyph->bitmap.width;
+    unsigned int final_height = glyph->bitmap.rows;
+    unsigned char* final_bitmap = glyph->bitmap.buffer;
 
     int original_bitmap_left = glyph->bitmap_left;
     int original_bitmap_top = glyph->bitmap_top;
 
-    // Generate SDF if needed
-    if (font->render_mode == FONT_RENDER_SDF && bitmap_width > 0 && bitmap_height > 0) {
-        final_width = bitmap_width + font->sdf_spread * 2;
-        final_height = bitmap_height + font->sdf_spread * 2;
-
-        sdf_bitmap = (unsigned char*)malloc(final_width * final_height);
-        generate_sdf(source_bitmap, bitmap_width, bitmap_height, sdf_bitmap,
-                     final_width, final_height, font->sdf_spread);
-
-        final_bitmap = sdf_bitmap;
-
-        // Adjust metrics for padding
-        original_bitmap_left -= font->sdf_spread;
-        original_bitmap_top += font->sdf_spread;
-    }
-
-    // Check atlas space
     if (font->atlas_x + final_width + 1 >= font->width) {
         font->atlas_y += font->row_height;
         font->row_height = 0;
@@ -304,17 +140,14 @@ static bool load_glyph(Font* font, uint32_t codepoint, Character *out_char) {
 
     if (font->atlas_y + final_height >= font->height) {
         if (!grow_atlas(font)) {
-            if (sdf_bitmap) free(sdf_bitmap);
-            if (temp_bitmap) free(temp_bitmap);
             return false;
         }
     }
 
-    // Copy to atlas
     for (unsigned int y = 0; y < final_height; y++) {
         for (unsigned int x = 0; x < final_width; x++) {
             int atlas_y = font->atlas_y + y;
-            int glyph_y = final_height - 1 - y; // Flip vertically
+            int glyph_y = final_height - 1 - y;
             unsigned char value = final_bitmap[x + glyph_y * final_width];
 
             int atlas_idx = ((font->atlas_x + x) + (atlas_y * font->width)) * 4;
@@ -325,7 +158,6 @@ static bool load_glyph(Font* font, uint32_t codepoint, Character *out_char) {
         }
     }
 
-    // Store character metrics
     out_char->ax = glyph->advance.x >> 6;
     out_char->ay = glyph->advance.y >> 6;
     out_char->bw = final_width;
@@ -338,9 +170,6 @@ static bool load_glyph(Font* font, uint32_t codepoint, Character *out_char) {
     font->row_height = fmax(font->row_height, final_height);
     font->atlas_x += final_width + 1;
     font->needs_update = true;
-
-    if (sdf_bitmap) free(sdf_bitmap);
-    if (temp_bitmap) free(temp_bitmap);
 
     return true;
 }
@@ -383,7 +212,7 @@ Character* font_get_character(Font* font, uint32_t codepoint) {
 }
 
 // Internal font creation helper
-static Font* create_font_internal(FT_Face face, int fontSize, FontRenderMode mode, int sdf_spread) {
+static Font* create_font_internal(FT_Face face, int fontSize) {
     Font* font = (Font*)calloc(1, sizeof(Font));
     if (!font) {
         FT_Done_Face(face);
@@ -391,8 +220,6 @@ static Font* create_font_internal(FT_Face face, int fontSize, FontRenderMode mod
     }
 
     font->face = face;
-    font->render_mode = mode;
-    font->sdf_spread = sdf_spread;
     font->ascent = face->size->metrics.ascender >> 6;
     font->descent = -(face->size->metrics.descender >> 6);
     font->width = 2048;
@@ -438,16 +265,10 @@ static Font* create_font_internal(FT_Face face, int fontSize, FontRenderMode mod
         }
     }
 
-    // CRITICAL: Different formats for different font types
-    // SDF fonts MUST use UNORM (linear), normal fonts can use SRGB
-    VkFormat format = (mode == FONT_RENDER_SDF)
-                      ? VK_FORMAT_R8G8B8A8_UNORM   // Linear for distance data
-                      : VK_FORMAT_R8G8B8A8_SRGB;   // sRGB for color data
+    VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
 
 #ifdef DEBUG
-    printf("Creating %s font atlas with %s format\n",
-           mode == FONT_RENDER_SDF ? "SDF" : "Normal",
-           format == VK_FORMAT_R8G8B8A8_UNORM ? "UNORM" : "SRGB");
+    printf("Creating Normal font atlas with SRGB format\n");
 #endif
 
     if (!load_texture_from_rgba_with_format(&context, font->atlas_buffer,
@@ -476,34 +297,10 @@ Font* load_font(const char* fontPath, int fontSize) {
 #endif
     FT_Set_Pixel_Sizes(face, 0, fontSize);
 
-    return create_font_internal(face, fontSize, FONT_RENDER_NORMAL, 0);
-}
-
-Font* load_font_sdf(const char* fontPath, int fontSize, int spread) {
-    FT_Face face;
-    if (FT_New_Face(ft, fontPath, 0, &face)) {
-        fprintf(stderr, "Failed to load font: %s\n", fontPath);
-        return NULL;
-    }
-
-    // Render at HIGHER resolution for better SDF quality
-    // But not TOO high or you lose the benefit
-    int render_size = fontSize * 3;  // 3x is a good balance
-
-#ifdef DEBUG
-    printf("[LOADED FONT] %s render_size=%d (display=%d) (SDF, spread=%d)\n",
-           fontPath, render_size, fontSize, spread);
-#endif
-
-    FT_Set_Pixel_Sizes(face, 0, render_size);
-
-    // DON'T multiply spread here - use it as-is
-    Font* font = create_font_internal(face, render_size, FONT_RENDER_SDF, spread);
-
+    Font* font = create_font_internal(face, fontSize);
     if (font) {
         font->display_size = fontSize;
     }
-
     return font;
 }
 
@@ -552,49 +349,25 @@ float character(Font* font, uint32_t codepoint, float x, float y, Color color) {
     float v2 = ch->ty;
 
     if (vertexCount2D + 6 > MAX_VERTICES) {
-        fprintf(stderr, "Vertex buffer full, cannot render character\n");
-        return ch->ax;
-    }
-
-    Vertex2D quad[6] = {
-        {{xpos, ypos + h}, color, {u1, v1}, 0},
-        {{xpos, ypos}, color, {u1, v2}, 0},
-        {{xpos + w, ypos}, color, {u2, v2}, 0},
-
-        {{xpos, ypos + h}, color, {u1, v1}, 0},
-        {{xpos + w, ypos}, color, {u2, v2}, 0},
-        {{xpos + w, ypos + h}, color, {u2, v1}, 0}
-    };
-
-    int batchIndex = -1;
-
-    if (textureBatchCount > 0) {
-        TextureBatch* lastBatch = &textureBatches[textureBatchCount - 1];
-        bool same_texture = (lastBatch->texture == &font->texture);
-        bool same_mode = (lastBatch->is_sdf == (font->render_mode == FONT_RENDER_SDF));
-
-        if (same_texture && same_mode) {
-            batchIndex = textureBatchCount - 1;
-        }
-    }
-
-    if (batchIndex == -1) {
-        if (textureBatchCount >= MAX_TEXTURES) {
-            fprintf(stderr, "Too many texture batches!\n");
+            fprintf(stderr, "Vertex buffer full, cannot render character\n");
             return ch->ax;
         }
-        batchIndex = textureBatchCount++;
-        textureBatches[batchIndex].texture = &font->texture;
-        textureBatches[batchIndex].startVertex = coloredVertexCount + (vertexCount2D - coloredVertexCount);
-        textureBatches[batchIndex].vertexCount = 0;
-        textureBatches[batchIndex].is_sdf = (font->render_mode == FONT_RENDER_SDF);
-    }
 
-    memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
-    vertexCount2D += 6;
-    textureBatches[batchIndex].vertexCount += 6;
+        int32_t slot = (int32_t)font->texture.bindlessSlot;
+        Vertex2D quad[6] = {
+            {{xpos, ypos + h}, color, {u1, v1}, slot},
+            {{xpos, ypos}, color, {u1, v2}, slot},
+            {{xpos + w, ypos}, color, {u2, v2}, slot},
 
-    return ch->ax;
+            {{xpos, ypos + h}, color, {u1, v1}, slot},
+            {{xpos + w, ypos}, color, {u2, v2}, slot},
+            {{xpos + w, ypos + h}, color, {u2, v1}, slot}
+        };
+
+        memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+        vertexCount2D += 6;
+
+        return ch->ax;
 }
 
 void text(Font* font, const char* text_str, float x, float y, Color color) {
@@ -611,22 +384,7 @@ void text(Font* font, const char* text_str, float x, float y, Color color) {
     const float inv_th    = 1.0f / (float)font->height;
     const float descent_f = (float)font->descent;
 
-    // Cache the batch index for this font — almost always the last batch
-    int batchIndex = -1;
-    if (textureBatchCount > 0) {
-        TextureBatch *last = &textureBatches[textureBatchCount - 1];
-        if (last->texture == &font->texture &&
-            last->is_sdf  == (font->render_mode == FONT_RENDER_SDF))
-            batchIndex = textureBatchCount - 1;
-    }
-    if (batchIndex == -1) {
-        if (textureBatchCount >= MAX_TEXTURES) return;
-        batchIndex = textureBatchCount++;
-        textureBatches[batchIndex].texture     = &font->texture;
-        textureBatches[batchIndex].startVertex = coloredVertexCount + (vertexCount2D - coloredVertexCount);
-        textureBatches[batchIndex].vertexCount = 0;
-        textureBatches[batchIndex].is_sdf      = (font->render_mode == FONT_RENDER_SDF);
-    }
+    int32_t slot = (int32_t)font->texture.bindlessSlot;
 
     while (*p) {
         if (*p == '\n') {
@@ -656,14 +414,13 @@ void text(Font* font, const char* text_str, float x, float y, Color color) {
             float v2 = ch->ty;
 
             Vertex2D *v = &vertices2D[vertexCount2D];
-            v[0] = (Vertex2D){{xpos,     ypos + h}, color, {u1, v1}, 0};
-            v[1] = (Vertex2D){{xpos,     ypos    }, color, {u1, v2}, 0};
-            v[2] = (Vertex2D){{xpos + w, ypos    }, color, {u2, v2}, 0};
-            v[3] = (Vertex2D){{xpos,     ypos + h}, color, {u1, v1}, 0};
-            v[4] = (Vertex2D){{xpos + w, ypos    }, color, {u2, v2}, 0};
-            v[5] = (Vertex2D){{xpos + w, ypos + h}, color, {u2, v1}, 0};
+            v[0] = (Vertex2D){{xpos,     ypos + h}, color, {u1, v1}, slot};
+            v[1] = (Vertex2D){{xpos,     ypos    }, color, {u1, v2}, slot};
+            v[2] = (Vertex2D){{xpos + w, ypos    }, color, {u2, v2}, slot};
+            v[3] = (Vertex2D){{xpos,     ypos + h}, color, {u1, v1}, slot};
+            v[4] = (Vertex2D){{xpos + w, ypos    }, color, {u2, v2}, slot};
+            v[5] = (Vertex2D){{xpos + w, ypos + h}, color, {u2, v1}, slot};
             vertexCount2D += 6;
-            textureBatches[batchIndex].vertexCount += 6;
         }
 
         x += ch->ax * scale;
@@ -673,152 +430,100 @@ void text(Font* font, const char* text_str, float x, float y, Color color) {
 void text3D(Font* font, const char* text_str, vec3 position, float size, Color color) {
     if (!font || !text_str) return;
 
+    update_texture_if_needed(font);
+
+    const float inv_h  = 1.0f / (float)font->height;
+    const float inv_w  = 1.0f / (float)font->width;
+    const float scale  = size * inv_h;
+
+    /* ── pass 1: measure total width so we can centre the string ─────── */
     float totalWidth = 0.0f;
-    const unsigned char* p = (const unsigned char*)text_str;
-
-    while (*p && *p != '\n') {
-        uint32_t codepoint;
-        size_t bytes_read;
-
-        if ((*p & 0x80) == 0) {
-            codepoint = *p;
-            bytes_read = 1;
-        } else if ((*p & 0xE0) == 0xC0) {
-            codepoint = (*p & 0x1F) << 6 | (*(p+1) & 0x3F);
-            bytes_read = 2;
-        } else if ((*p & 0xF0) == 0xE0) {
-            codepoint = (*p & 0x0F) << 12 | (*(p+1) & 0x3F) << 6 | (*(p+2) & 0x3F);
-            bytes_read = 3;
-        } else if ((*p & 0xF8) == 0xF0) {
-            codepoint = (*p & 0x07) << 18 | (*(p+1) & 0x3F) << 12 |
-                       (*(p+2) & 0x3F) << 6 | (*(p+3) & 0x3F);
-            bytes_read = 4;
-        } else {
-            p++;
-            continue;
+    {
+        const unsigned char* p = (const unsigned char*)text_str;
+        while (*p && *p != '\n') {
+            if ((*p & 0xC0) == 0x80) { p++; continue; }
+            uint32_t cp = utf8_decode(&p);
+            Character* ch = font_get_character(font, cp);
+            if (ch) totalWidth += ch->ax * scale;
         }
-
-        Character *ch = font_get_character(font, codepoint);
-        if (ch) {
-            totalWidth += ch->ax * size / (float)font->height;
-        }
-        p += bytes_read;
     }
 
-    float startX = -totalWidth / 2.0f;
-    float x = startX;
+    /* ── set material once for the whole string ──────────────────────── */
+    ImmMaterial mat = {
+        .baseColorFactor    = {color.r, color.g, color.b, color.a},
+        .metallicFactor     = 0.0f,
+        .roughnessFactor    = 1.0f,
+        .emissiveStrength   = 1.0f,
+        .isUnlit            = 1,
+        .emissiveFactor     = {0.0f, 0.0f, 0.0f},
+        .albedoIndex        = (int)font->texture.bindlessSlot,
+        .normalMapIndex     = -1,
+        .metallicRoughIndex = -1,
+        .aoIndex            = -1,
+        .emissiveIndex      = -1,
+    };
+    imm_set_material(&mat);
 
-    p = (const unsigned char*)text_str;
+    /* ── allocate ONE SSBO slot for the entire string ────────────────── */
+    mat4 identity;
+    glm_mat4_identity(identity);
+    int shared_slot = imm_alloc_slot(identity);
 
+    /* ── pass 2: build all glyph quads into a contiguous vertex range ── */
+    float x = -totalWidth * 0.5f;
+    uint32_t string_first = UINT32_MAX;
+    uint32_t string_count = 0;
+
+    const unsigned char* p = (const unsigned char*)text_str;
     while (*p && *p != '\n') {
-        uint32_t codepoint;
-        size_t bytes_read;
+        if ((*p & 0xC0) == 0x80) { p++; continue; }
+        uint32_t cp = utf8_decode(&p);
 
-        if ((*p & 0x80) == 0) {
-            codepoint = *p;
-            bytes_read = 1;
-        } else if ((*p & 0xE0) == 0xC0) {
-            codepoint = (*p & 0x1F) << 6 | (*(p+1) & 0x3F);
-            bytes_read = 2;
-        } else if ((*p & 0xF0) == 0xE0) {
-            codepoint = (*p & 0x0F) << 12 | (*(p+1) & 0x3F) << 6 | (*(p+2) & 0x3F);
-            bytes_read = 3;
-        } else if ((*p & 0xF8) == 0xF0) {
-            codepoint = (*p & 0x07) << 18 | (*(p+1) & 0x3F) << 12 |
-                       (*(p+2) & 0x3F) << 6 | (*(p+3) & 0x3F);
-            bytes_read = 4;
-        } else {
-            p++;
-            continue;
-        }
+        Character* ch = font_get_character(font, cp);
+        if (!ch) { x += font->ascent * scale; continue; }
 
-        Character *ch = font_get_character(font, codepoint);
-        if (!ch) {
-            p += bytes_read;
-            continue;
-        }
+        float cw   = ch->bw * scale;
+        float ch_h = ch->bh * scale;
 
-        float charWidth = ch->bw * size / (float)font->height;
-        float charHeight = ch->bh * size / (float)font->height;
+        if (cw > 0.0f && ch_h > 0.0f) {
+            float xpos = position[0] + x + ch->bl * scale;
+            float ypos = position[1]
+                         - (ch->bh - ch->bt) * scale
+                         - font->descent      * scale;
+            float zpos = position[2];
 
-        float xpos = x + ch->bl * size / (float)font->height;
-        float ypos = -(ch->bh - ch->bt) * size / (float)font->height -
-                     font->descent * size / (float)font->height;
-
-        if (ch->bw > 0 && ch->bh > 0) {
-            if (vertex_count_3D_textured + 6 > MAX_VERTICES) {
-                fprintf(stderr, "3D textured vertex buffer full\n");
-                return;
-            }
-
+            /* UV: atlas stores glyphs top-down; flip V so text reads correctly */
             float u1 = ch->tx;
-            float v1 = ch->ty + ch->bh / (float)font->height;
-            float u2 = ch->tx + ch->bw / (float)font->width;
-            float v2 = ch->ty;
+            float v1 = ch->ty;
+            float u2 = ch->tx + ch->bw * inv_w;
+            float v2 = ch->ty + ch->bh * inv_h;
 
-            Vertex quad[6] = {
-                {.pos = {position[0] + xpos, position[1] + ypos + charHeight, position[2]},
-                 .color = {color.r, color.g, color.b, color.a},
-                 .normal = {0.0f, 0.0f, 1.0f}, .texCoord = {u2, v1}},
-                {.pos = {position[0] + xpos, position[1] + ypos, position[2]},
-                 .color = {color.r, color.g, color.b, color.a},
-                 .normal = {0.0f, 0.0f, 1.0f}, .texCoord = {u2, v2}},
-                {.pos = {position[0] + xpos + charWidth, position[1] + ypos, position[2]},
-                 .color = {color.r, color.g, color.b, color.a},
-                 .normal = {0.0f, 0.0f, 1.0f}, .texCoord = {u1, v2}},
-                {.pos = {position[0] + xpos, position[1] + ypos + charHeight, position[2]},
-                 .color = {color.r, color.g, color.b, color.a},
-                 .normal = {0.0f, 0.0f, 1.0f}, .texCoord = {u2, v1}},
-                {.pos = {position[0] + xpos + charWidth, position[1] + ypos, position[2]},
-                 .color = {color.r, color.g, color.b, color.a},
-                 .normal = {0.0f, 0.0f, 1.0f}, .texCoord = {u1, v2}},
-                {.pos = {position[0] + xpos + charWidth, position[1] + ypos + charHeight, position[2]},
-                 .color = {color.r, color.g, color.b, color.a},
-                 .normal = {0.0f, 0.0f, 1.0f}, .texCoord = {u1, v1}}
+            Vertex verts[6] = {
+                /* tri 0 */
+                {.pos={xpos,      ypos+ch_h, zpos}, .color={color.r,color.g,color.b,color.a}, .normal={0,0,1}, .texCoord={u1,v1}, .tangent={1,0,0,1}},
+                {.pos={xpos,      ypos,      zpos}, .color={color.r,color.g,color.b,color.a}, .normal={0,0,1}, .texCoord={u1,v2}, .tangent={1,0,0,1}},
+                {.pos={xpos+cw,   ypos,      zpos}, .color={color.r,color.g,color.b,color.a}, .normal={0,0,1}, .texCoord={u2,v2}, .tangent={1,0,0,1}},
+                /* tri 1 */
+                {.pos={xpos,      ypos+ch_h, zpos}, .color={color.r,color.g,color.b,color.a}, .normal={0,0,1}, .texCoord={u1,v1}, .tangent={1,0,0,1}},
+                {.pos={xpos+cw,   ypos,      zpos}, .color={color.r,color.g,color.b,color.a}, .normal={0,0,1}, .texCoord={u2,v2}, .tangent={1,0,0,1}},
+                {.pos={xpos+cw,   ypos+ch_h, zpos}, .color={color.r,color.g,color.b,color.a}, .normal={0,0,1}, .texCoord={u2,v1}, .tangent={1,0,0,1}},
             };
 
-            int batchIndex = -1;
-
-            // CRITICAL: Check both texture AND sdf mode
-            if (texture3DBatchCount > 0) {
-                Texture3DBatch* lastBatch = &texture3DBatches[texture3DBatchCount - 1];
-                bool same_texture = (lastBatch->texture == &font->texture);
-                bool same_mode = (lastBatch->is_sdf == (font->render_mode == FONT_RENDER_SDF));
-
-                if (same_texture && same_mode) {
-                    batchIndex = texture3DBatchCount - 1;
-                }
+            uint32_t first = imm_append_vertices(verts, 6);
+            if (first != UINT32_MAX) {
+                if (string_first == UINT32_MAX) string_first = first;
+                string_count += 6;
             }
-
-            // Create new batch if needed
-            if (batchIndex == -1) {
-                if (texture3DBatchCount >= MAX_TEXTURES) {
-                    fprintf(stderr, "Too many 3D texture batches!\n");
-                    return;
-                }
-                batchIndex = texture3DBatchCount++;
-                texture3DBatches[batchIndex].texture = &font->texture;
-                texture3DBatches[batchIndex].startVertex = vertex_count_3D_textured;
-                texture3DBatches[batchIndex].vertexCount = 0;
-
-                // CRITICAL: Set based on font's render mode
-                texture3DBatches[batchIndex].is_sdf = (font->render_mode == FONT_RENDER_SDF);
-
-                // Debug output
-                /* printf("Created 3D batch #%d for font: texture=%p, is_sdf=%d\n", */
-                /*        batchIndex, (void*)&font->texture, texture3DBatches[batchIndex].is_sdf); */
-            }
-
-            memcpy(&vertices3D_textured[vertex_count_3D_textured], quad, sizeof(quad));
-            vertex_count_3D_textured += 6;
-            texture3DBatches[batchIndex].vertexCount += 6;
         }
 
-        x += ch->ax * size / (float)font->height;
-        p += bytes_read;
+        x += ch->ax * scale;
     }
 
-    update_texture_if_needed(font);
+    /* ── one draw call for the whole string ─────────────────────────── */
+    if (string_first != UINT32_MAX && string_count > 0)
+        imm_emit_with_slot(string_first, string_count, shared_slot);
+
+    imm_reset_material();
 }
 
 static double last_fps_time = 0.0;

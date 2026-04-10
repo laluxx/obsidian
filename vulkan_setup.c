@@ -9,15 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "frag.frag.spv.h"
-#include "vert.vert.spv.h"
-#include "vert_indirect.vert.spv.h"
+#include "pbr.vert.spv.h"
+#include "pbr.frag.spv.h"
 #include "2D.vert.spv.h"
 #include "2D.frag.spv.h"
-#include "texture.frag.spv.h"
-#include "texture3D.frag.spv.h"
-#include "sdf.frag.spv.h"
-#include "sdf3D.frag.spv.h"
 #include "cull.comp.spv.h"
 
 /// Validation
@@ -45,6 +40,8 @@ VkPipeline pipelineIndirectTextured = VK_NULL_HANDLE;
 
 /// Helpers
 
+static void createBuffer(VulkanContext* ctx, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer* buffer, VkDeviceMemory* bufferMemory);
+
 /* Create a shader module from an embedded SPIR-V byte array. */
 static VkShaderModule createShaderModule(VkDevice device,
                                          const uint8_t* code,
@@ -67,7 +64,7 @@ static VkShaderModule createShaderModule(VkDevice device,
 static void fill3DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
                                VkPipelineInputAssemblyStateCreateInfo* ia,
                                VkVertexInputBindingDescription*        bind,
-                               VkVertexInputAttributeDescription       attrs[4],
+                               VkVertexInputAttributeDescription       attrs[5],
                                VkPrimitiveTopology                     topology)
 {
     *bind = (VkVertexInputBindingDescription){
@@ -79,12 +76,13 @@ static void fill3DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
     attrs[1] = (VkVertexInputAttributeDescription){.location=1, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex, color)};
     attrs[2] = (VkVertexInputAttributeDescription){.location=2, .binding=0, .format=VK_FORMAT_R32G32B32_SFLOAT,    .offset=offsetof(Vertex, normal)};
     attrs[3] = (VkVertexInputAttributeDescription){.location=3, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,       .offset=offsetof(Vertex, texCoord)};
+    attrs[4] = (VkVertexInputAttributeDescription){.location=4, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex, tangent)};
 
     *vi = (VkPipelineVertexInputStateCreateInfo){
         .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount   = 1,
         .pVertexBindingDescriptions      = bind,
-        .vertexAttributeDescriptionCount = 4,
+        .vertexAttributeDescriptionCount = 5,
         .pVertexAttributeDescriptions    = attrs
     };
     *ia = (VkPipelineInputAssemblyStateCreateInfo){
@@ -94,11 +92,12 @@ static void fill3DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
     };
 }
 
+
 /* Shared vertex-input / input-assembly structs for 2D geometry. */
 static void fill2DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
                                VkPipelineInputAssemblyStateCreateInfo* ia,
                                VkVertexInputBindingDescription*        bind,
-                               VkVertexInputAttributeDescription       attrs[3])
+                               VkVertexInputAttributeDescription       attrs[4])
 {
     *bind = (VkVertexInputBindingDescription){
         .binding   = 0,
@@ -108,12 +107,13 @@ static void fill2DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
     attrs[0] = (VkVertexInputAttributeDescription){.location=0, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,       .offset=offsetof(Vertex2D, pos)};
     attrs[1] = (VkVertexInputAttributeDescription){.location=1, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex2D, color)};
     attrs[2] = (VkVertexInputAttributeDescription){.location=2, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,       .offset=offsetof(Vertex2D, texCoord)};
+    attrs[3] = (VkVertexInputAttributeDescription){.location=3, .binding=0, .format=VK_FORMAT_R32G32_SINT,         .offset=offsetof(Vertex2D, textureIndex)};
 
     *vi = (VkPipelineVertexInputStateCreateInfo){
         .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount   = 1,
         .pVertexBindingDescriptions      = bind,
-        .vertexAttributeDescriptionCount = 3,
+        .vertexAttributeDescriptionCount = 4,
         .pVertexAttributeDescriptions    = attrs
     };
     *ia = (VkPipelineInputAssemblyStateCreateInfo){
@@ -352,6 +352,13 @@ void createLogicalDevice(VulkanContext* ctx)
 
     VkPhysicalDeviceFeatures features = { .wideLines = VK_TRUE, .multiDrawIndirect = VK_TRUE };
 
+    VkPhysicalDeviceVulkan11Features features11 = {
+        .sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .pNext                = indexingFeatures.pNext,
+        .shaderDrawParameters = VK_TRUE,
+    };
+    indexingFeatures.pNext = &features11;
+
     VkDeviceCreateInfo ci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext                   = &indexingFeatures,
@@ -519,12 +526,12 @@ void createRenderPass(VulkanContext* ctx)
 
 void createDescriptorSetLayout(VulkanContext* ctx)
 {
-    /* set=0 : UBO (used by all 3D pipelines) */
+    /* set=0 : UBO (used by all 3D pipelines — vertex AND fragment read cameraPos/time) */
     VkDescriptorSetLayoutBinding b = {
         .binding         = 0,
         .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT
+        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
     };
     VkDescriptorSetLayoutCreateInfo ci = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -636,329 +643,179 @@ void createDescriptorSet(VulkanContext* ctx)
 //
 void createAllPipelineLayouts(VulkanContext* ctx)
 {
+    /* 2D push: mat4 projection, vertex stage only */
     VkPushConstantRange mat4Range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset     = 0,
         .size       = sizeof(mat4)
     };
+
+    /* 3D push: PushConstants (16 bytes), both stages */
     VkPushConstantRange pcRange = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset     = 0,
         .size       = sizeof(PushConstants)
     };
-    (void)0; /* tex3DSets removed — 3D textured layout now uses 3-set variant below */
 
-    /* 2D no-texture */
-    vkCreatePipelineLayout(ctx->device,
-        &(VkPipelineLayoutCreateInfo){
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &mat4Range
-        }, NULL, &ctx->pipelineLayout2D);
-
-    /* 2D textured / SDF (same layout — both need sampler at set=0 and mat4 push) */
+    /* ── 2D unified layout: set=0 bindless array, push mat4 in VS ───── */
     vkCreatePipelineLayout(ctx->device,
         &(VkPipelineLayoutCreateInfo){
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount         = 1,
-            .pSetLayouts            = &ctx->descriptorSetLayout2D,
+            .pSetLayouts            = &ctx->bindlessSetLayout,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges    = &mat4Range
         }, NULL, &ctx->pipelineLayoutTextured2D);
-    /* SDF2D reuses pipelineLayoutTextured2D — no separate field needed */
-    ctx->pipelineLayoutSDF2D = ctx->pipelineLayoutTextured2D;
+    /* aliases — both 2D paths use the same unified layout */
+    ctx->pipelineLayout2D    = ctx->pipelineLayoutTextured2D;
 
-    /* 3D solid / line: set=0 UBO only, push constants for per-draw data */
-    vkCreatePipelineLayout(ctx->device,
-        &(VkPipelineLayoutCreateInfo){
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 1,
-            .pSetLayouts            = &ctx->descriptorSetLayout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pcRange
-        }, NULL, &ctx->pipelineLayout);
-    ctx->pipelineLayoutLine = ctx->pipelineLayout;
-
-    /* 3D textured / SDF3D: set=0 UBO, set=1 bindless array, push constants for per-mesh data.
-       No SSBO set here — the direct draw path uses push constants, not SSBO.
-       The indirect pipeline layout is created separately after createMeshSSBO().             */
-    VkDescriptorSetLayout tex3DAllSets[2] = {
-        ctx->descriptorSetLayout,
-        ctx->bindlessSetLayout,
+    /* ── 3D unified PBR layout ───────────────────────────────────────────
+       set=0  UBO
+       set=1  bindless texture array
+       set=2  SSBO  (gltf meshes OR immediate-mode slots)
+       set=3  lighting UBO
+       push   PushConstants { aoEnabled, iblEnabled, meshIndex, _pad }   */
+    VkDescriptorSetLayout pbr3DSets[4] = {
+        ctx->descriptorSetLayout,   /* set=0 UBO     */
+        ctx->bindlessSetLayout,     /* set=1 bindless*/
+        ctx->ssboSetLayout,         /* set=2 SSBO    */
+        ctx->lightingSetLayout,     /* set=3 lighting*/
     };
     vkCreatePipelineLayout(ctx->device,
         &(VkPipelineLayoutCreateInfo){
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 2,
-            .pSetLayouts            = tex3DAllSets,
+            .setLayoutCount         = 4,
+            .pSetLayouts            = pbr3DSets,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges    = &pcRange
-        }, NULL, &ctx->pipelineLayoutTextured3D);
-    ctx->pipelineLayoutSDF3D = ctx->pipelineLayoutTextured3D;
+        }, NULL, &ctx->pipelineLayout);
+
+    /* All 3D variants share the same layout */
+    ctx->pipelineLayoutLine       = ctx->pipelineLayout;
+    ctx->pipelineLayoutTextured3D = ctx->pipelineLayout;
+    ctx->pipelineLayoutIndirect   = ctx->pipelineLayout;
 }
 
 /// GRAPHICS PIPELINES
 // all created in ONE batch call
-
 void createGraphicsPipelines(VulkanContext* ctx)
 {
-    /* ── pipeline cache ─────────────────────────────────────────────── */
-    VkPipelineCacheCreateInfo cacheCI = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
-    };
+    VkPipelineCacheCreateInfo cacheCI = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
     vkCreatePipelineCache(ctx->device, &cacheCI, NULL, &pipelineCache);
 
-    /* ── shared pipeline state ──────────────────────────────────────── */
     VkPipelineRasterizationStateCreateInfo rast1  = makeRasterizer(1.0f);
     VkPipelineRasterizationStateCreateInfo rastLW = makeRasterizer(2.0f);
+    VkPipelineColorBlendStateCreateInfo    blend  = makeColorBlend(&kBlendAlpha);
+    VkPipelineDepthStencilStateCreateInfo  depth3D = makeDepth(true,  true);
+    VkPipelineDepthStencilStateCreateInfo  depth2D = makeDepth(false, false);
 
-    VkPipelineColorBlendStateCreateInfo   blend     = makeColorBlend(&kBlendAlpha);
-    VkPipelineDepthStencilStateCreateInfo depth3D   = makeDepth(true,  true);
-    VkPipelineDepthStencilStateCreateInfo depth2D   = makeDepth(false, false);
-
-    /* ── vertex input structs (per family, reused across pipelines) ─── */
-    VkVertexInputBindingDescription   bind3D;
-    VkVertexInputAttributeDescription attr3D[4];
-    VkPipelineVertexInputStateCreateInfo  vi3D;
+    /* 3D vertex input */
+    VkVertexInputBindingDescription        bind3D;
+    VkVertexInputAttributeDescription      attr3D[5];
+    VkPipelineVertexInputStateCreateInfo   vi3D;
     VkPipelineInputAssemblyStateCreateInfo ia3D, iaLine;
     fill3DVertexInput(&vi3D, &ia3D, &bind3D, attr3D, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-
-    VkVertexInputBindingDescription   bind2D;
-    VkVertexInputAttributeDescription attr2D[3];
-    VkPipelineVertexInputStateCreateInfo  vi2D;
-    VkPipelineInputAssemblyStateCreateInfo ia2D;
-    fill2DVertexInput(&vi2D, &ia2D, &bind2D, attr2D);
-
-    /* line topology variant — reuses bind3D / attr3D already filled */
     iaLine = (VkPipelineInputAssemblyStateCreateInfo){
         .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST
     };
 
-    /* ── shader modules ─────────────────────────────────────────────── */
-    VkShaderModule vsMain   = createShaderModule(ctx->device, vert_vert_spv,     sizeof(vert_vert_spv));
-    VkShaderModule vs2D     = createShaderModule(ctx->device, __2D_vert_spv,     sizeof(__2D_vert_spv));
-    VkShaderModule fsColor  = createShaderModule(ctx->device, frag_frag_spv,     sizeof(frag_frag_spv));
-    VkShaderModule fs2D     = createShaderModule(ctx->device, __2D_frag_spv,     sizeof(__2D_frag_spv));
-    VkShaderModule fsTex2D  = createShaderModule(ctx->device, texture_frag_spv,  sizeof(texture_frag_spv));
-    VkShaderModule fsTex3D  = createShaderModule(ctx->device, texture3D_frag_spv,sizeof(texture3D_frag_spv));
-    VkShaderModule fsSDF2D  = createShaderModule(ctx->device, sdf_frag_spv,      sizeof(sdf_frag_spv));
-    VkShaderModule fsSDF3D  = createShaderModule(ctx->device, sdf3D_frag_spv,    sizeof(sdf3D_frag_spv));
+    /* 2D vertex input */
+    VkVertexInputBindingDescription        bind2D;
+    VkVertexInputAttributeDescription      attr2D[4];
+    VkPipelineVertexInputStateCreateInfo   vi2D;
+    VkPipelineInputAssemblyStateCreateInfo ia2D;
+    fill2DVertexInput(&vi2D, &ia2D, &bind2D, attr2D);
 
-    /* ── shader stage arrays ────────────────────────────────────────── */
+    /* ── shader modules ── */
+    VkShaderModule vsPBR  = createShaderModule(ctx->device, pbr_vert_spv,  sizeof(pbr_vert_spv));
+    VkShaderModule fsPBR  = createShaderModule(ctx->device, pbr_frag_spv,  sizeof(pbr_frag_spv));
+    VkShaderModule vs2D   = createShaderModule(ctx->device, __2D_vert_spv, sizeof(__2D_vert_spv));
+    VkShaderModule fs2D   = createShaderModule(ctx->device, __2D_frag_spv, sizeof(__2D_frag_spv));
+
 #define STAGE(stg, mod) \
     {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, stg, mod, "main", NULL}
 
-    VkPipelineShaderStageCreateInfo ss3DColor[2]  = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsMain),
-                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsColor)  };
-    VkPipelineShaderStageCreateInfo ss3DTex[2]    = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsMain),
-                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsTex3D)  };
-    VkPipelineShaderStageCreateInfo ss3DSDF[2]    = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsMain),
-                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsSDF3D)  };
-    VkPipelineShaderStageCreateInfo ss2DColor[2]  = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
-                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fs2D)     };
-    VkPipelineShaderStageCreateInfo ss2DTex[2]    = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
-                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsTex2D)  };
-    VkPipelineShaderStageCreateInfo ss2DSDF[2]    = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
-                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsSDF2D)  };
-    /* ── 7 pipeline create-infos ────────────────────────────────────── */
+    VkPipelineShaderStageCreateInfo ssPBR[2]     = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsPBR),
+                                                      STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsPBR) };
+    VkPipelineShaderStageCreateInfo ss2DColor[2] = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
+                                                      STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fs2D)  };
+
     /*
        Index  Pipeline
-       0      3D solid (color)
-       1      3D textured
-       2      3D SDF
-       3      3D line
-       4      2D color
-       5      2D textured
-       6      2D SDF
+       0      3D PBR triangles  (direct + indirect, same pipeline)
+       1      3D PBR lines
+       2      2D color
+       3      2D textured
     */
-    VkGraphicsPipelineCreateInfo pci[7] = {
-        /* 0: 3D solid */
+    VkGraphicsPipelineCreateInfo pci[4] = {
+        /* 0: 3D PBR triangles */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ss3DColor,
-            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &ia3D,
+            .stageCount          = 2, .pStages             = ssPBR,
+            .pVertexInputState   = &vi3D, .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
+            .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
+            .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
             .pDynamicState       = &kDynamicState,
             .layout              = ctx->pipelineLayout,
             .renderPass          = ctx->renderPass
         },
-        /* 1: 3D textured */
+        /* 1: 3D PBR lines */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ss3DTex,
-            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &ia3D,
+            .stageCount          = 2, .pStages             = ssPBR,
+            .pVertexInputState   = &vi3D, .pInputAssemblyState = &iaLine,
             .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
+            .pRasterizationState = &rastLW, .pMultisampleState = &kMultisampling,
+            .pColorBlendState    = &blend,  .pDepthStencilState= &depth3D,
             .pDynamicState       = &kDynamicState,
-            .layout              = ctx->pipelineLayoutTextured3D,
+            .layout              = ctx->pipelineLayout,
             .renderPass          = ctx->renderPass
         },
-        /* 2: 3D SDF */
-        {
-            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ss3DSDF,
-            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &ia3D,
-            .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
-            .pDynamicState       = &kDynamicState,
-            .layout              = ctx->pipelineLayoutSDF3D,
-            .renderPass          = ctx->renderPass
-        },
-        /* 3: 3D line */
-        {
-            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ss3DColor,
-            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &iaLine,
-            .pViewportState      = &kViewportState,
-            .pRasterizationState = &rastLW,.pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
-            .pDynamicState       = &kDynamicState,
-            .layout              = ctx->pipelineLayoutLine,
-            .renderPass          = ctx->renderPass
-        },
-        /* 4: 2D color */
+        /* 2: 2D unified (color + texture, driven by textureIndex) */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .stageCount          = 2, .pStages             = ss2DColor,
-            .pVertexInputState   = &vi2D,  .pInputAssemblyState = &ia2D,
+            .pVertexInputState   = &vi2D, .pInputAssemblyState = &ia2D,
             .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth2D,
-            .pDynamicState       = &kDynamicState,
-            .layout              = ctx->pipelineLayout2D,
-            .renderPass          = ctx->renderPass
-        },
-        /* 5: 2D textured */
-        {
-            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ss2DTex,
-            .pVertexInputState   = &vi2D,  .pInputAssemblyState = &ia2D,
-            .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth2D,
+            .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
+            .pColorBlendState    = &blend, .pDepthStencilState = &depth2D,
             .pDynamicState       = &kDynamicState,
             .layout              = ctx->pipelineLayoutTextured2D,
             .renderPass          = ctx->renderPass
         },
-        /* 6: 2D SDF */
-        {
-            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ss2DSDF,
-            .pVertexInputState   = &vi2D,  .pInputAssemblyState = &ia2D,
-            .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth2D,
-            .pDynamicState       = &kDynamicState,
-            .layout              = ctx->pipelineLayoutSDF2D,
-            .renderPass          = ctx->renderPass
-        }
     };
 
-    /* indirect vertex shader module */
-    VkShaderModule vsIndirect = createShaderModule(ctx->device,
-                                    vert_indirect_vert_spv,
-                                    sizeof(vert_indirect_vert_spv));
-
-    VkPipelineShaderStageCreateInfo ssIndirectSolid[2] = {
-        STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsIndirect),
-        STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsColor)
-    };
-
-    VkPipelineShaderStageCreateInfo ssIndirectTex[2] = {
-        STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsIndirect),
-        STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsTex3D)
-    };
-
-    VkGraphicsPipelineCreateInfo pciIndirect[2] = {
-        /* indirect solid */
-        {
-            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ssIndirectSolid,
-            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &ia3D,
-            .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
-            .pDynamicState       = &kDynamicState,
-            .layout              = ctx->pipelineLayoutIndirect,
-            .renderPass          = ctx->renderPass
-        },
-        /* indirect textured */
-        {
-            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount          = 2, .pStages             = ssIndirectTex,
-            .pVertexInputState   = &vi3D,  .pInputAssemblyState = &ia3D,
-            .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState   = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState  = &depth3D,
-            .pDynamicState       = &kDynamicState,
-            .layout              = ctx->pipelineLayoutIndirect,
-            .renderPass          = ctx->renderPass
-        }
-    };
-
-    VkPipeline indirectPipelines[2];
-    VkPipeline pipelines[7];
-    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 7, pci, NULL, pipelines) != VK_SUCCESS ||
-        vkCreateGraphicsPipelines(ctx->device, pipelineCache, 2, pciIndirect, NULL, indirectPipelines) != VK_SUCCESS) {
+    VkPipeline pipelines[3];
+    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 3, pci, NULL, pipelines) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipelines\n");
         exit(EXIT_FAILURE);
     }
 
-    pipelineIndirectSolid    = indirectPipelines[0];
-    pipelineIndirectTextured = indirectPipelines[1];
-    vkDestroyShaderModule(ctx->device, vsIndirect, NULL);
-
 #undef STAGE
 
-    ctx->graphicsPipeline          = pipelines[0];
-    ctx->graphicsPipelineTextured3D= pipelines[1];
-    ctx->graphicsPipelineSDF3D     = pipelines[2];
-    ctx->graphicsPipelineLine      = pipelines[3];
-    ctx->graphicsPipeline2D        = pipelines[4];
-    ctx->graphicsPipelineTextured2D= pipelines[5];
-    ctx->graphicsPipelineSDF2D     = pipelines[6];
+    /* One PBR pipeline serves all 3D draw paths */
+    ctx->graphicsPipeline           = pipelines[0];
+    ctx->graphicsPipelineTextured3D = pipelines[0];
+    ctx->graphicsPipelineLine       = pipelines[1];
+    pipelineIndirectSolid           = pipelines[0];
+    pipelineIndirectTextured        = pipelines[0];
+    /* Single unified 2D pipeline — handles colored and textured quads */
+    ctx->graphicsPipeline2D         = pipelines[2];
+    ctx->graphicsPipelineTextured2D = pipelines[2];
 
-    /* destroy shader modules — no longer needed after compilation */
-    vkDestroyShaderModule(ctx->device, vsMain,  NULL);
-    vkDestroyShaderModule(ctx->device, vs2D,    NULL);
-    vkDestroyShaderModule(ctx->device, fsColor, NULL);
-    vkDestroyShaderModule(ctx->device, fs2D,    NULL);
-    vkDestroyShaderModule(ctx->device, fsTex2D, NULL);
-    vkDestroyShaderModule(ctx->device, fsTex3D, NULL);
-    vkDestroyShaderModule(ctx->device, fsSDF2D, NULL);
-    vkDestroyShaderModule(ctx->device, fsSDF3D, NULL);
+    vkDestroyShaderModule(ctx->device, vsPBR, NULL);
+    vkDestroyShaderModule(ctx->device, fsPBR, NULL);
+    vkDestroyShaderModule(ctx->device, vs2D,  NULL);
+    vkDestroyShaderModule(ctx->device, fs2D,  NULL);
 }
 
 /* Indirect pipeline layout — created AFTER createMeshSSBO so ssboSetLayout is valid */
 void createIndirectPipelineLayout(VulkanContext* ctx)
 {
-    VkPushConstantRange pcRange = {
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        .offset     = 0,
-        .size       = sizeof(PushConstants)
-    };
-    VkDescriptorSetLayout indirectSets[3] = {
-        ctx->descriptorSetLayout,
-        ctx->bindlessSetLayout,
-        ctx->ssboSetLayout
-    };
-    /* Store in a dedicated field — reuse pipelineLayout slot or add to context.
-       For now we reuse pipelineLayoutTextured3D for the indirect pipelines only
-       by creating a second layout and storing it in a static local.
-       We expose it via the extern below.                                        */
-    vkCreatePipelineLayout(ctx->device,
-        &(VkPipelineLayoutCreateInfo){
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount         = 3,
-            .pSetLayouts            = indirectSets,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges    = &pcRange
-        }, NULL, &ctx->pipelineLayoutIndirect);
+    /* Unified layout already created in createAllPipelineLayouts — nothing to do */
+    (void)ctx;
 }
 
 void createComputeCullPipeline(VulkanContext* ctx)
@@ -1033,26 +890,8 @@ void createComputeCullPipeline(VulkanContext* ctx)
     VkDeviceSize uboSize = sizeof(FrustumUBO);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkBufferCreateInfo bci = {
-            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size        = uboSize,
-            .usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->frustumUBOBuffer[i]);
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx->device, ctx->frustumUBOBuffer[i], &req);
-        VkMemoryAllocateInfo mai = {
-            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize  = req.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        vkAllocateMemory(ctx->device, &mai, NULL, &ctx->frustumUBOMemory[i]);
-        vkBindBufferMemory(ctx->device, ctx->frustumUBOBuffer[i], ctx->frustumUBOMemory[i], 0);
-        vkMapMemory(ctx->device, ctx->frustumUBOMemory[i], 0, uboSize, 0,
-                    &ctx->frustumUBOMapped[i]);
+        createBuffer(ctx, uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->frustumUBOBuffer[i], &ctx->frustumUBOMemory[i]);
+        vkMapMemory(ctx->device, ctx->frustumUBOMemory[i], 0, uboSize, 0, &ctx->frustumUBOMapped[i]);
     }
 
     /* ── descriptor pool ────────────────────────────────────────────── */
@@ -1150,12 +989,11 @@ void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd)
     glm_mat4_mul(camera.projection_matrix, camera.view_matrix, vp);
 
     /* Gribb-Hartmann plane extraction */
-    ubo.planes[0][0]=vp[0][3]+vp[0][0]; ubo.planes[0][1]=vp[1][3]+vp[1][0]; ubo.planes[0][2]=vp[2][3]+vp[2][0]; ubo.planes[0][3]=vp[3][3]+vp[3][0];
-    ubo.planes[1][0]=vp[0][3]-vp[0][0]; ubo.planes[1][1]=vp[1][3]-vp[1][0]; ubo.planes[1][2]=vp[2][3]-vp[2][0]; ubo.planes[1][3]=vp[3][3]-vp[3][0];
-    ubo.planes[2][0]=vp[0][3]+vp[0][1]; ubo.planes[2][1]=vp[1][3]+vp[1][1]; ubo.planes[2][2]=vp[2][3]+vp[2][1]; ubo.planes[2][3]=vp[3][3]+vp[3][1];
-    ubo.planes[3][0]=vp[0][3]-vp[0][1]; ubo.planes[3][1]=vp[1][3]-vp[1][1]; ubo.planes[3][2]=vp[2][3]-vp[2][1]; ubo.planes[3][3]=vp[3][3]-vp[3][1];
-    ubo.planes[4][0]=vp[0][3]+vp[0][2]; ubo.planes[4][1]=vp[1][3]+vp[1][2]; ubo.planes[4][2]=vp[2][3]+vp[2][2]; ubo.planes[4][3]=vp[3][3]+vp[3][2];
-    ubo.planes[5][0]=vp[0][3]-vp[0][2]; ubo.planes[5][1]=vp[1][3]-vp[1][2]; ubo.planes[5][2]=vp[2][3]-vp[2][2]; ubo.planes[5][3]=vp[3][3]-vp[3][2];
+    for (int j = 0; j < 4; j++) {
+        ubo.planes[0][j] = vp[j][3] + vp[j][0]; ubo.planes[1][j] = vp[j][3] - vp[j][0];
+        ubo.planes[2][j] = vp[j][3] + vp[j][1]; ubo.planes[3][j] = vp[j][3] - vp[j][1];
+        ubo.planes[4][j] = vp[j][3] + vp[j][2]; ubo.planes[5][j] = vp[j][3] - vp[j][2];
+    }
 
     for (int i = 0; i < 6; i++) {
         float len = sqrtf(ubo.planes[i][0]*ubo.planes[i][0] +
@@ -1214,8 +1052,6 @@ void create2DGraphicsPipeline(VulkanContext* ctx)        { /* handled by createG
 void createTextured2DGraphicsPipeline(VulkanContext* ctx){ /* handled by createGraphicsPipelines */ }
 void create3DTexturedGraphicsPipeline(VulkanContext* ctx){ /* handled by createGraphicsPipelines */ }
 void createLineGraphicsPipeline(VulkanContext* ctx)      { /* handled by createGraphicsPipelines */ }
-void createSDF2DGraphicsPipeline(VulkanContext* ctx)     { /* handled by createGraphicsPipelines */ }
-void createSDF3DGraphicsPipeline(VulkanContext* ctx)     { /* handled by createGraphicsPipelines */ }
 
 /// Framebuffers / Command pool / Command buffers
 
@@ -1355,47 +1191,35 @@ void createDepthResources(VulkanContext* ctx)
 
 /// Uniform buffer
 
+static void createBuffer(VulkanContext* ctx, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer* buffer, VkDeviceMemory* bufferMemory) {
+    VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    vkCreateBuffer(ctx->device, &bufferInfo, NULL, buffer);
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(ctx->device, *buffer, &memReq);
+    VkMemoryAllocateInfo allocInfo = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = memReq.size, .memoryTypeIndex = findMemoryType(ctx->physicalDevice, memReq.memoryTypeBits, properties) };
+    vkAllocateMemory(ctx->device, &allocInfo, NULL, bufferMemory);
+    vkBindBufferMemory(ctx->device, *buffer, *bufferMemory, 0);
+}
+
 void createUniformBuffer(VulkanContext* ctx)
 {
-    VkBufferCreateInfo bi = {
-        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = sizeof(UniformBufferObject),
-        .usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (vkCreateBuffer(ctx->device, &bi, NULL, &ctx->uniformBuffers[i]) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create uniform buffer %u\n", i);
-            exit(EXIT_FAILURE);
-        }
-
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx->device, ctx->uniformBuffers[i], &req);
-
-        VkMemoryAllocateInfo ai = {
-            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize  = req.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        if (vkAllocateMemory(ctx->device, &ai, NULL, &ctx->uniformBuffersMemory[i]) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to allocate uniform buffer memory %u\n", i);
-            exit(EXIT_FAILURE);
-        }
-        vkBindBufferMemory(ctx->device, ctx->uniformBuffers[i], ctx->uniformBuffersMemory[i], 0);
-
-        /* persistent map — never unmapped until cleanup */
-        vkMapMemory(ctx->device, ctx->uniformBuffersMemory[i], 0,
-                    sizeof(UniformBufferObject), 0, &ctx->uboMapped[i]);
+        createBuffer(ctx, sizeof(UniformBufferObject), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->uniformBuffers[i], &ctx->uniformBuffersMemory[i]);
+        vkMapMemory(ctx->device, ctx->uniformBuffersMemory[i], 0, sizeof(UniformBufferObject), 0, &ctx->uboMapped[i]);
     }
 }
 
 void updateUniformBuffer(VulkanContext* ctx)
 {
     UniformBufferObject ubo;
+    glm_mat4_copy(camera.view_matrix,       ubo.view);
+    glm_mat4_copy(camera.projection_matrix, ubo.proj);
     glm_mat4_mul(camera.projection_matrix, camera.view_matrix, ubo.vp);
+    ubo.cameraPos[0] = camera.position[0];
+    ubo.cameraPos[1] = camera.position[1];
+    ubo.cameraPos[2] = camera.position[2];
+    ubo.cameraPos[3] = 0.0f;
+    ubo.time         = (float)glfwGetTime();
     memcpy(ctx->uboMapped[ctx->currentFrame], &ubo, sizeof(ubo));
 }
 
@@ -1446,64 +1270,54 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
 
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
 
-    /* ── INDIRECT PASS: all gltf meshes, SSBO-driven, mega buffer ── */
+    updateLightingUBO(ctx);
+
+
+    /* ── Bind the 4 descriptor sets once — valid for ALL 3D draws ───────
+       set=0  UBO
+       set=1  bindless texture array
+       set=2  GLTF mesh SSBO  (indirect pass uses gl_BaseInstanceARB)
+       set=3  lighting UBO                                                 */
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipeline);
+
+    VkDescriptorSet gltfSets[4] = {
+        ctx->descriptorSets[ctx->currentFrame],
+        ctx->bindlessSet,
+        ctx->ssboSets[ctx->currentFrame],
+        ctx->lightingSets[ctx->currentFrame],
+    };
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
+
+    /* indirect = -1 in meshIndex means use gl_BaseInstanceARB */
+    pushConstants.meshIndex = -1;
+    vkCmdPushConstants(cmd, ctx->pipelineLayout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(PushConstants), &pushConstants);
+
+    /* ── INDIRECT PASS: GLTF meshes ─────────────────────────────────── */
     if (ctx->indirectDrawCount > 0) {
         VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
         vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-        /* bind UBO set=0, bindless set=1, SSBO set=2 — all once */
-        VkDescriptorSet indirectSets[3] = {
-            ctx->descriptorSets[ctx->currentFrame],
-            ctx->bindlessSet,
-            ctx->ssboSets[ctx->currentFrame]
-        };
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                ctx->pipelineLayoutIndirect, 0, 3,
-                                indirectSets, 0, NULL);
-
-        /* push constants must be set before indirect draw even though
-           the indirect shader reads per-mesh data from SSBO via gl_DrawID */
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipelineIndirectTextured);
-        vkCmdPushConstants(cmd, ctx->pipelineLayoutIndirect,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pushConstants);
         vkCmdDrawIndexedIndirect(cmd, ctx->indirectBuffer, 0,
                                  ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
     }
 
-    /* ── Bind set=0 (UBO) + set=1 (bindless) for the direct draw pass ── */
-    VkDescriptorSet sets2[2] = {
-        ctx->descriptorSets[ctx->currentFrame],
-        ctx->bindlessSet,
-    };
+    /* ── DIRECT PASS: immediate-mode (sphere, cube, etc.) ───────────────
+       Swap set=2 to the imm SSBO — sets 0,1,3 stay the same             */
+    VkDescriptorSet immSet = imm_ssbo_get_set(ctx->currentFrame);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            ctx->pipelineLayoutTextured3D, 0, 2, sets2, 0, NULL);
-
-    /* ── gltf meshes (textured pipeline, bindless, push constants) ── */
-    meshes_draw(cmd, &scene.meshes);
-
-    /* ── procedural geometry (sphere, cube, etc.) — solid color pipeline ── */
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            ctx->pipelineLayout, 0, 1,
-                            &ctx->descriptorSets[ctx->currentFrame], 0, NULL);
+                            ctx->pipelineLayout, 2, 1, &immSet, 0, NULL);
     renderer_draw(cmd);
 
-    /* ── 3D textured ── */
-    renderer_draw_textured3D(cmd);
-
-    /* ── 3D lines ── */
-    if (ctx->graphicsPipelineLine && lineVertexCount > 0) {
+    /* ── 3D lines ────────────────────────────────────────────────────── */
+    if (lineVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                ctx->pipelineLayoutLine, 0, 1,
-                                &ctx->descriptorSets[ctx->currentFrame], 0, NULL);
         line_renderer_draw(cmd);
     }
 
-    /* ── 2D ── */
+    /* ── 2D ─────────────────────────────────────────────────────────── */
     renderer2D_draw(cmd);
 
     vkCmdEndRenderPass(cmd);
@@ -1535,6 +1349,7 @@ void drawFrame(VulkanContext* ctx)
     ctx->imagesInFlight[imageIndex] = fence;
 
     updateUniformBuffer(ctx);
+    imm_ssbo_begin_frame(ctx, ctx->currentFrame);
     recordCommandBuffer(ctx, imageIndex);
 
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
@@ -1688,6 +1503,7 @@ void cleanup(VulkanContext* ctx)
     vkDeviceWaitIdle(ctx->device);
 
     renderer_shutdown();
+    imm_ssbo_shutdown(&context);
     line_renderer_shutdown();
     meshes_destroy(ctx->device, &scene.meshes);
     texture_pool_cleanup(ctx);
@@ -1697,6 +1513,16 @@ void cleanup(VulkanContext* ctx)
     if (ctx->descriptorPool2D)      { vkDestroyDescriptorPool(ctx->device, ctx->descriptorPool2D,           NULL);  ctx->descriptorPool2D      = VK_NULL_HANDLE; }
     if (ctx->bindlessSetLayout)     { vkDestroyDescriptorSetLayout(ctx->device, ctx->bindlessSetLayout,     NULL);  ctx->bindlessSetLayout     = VK_NULL_HANDLE; }
     if (ctx->bindlessPool)          { vkDestroyDescriptorPool(ctx->device, ctx->bindlessPool,               NULL);  ctx->bindlessPool          = VK_NULL_HANDLE; }
+    /* lighting UBO */
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (ctx->lightingUBOMapped[i])   { vkUnmapMemory  (ctx->device, ctx->lightingUBOMemory[i]);                    ctx->lightingUBOMapped[i]   = NULL;           }
+        if (ctx->lightingUBO[i])         { vkDestroyBuffer(ctx->device, ctx->lightingUBO[i],         NULL);            ctx->lightingUBO[i]         = VK_NULL_HANDLE; }
+        if (ctx->lightingUBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->lightingUBOMemory[i],   NULL);            ctx->lightingUBOMemory[i]   = VK_NULL_HANDLE; }
+    }
+    if (ctx->lightingSetLayout) { vkDestroyDescriptorSetLayout(ctx->device, ctx->lightingSetLayout, NULL); ctx->lightingSetLayout = VK_NULL_HANDLE; }
+    if (ctx->lightingPool)      { vkDestroyDescriptorPool     (ctx->device, ctx->lightingPool,      NULL); ctx->lightingPool      = VK_NULL_HANDLE; }
+    /* IBL */
+    destroyIBL(ctx);
 
     /* command buffers */
     if (ctx->commandBuffers && ctx->commandPool) {
@@ -1724,26 +1550,35 @@ void cleanup(VulkanContext* ctx)
     /* pipelines */
 #define DESTROY_PIPELINE(p)       if (ctx->p) { vkDestroyPipeline      (ctx->device, ctx->p, NULL); ctx->p = VK_NULL_HANDLE; }
 #define DESTROY_LAYOUT(l)         if (ctx->l) { vkDestroyPipelineLayout(ctx->device, ctx->l, NULL); ctx->l = VK_NULL_HANDLE; }
-    if (pipelineIndirectSolid)    { vkDestroyPipeline(ctx->device, pipelineIndirectSolid,    NULL); pipelineIndirectSolid    = VK_NULL_HANDLE; }
-    if (pipelineIndirectTextured) { vkDestroyPipeline(ctx->device, pipelineIndirectTextured, NULL); pipelineIndirectTextured = VK_NULL_HANDLE; }
-    DESTROY_PIPELINE(graphicsPipeline)
-    DESTROY_PIPELINE(graphicsPipeline2D)
-    DESTROY_PIPELINE(graphicsPipelineTextured2D)
+    /* pipelineIndirectSolid and pipelineIndirectTextured alias graphicsPipeline[0] —
+       null them out first so DESTROY_PIPELINE doesn't double-free.                   */
+    pipelineIndirectSolid    = VK_NULL_HANDLE;
+    pipelineIndirectTextured = VK_NULL_HANDLE;
+
+    /* graphicsPipelineTextured3D aliases graphicsPipeline (pipelines[0]).
+       Null the aliases before the macro runs to prevent double-destroy.               */
+    ctx->graphicsPipelineTextured3D = VK_NULL_HANDLE;
+
+    DESTROY_PIPELINE(graphicsPipeline)       /* pipelines[0] */
+    DESTROY_PIPELINE(graphicsPipelineLine)   /* pipelines[1] */
+    DESTROY_PIPELINE(graphicsPipeline2D)     /* pipelines[2] */
+    DESTROY_PIPELINE(graphicsPipelineTextured2D) /* pipelines[3] */
+    /* aliases already nulled — these are no-ops but kept for safety */
     DESTROY_PIPELINE(graphicsPipelineTextured3D)
-    DESTROY_PIPELINE(graphicsPipelineLine)
-    DESTROY_PIPELINE(graphicsPipelineSDF2D)
-    DESTROY_PIPELINE(graphicsPipelineSDF3D)
 
-    /* SDF2D/SDF3D share layouts with textured — avoid double-free */
-    ctx->pipelineLayoutSDF2D = VK_NULL_HANDLE;
-    ctx->pipelineLayoutSDF3D = VK_NULL_HANDLE;
-    ctx->pipelineLayoutLine  = VK_NULL_HANDLE;
+    /* These all alias other layouts — null before destroy to prevent double-free */
+    ctx->pipelineLayoutLine       = VK_NULL_HANDLE;
+    ctx->pipelineLayoutTextured3D = VK_NULL_HANDLE; /* aliases pipelineLayout */
+    ctx->pipelineLayoutIndirect   = VK_NULL_HANDLE; /* aliases pipelineLayout */
 
-    DESTROY_LAYOUT(pipelineLayout)
+    DESTROY_LAYOUT(pipelineLayout)           /* the real 3D PBR layout */
     DESTROY_LAYOUT(pipelineLayout2D)
     DESTROY_LAYOUT(pipelineLayoutTextured2D)
+    /* aliases already nulled — these are no-ops */
     DESTROY_LAYOUT(pipelineLayoutTextured3D)
+    DESTROY_LAYOUT(pipelineLayoutLine)
     DESTROY_LAYOUT(pipelineLayoutIndirect)
+
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
 
@@ -1758,9 +1593,11 @@ void cleanup(VulkanContext* ctx)
     }
     if (pipelineCache != VK_NULL_HANDLE) { vkDestroyPipelineCache(ctx->device, pipelineCache, NULL); pipelineCache = VK_NULL_HANDLE; }
 
-    /* 2D vertex buffer */
-    if (ctx->vertexBuffer2D)       { vkDestroyBuffer             (ctx->device, ctx->vertexBuffer2D,       NULL); ctx->vertexBuffer2D          = VK_NULL_HANDLE; }
-    if (ctx->vertexBufferMemory2D) { vkFreeMemory                (ctx->device, ctx->vertexBufferMemory2D, NULL); ctx->vertexBufferMemory2D    = VK_NULL_HANDLE; }
+    /* 2D vertex buffer — one per frame */
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (ctx->vertexBuffer2D[i])       { vkDestroyBuffer(ctx->device, ctx->vertexBuffer2D[i],       NULL); ctx->vertexBuffer2D[i]       = VK_NULL_HANDLE; }
+        if (ctx->vertexBufferMemory2D[i]) { vkFreeMemory   (ctx->device, ctx->vertexBufferMemory2D[i], NULL); ctx->vertexBufferMemory2D[i] = VK_NULL_HANDLE; }
+    }
 
     if (ctx->renderPass)           { vkDestroyRenderPass         (ctx->device, ctx->renderPass,           NULL); ctx->renderPass              = VK_NULL_HANDLE; }
 
@@ -1827,31 +1664,8 @@ void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size)
 {
     ctx->megaVertexBufferSize   = size;
     ctx->megaVertexBufferOffset = 0;
-
-    /* DEVICE_LOCAL — GPU-only, fastest possible vertex reads */
-    VkBufferCreateInfo bci = {
-        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = size,
-        .usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    if (vkCreateBuffer(ctx->device, &bci, NULL, &ctx->megaVertexBuffer) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create mega vertex buffer\n"); exit(EXIT_FAILURE);
-    }
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, ctx->megaVertexBuffer, &req);
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    };
-    if (vkAllocateMemory(ctx->device, &ai, NULL, &ctx->megaVertexBufferMemory) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to allocate mega vertex buffer memory\n"); exit(EXIT_FAILURE);
-    }
-    vkBindBufferMemory(ctx->device, ctx->megaVertexBuffer, ctx->megaVertexBufferMemory, 0);
-    fprintf(stdout, "Mega vertex buffer: %.1f MB (DEVICE_LOCAL)\n",
-            (double)size / (1024.0 * 1024.0));
+    createBuffer(ctx, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->megaVertexBuffer, &ctx->megaVertexBufferMemory);
+    fprintf(stdout, "Mega vertex buffer: %.1f MB (DEVICE_LOCAL)\n", (double)size / (1024.0 * 1024.0));
 }
 
 /* Upload vertices into the mega buffer, return the BASE VERTEX INDEX for DrawIndexed/Draw offset.
@@ -1860,29 +1674,8 @@ void createUploadStagingBuffer(VulkanContext* ctx, VkDeviceSize size)
 {
     ctx->uploadStagingSize   = size;
     ctx->uploadStagingOffset = 0;
-
-    VkBufferCreateInfo bci = {
-        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = size,
-        .usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->uploadStagingBuffer);
-
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, ctx->uploadStagingBuffer, &req);
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    };
-    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->uploadStagingMemory);
-    vkBindBufferMemory(ctx->device, ctx->uploadStagingBuffer,
-                       ctx->uploadStagingMemory, 0);
-    vkMapMemory(ctx->device, ctx->uploadStagingMemory, 0, size, 0,
-                &ctx->uploadStagingMapped);
+    createBuffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->uploadStagingBuffer, &ctx->uploadStagingMemory);
+    vkMapMemory(ctx->device, ctx->uploadStagingMemory, 0, size, 0, &ctx->uploadStagingMapped);
 
     /* pre-allocate region arrays */
     ctx->pendingVertexCopyCapacity = 256;
@@ -1892,8 +1685,7 @@ void createUploadStagingBuffer(VulkanContext* ctx, VkDeviceSize size)
     ctx->pendingIndexCopyCount     = 0;
     ctx->pendingIndexCopies        = malloc(256 * sizeof(VkBufferCopy));
 
-    fprintf(stdout, "Upload staging buffer: %.1f MB\n",
-            (double)size / (1024.0 * 1024.0));
+    fprintf(stdout, "Upload staging buffer: %.1f MB\n", (double)size / (1024.0 * 1024.0));
 }
 
 void flushUploadStagingBuffer(VulkanContext* ctx)
@@ -1972,20 +1764,7 @@ uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t verte
     } else {
         /* fallback: old per-mesh staging path */
         VkBuffer stagingBuf; VkDeviceMemory stagingMem;
-        VkBufferCreateInfo bci = {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = uploadSize,
-            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
-        VkMemoryAllocateInfo ai = {
-            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
-        vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+        createBuffer(ctx, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
         void* mapped;
         vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
         memcpy(mapped, vertices, uploadSize);
@@ -2005,30 +1784,8 @@ void createMegaIndexBuffer(VulkanContext* ctx, VkDeviceSize size)
 {
     ctx->megaIndexBufferSize   = size;
     ctx->megaIndexBufferOffset = 0;
-
-    VkBufferCreateInfo bci = {
-        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = size,
-        .usage       = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    if (vkCreateBuffer(ctx->device, &bci, NULL, &ctx->megaIndexBuffer) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create mega index buffer\n"); exit(EXIT_FAILURE);
-    }
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, ctx->megaIndexBuffer, &req);
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    };
-    if (vkAllocateMemory(ctx->device, &ai, NULL, &ctx->megaIndexBufferMemory) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to allocate mega index buffer memory\n"); exit(EXIT_FAILURE);
-    }
-    vkBindBufferMemory(ctx->device, ctx->megaIndexBuffer, ctx->megaIndexBufferMemory, 0);
-    fprintf(stdout, "Mega index buffer: %.1f MB (DEVICE_LOCAL)\n",
-            (double)size / (1024.0 * 1024.0));
+    createBuffer(ctx, size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->megaIndexBuffer, &ctx->megaIndexBufferMemory);
+    fprintf(stdout, "Mega index buffer: %.1f MB (DEVICE_LOCAL)\n", (double)size / (1024.0 * 1024.0));
 }
 
 /* Upload indices into the mega index buffer. Returns the BASE INDEX (firstIndex for DrawIndexed). */
@@ -2065,20 +1822,7 @@ uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t
     } else {
         /* fallback */
         VkBuffer stagingBuf; VkDeviceMemory stagingMem;
-        VkBufferCreateInfo bci = {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = uploadSize,
-            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
-        VkMemoryAllocateInfo ai = {
-            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
-        vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+        createBuffer(ctx, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
         void* mapped;
         vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
         memcpy(mapped, indices, uploadSize);
@@ -2097,39 +1841,12 @@ uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t
 void createDynamicBuffers(VulkanContext* ctx, VkDeviceSize size)
 {
     ctx->dynamicBufferSize = size;
-
-    /* Staging: HOST_VISIBLE | HOST_COHERENT, persistently mapped */
-    VkBufferCreateInfo bci = {
-        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = size,
-        .usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->dynamicStagingBuffer);
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, ctx->dynamicStagingBuffer, &req);
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    };
-    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->dynamicStagingMemory);
-    vkBindBufferMemory(ctx->device, ctx->dynamicStagingBuffer, ctx->dynamicStagingMemory, 0);
+    createBuffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->dynamicStagingBuffer, &ctx->dynamicStagingMemory);
     vkMapMemory(ctx->device, ctx->dynamicStagingMemory, 0, size, 0, &ctx->dynamicStagingMapped);
 
-    /* Device-local target */
-    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->dynamicDeviceBuffer);
-    vkGetBufferMemoryRequirements(ctx->device, ctx->dynamicDeviceBuffer, &req);
-    ai.allocationSize  = req.size;
-    ai.memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->dynamicDeviceMemory);
-    vkBindBufferMemory(ctx->device, ctx->dynamicDeviceBuffer, ctx->dynamicDeviceMemory, 0);
+    createBuffer(ctx, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->dynamicDeviceBuffer, &ctx->dynamicDeviceMemory);
 
-    fprintf(stdout, "Dynamic buffers: %.1f MB staging + %.1f MB device-local\n",
-            (double)size/(1024*1024), (double)size/(1024*1024));
+    fprintf(stdout, "Dynamic buffers: %.1f MB staging + %.1f MB device-local\n", (double)size/(1024*1024), (double)size/(1024*1024));
 }
 
 /// Bindless texture array
@@ -2229,6 +1946,72 @@ void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
     ctx->bindlessTextureCount = slot + 1;
 }
 
+/// Lighting descriptors
+
+void createLightingDescriptors(VulkanContext* ctx)
+{
+    VkDescriptorSetLayoutBinding b = {
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT
+    };
+    VkDescriptorSetLayoutCreateInfo lci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &b
+    };
+    vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->lightingSetLayout);
+
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT };
+    VkDescriptorPoolCreateInfo pci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps
+    };
+    vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->lightingPool);
+
+    VkDeviceSize size = sizeof(LightingData);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkBufferCreateInfo bci = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = size, .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->lightingUBO[i]);
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(ctx->device, ctx->lightingUBO[i], &mr);
+        VkMemoryAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, mr.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        vkAllocateMemory(ctx->device, &ai, NULL, &ctx->lightingUBOMemory[i]);
+        vkBindBufferMemory(ctx->device, ctx->lightingUBO[i], ctx->lightingUBOMemory[i], 0);
+        vkMapMemory(ctx->device, ctx->lightingUBOMemory[i], 0, size, 0, &ctx->lightingUBOMapped[i]);
+
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = ctx->lightingPool, .descriptorSetCount = 1,
+            .pSetLayouts = &ctx->lightingSetLayout
+        };
+        vkAllocateDescriptorSets(ctx->device, &dsai, &ctx->lightingSets[i]);
+
+        VkDescriptorBufferInfo dbi = { .buffer = ctx->lightingUBO[i], .offset = 0, .range = size };
+        VkWriteDescriptorSet w = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = ctx->lightingSets[i], .dstBinding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1, .pBufferInfo = &dbi
+        };
+        vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+    }
+    fprintf(stdout, "Lighting UBO descriptors created\n");
+}
+
+void updateLightingUBO(VulkanContext* ctx)
+{
+    memcpy(ctx->lightingUBOMapped[ctx->currentFrame], ctx->lightingDataRaw, sizeof(LightingData));
+}
+
 /// SSBO + Indirect draw
 
 void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
@@ -2255,25 +2038,7 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
     vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->ssboPool);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkBufferCreateInfo bci = {
-            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size        = size,
-            .usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->meshSSBO[i]);
-
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx->device, ctx->meshSSBO[i], &req);
-        VkMemoryAllocateInfo ai = {
-            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize  = req.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        vkAllocateMemory(ctx->device, &ai, NULL, &ctx->meshSSBOMemory[i]);
-        vkBindBufferMemory(ctx->device, ctx->meshSSBO[i], ctx->meshSSBOMemory[i], 0);
+        createBuffer(ctx, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->meshSSBO[i], &ctx->meshSSBOMemory[i]);
         vkMapMemory(ctx->device, ctx->meshSSBOMemory[i], 0, size, 0, &ctx->meshSSBOMapped[i]);
 
         /* Allocate + write descriptor set */
@@ -2315,55 +2080,13 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
     VkDeviceSize size = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
 
     /* Source buffer: CPU writes original draw commands, compute reads */
-    {
-        VkBufferCreateInfo bci = {
-            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size        = size,
-            .usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->srcIndirectBuffer);
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx->device, ctx->srcIndirectBuffer, &req);
-        VkMemoryAllocateInfo ai = {
-            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize  = req.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        vkAllocateMemory(ctx->device, &ai, NULL, &ctx->srcIndirectBufferMemory);
-        vkBindBufferMemory(ctx->device, ctx->srcIndirectBuffer,
-                           ctx->srcIndirectBufferMemory, 0);
-        vkMapMemory(ctx->device, ctx->srcIndirectBufferMemory, 0, size, 0,
-                    &ctx->srcIndirectBufferMapped);
-    }
+    createBuffer(ctx, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->srcIndirectBuffer, &ctx->srcIndirectBufferMemory);
+    vkMapMemory(ctx->device, ctx->srcIndirectBufferMemory, 0, size, 0, &ctx->srcIndirectBufferMapped);
 
     /* Destination buffer: compute writes, GPU draw reads — DEVICE_LOCAL */
-    {
-        VkBufferCreateInfo bci = {
-            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size        = size,
-            .usage       = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(ctx->device, &bci, NULL, &ctx->indirectBuffer);
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx->device, ctx->indirectBuffer, &req);
-        VkMemoryAllocateInfo ai = {
-            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize  = req.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-        };
-        vkAllocateMemory(ctx->device, &ai, NULL, &ctx->indirectBufferMemory);
-        vkBindBufferMemory(ctx->device, ctx->indirectBuffer,
-                           ctx->indirectBufferMemory, 0);
-    }
+    createBuffer(ctx, size, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->indirectBuffer, &ctx->indirectBufferMemory);
 
-    fprintf(stdout, "Indirect buffers: %u draw slots (src HOST_VISIBLE, dst DEVICE_LOCAL)\n",
-            maxMeshes);
+    fprintf(stdout, "Indirect buffers: %u draw slots (src HOST_VISIBLE, dst DEVICE_LOCAL)\n", maxMeshes);
 }
 
 void markMeshesSSBODirty(VulkanContext* ctx)
@@ -2448,8 +2171,22 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
         glm_mat4_inv(m->model, inv);
         glm_mat4_transpose(inv);
         glm_mat4_copy(inv, dst[i].normalMatrix);
-        dst[i].textureIndex = (m->texture && m->texture->loaded)
-                              ? (int)m->texture->bindlessSlot : -1;
+
+        /* PBR texture slots */
+        dst[i].albedoIndex        = (m->texture && m->texture->loaded)
+                                    ? (int)m->texture->bindlessSlot : -1;
+        dst[i].normalMapIndex     = m->normalMapIndex;
+        dst[i].metallicRoughIndex = m->metallicRoughIndex;
+        dst[i].aoIndex            = m->aoIndex;
+        dst[i].emissiveIndex      = m->emissiveIndex;
+
+        /* Material constant factors */
+        glm_vec4_copy(m->baseColorFactor,  dst[i].baseColorFactor);
+        dst[i].metallicFactor    = m->metallicFactor;
+        dst[i].roughnessFactor   = m->roughnessFactor;
+        dst[i].emissiveStrength  = m->emissiveStrength;
+        glm_vec3_copy(m->emissiveFactor,   dst[i].emissiveFactor);
+
         dst[i].isUnlit      = m->is_unlit ? 1 : 0;
         dst[i].alphaMode    = m->alpha_mode;
         dst[i].alphaCutoff  = m->alpha_cutoff;
@@ -2464,6 +2201,26 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
     }
 
     ctx->ssboFramesDirty--;
+}
+
+void destroyIBL(VulkanContext* ctx)
+{
+    if (ctx->iblIrradianceView)   { vkDestroyImageView(ctx->device, ctx->iblIrradianceView,   NULL); ctx->iblIrradianceView   = VK_NULL_HANDLE; }
+    if (ctx->iblIrradianceImage)  { vkDestroyImage    (ctx->device, ctx->iblIrradianceImage,  NULL); ctx->iblIrradianceImage  = VK_NULL_HANDLE; }
+    if (ctx->iblIrradianceMemory) { vkFreeMemory      (ctx->device, ctx->iblIrradianceMemory, NULL); ctx->iblIrradianceMemory = VK_NULL_HANDLE; }
+    if (ctx->iblIrradianceSampler){ vkDestroySampler  (ctx->device, ctx->iblIrradianceSampler,NULL); ctx->iblIrradianceSampler= VK_NULL_HANDLE; }
+
+    if (ctx->iblPrefilterView)    { vkDestroyImageView(ctx->device, ctx->iblPrefilterView,    NULL); ctx->iblPrefilterView    = VK_NULL_HANDLE; }
+    if (ctx->iblPrefilterImage)   { vkDestroyImage    (ctx->device, ctx->iblPrefilterImage,   NULL); ctx->iblPrefilterImage   = VK_NULL_HANDLE; }
+    if (ctx->iblPrefilterMemory)  { vkFreeMemory      (ctx->device, ctx->iblPrefilterMemory,  NULL); ctx->iblPrefilterMemory  = VK_NULL_HANDLE; }
+    if (ctx->iblPrefilterSampler) { vkDestroySampler  (ctx->device, ctx->iblPrefilterSampler, NULL); ctx->iblPrefilterSampler = VK_NULL_HANDLE; }
+
+    if (ctx->iblBrdfLutView)      { vkDestroyImageView(ctx->device, ctx->iblBrdfLutView,      NULL); ctx->iblBrdfLutView      = VK_NULL_HANDLE; }
+    if (ctx->iblBrdfLutImage)     { vkDestroyImage    (ctx->device, ctx->iblBrdfLutImage,     NULL); ctx->iblBrdfLutImage     = VK_NULL_HANDLE; }
+    if (ctx->iblBrdfLutMemory)    { vkFreeMemory      (ctx->device, ctx->iblBrdfLutMemory,    NULL); ctx->iblBrdfLutMemory    = VK_NULL_HANDLE; }
+    if (ctx->iblBrdfLutSampler)   { vkDestroySampler  (ctx->device, ctx->iblBrdfLutSampler,   NULL); ctx->iblBrdfLutSampler   = VK_NULL_HANDLE; }
+
+    ctx->iblLoaded = false;
 }
 
 void clear_background(Color color)  { context.clearColor = color; }

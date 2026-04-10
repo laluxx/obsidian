@@ -4,11 +4,20 @@
 #include <stdbool.h>
 #include <cglm/types.h>
 
+/* Convenience accessor — context.h stores lighting data as raw bytes to
+   avoid a circular include; cast it here where renderer.h is visible.   */
+#define CTX_LIGHTING(ctx) ((LightingData*)((ctx)->lightingDataRaw))
+
 #define MAX_FRAMES_IN_FLIGHT 2
 extern bool ambientOcclusionEnabled;
 
 typedef struct {
-    mat4 vp;
+    mat4  vp;
+    mat4  view;         // needed for view-space ops and IBL
+    mat4  proj;
+    vec4  cameraPos;    // xyz=world pos, w=unused
+    float time;         // for animated effects
+    float _pad[3];
 } UniformBufferObject;
 
 /* ── instance / device ─────────────────────────── */
@@ -34,9 +43,13 @@ void create2DDescriptorSetLayout(VulkanContext* context);
 void createDescriptorPool(VulkanContext* context);
 void create2DDescriptorPool(VulkanContext* context);
 void createDescriptorSet(VulkanContext* context);
-void createBindlessDescriptorLayout(VulkanContext* context);
-void createBindlessDescriptorPool(VulkanContext* context);
-void createBindlessDescriptorSet(VulkanContext* context);
+void createBindlessDescriptorLayout(VulkanContext* ctx);
+void createBindlessDescriptorPool(VulkanContext* ctx);
+void createBindlessDescriptorSet(VulkanContext* ctx);
+void createLightingDescriptors(VulkanContext* ctx);
+void updateLightingUBO(VulkanContext* ctx);
+bool loadIBL(VulkanContext* ctx, const char* hdr_path);
+void destroyIBL(VulkanContext* ctx);
 void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
                              VkImageView view, VkSampler sampler);
 
@@ -65,8 +78,6 @@ void create2DGraphicsPipeline(VulkanContext* context);
 void createTextured2DGraphicsPipeline(VulkanContext* context);
 void create3DTexturedGraphicsPipeline(VulkanContext* context);
 void createLineGraphicsPipeline(VulkanContext* context);
-void createSDF2DGraphicsPipeline(VulkanContext* context);
-void createSDF3DGraphicsPipeline(VulkanContext* context);
 
 /* ── framebuffers / commands / sync ────────────── */
 void createFramebuffers(VulkanContext* context);
@@ -105,3 +116,5 @@ void destroyUploadStagingBuffer(VulkanContext* ctx);
 uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount);
 uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t indexCount);
 void dynamicBufferUploadAndCopy(VulkanContext* ctx, void* data, VkDeviceSize size, VkDeviceSize dstOffset);
+
+

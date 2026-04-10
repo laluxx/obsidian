@@ -56,22 +56,187 @@ Texture2D* texture_pool_get(int32_t index) {
 static Vertex vertices[MAX_VERTICES];
 static uint32_t vertex_count = 0;
 
+typedef struct { uint32_t firstVertex; uint32_t count; int slot; } ImmDrawCall;
+static ImmDrawCall immDrawList[IMM_SSBO_MAX_ENTRIES];
+static uint32_t   immDrawCount = 0;
+
+uint32_t imm_append_vertices(const Vertex* verts, uint32_t count) {
+    if (vertex_count + count > MAX_VERTICES) return UINT32_MAX;
+    uint32_t first = vertex_count;
+    memcpy(&vertices[first], verts, count * sizeof(Vertex));
+    vertex_count += count;
+    return first;
+}
+
 static VkDevice device;
 static VkPhysicalDevice physicalDevice;
 static VkCommandPool commandPool;
 static VkQueue graphicsQueue;
 
-static VkBuffer vertexBuffer;
-static VkDeviceMemory vertexBufferMemory;
-static void* vertexBufferMapped = NULL;
+static VkBuffer       vertexBuffer[MAX_FRAMES_IN_FLIGHT];
+static VkDeviceMemory vertexBufferMemory[MAX_FRAMES_IN_FLIGHT];
+static void*          vertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
+static uint32_t       imm_frame_index = 0;
 
 PushConstants pushConstants;
 
-Vertex vertices3D_textured[MAX_VERTICES];
-uint32_t vertex_count_3D_textured = 0;
-Texture3DBatch texture3DBatches[MAX_TEXTURES];
-uint32_t texture3DBatchCount = 0;
+/* ── Immediate-mode SSBO ─────────────────────────────────────────────────── */
+static VkBuffer             immSSBOBuffer[MAX_FRAMES_IN_FLIGHT];
+static VkDeviceMemory       immSSBOMemory[MAX_FRAMES_IN_FLIGHT];
+static MeshGPUData*         immSSBOMapped[MAX_FRAMES_IN_FLIGHT];
+static VkDescriptorSetLayout immSSBOLayout;
+static VkDescriptorPool     immSSBOPool;
+static VkDescriptorSet      immSSBOSets[MAX_FRAMES_IN_FLIGHT];
+static uint32_t             immSlotCount;   /* slots used this frame        */
+static uint32_t             immFrameIndex;  /* set at begin_frame           */
 
+static ImmMaterial immCurrentMaterial = {
+    .baseColorFactor    = {1.0f, 1.0f, 1.0f, 1.0f},
+    .metallicFactor     = 0.0f,
+    .roughnessFactor    = 0.5f,
+    .emissiveStrength   = 1.0f,
+    .isUnlit            = 0,
+    .emissiveFactor     = {0.0f, 0.0f, 0.0f},
+    .albedoIndex        = -1,
+    .normalMapIndex     = -1,
+    .metallicRoughIndex = -1,
+    .aoIndex            = -1,
+    .emissiveIndex      = -1,
+};
+
+void imm_set_material(const ImmMaterial* mat) { immCurrentMaterial = *mat; }
+
+void imm_reset_material(void) {
+    immCurrentMaterial = (ImmMaterial){
+        .baseColorFactor    = {1.0f, 1.0f, 1.0f, 1.0f},
+        .metallicFactor     = 0.0f,
+        .roughnessFactor    = 0.5f,
+        .emissiveStrength   = 1.0f,
+        .isUnlit            = 0,
+        .emissiveFactor     = {0.0f, 0.0f, 0.0f},
+        .albedoIndex        = -1,
+        .normalMapIndex     = -1,
+        .metallicRoughIndex = -1,
+        .aoIndex            = -1,
+        .emissiveIndex      = -1,
+    };
+}
+
+int imm_alloc_slot(mat4 model) {
+    if (immSlotCount >= IMM_SSBO_MAX_ENTRIES) {
+        static uint32_t overflow_count = 0;
+        if (overflow_count++ == 0)
+            fprintf(stderr, "imm SSBO overflow: renderer_clear() not called each frame, "
+                            "or more than %d draw calls issued\n", IMM_SSBO_MAX_ENTRIES);
+        return 0;
+    }
+    int slot = (int)immSlotCount++;
+    MeshGPUData* d = &immSSBOMapped[immFrameIndex][slot];
+    glm_mat4_copy(model, d->model);
+    mat4 inv; glm_mat4_inv(model, inv); glm_mat4_transpose(inv);
+    glm_mat4_copy(inv, d->normalMatrix);
+    glm_vec4_copy(immCurrentMaterial.baseColorFactor, d->baseColorFactor);
+    d->metallicFactor     = immCurrentMaterial.metallicFactor;
+    d->roughnessFactor    = immCurrentMaterial.roughnessFactor;
+    d->emissiveStrength   = immCurrentMaterial.emissiveStrength;
+    d->isUnlit            = immCurrentMaterial.isUnlit;
+    d->alphaMode          = 0;
+    d->alphaCutoff        = 0.5f;
+    glm_vec3_copy(immCurrentMaterial.emissiveFactor, d->emissiveFactor);
+    d->albedoIndex        = immCurrentMaterial.albedoIndex;
+    d->normalMapIndex     = immCurrentMaterial.normalMapIndex;
+    d->metallicRoughIndex = immCurrentMaterial.metallicRoughIndex;
+    d->aoIndex            = immCurrentMaterial.aoIndex;
+    d->emissiveIndex      = immCurrentMaterial.emissiveIndex;
+    /* AABB not used for culling on imm draws */
+    glm_vec3_copy((vec3){-1e10f,-1e10f,-1e10f}, d->aabbMin);
+    glm_vec3_copy((vec3){ 1e10f, 1e10f, 1e10f}, d->aabbMax);
+    return slot;
+}
+
+void imm_ssbo_init(VulkanContext* ctx) {
+    VkDeviceSize size = IMM_SSBO_MAX_ENTRIES * sizeof(MeshGPUData);
+
+    VkDescriptorSetLayoutBinding b = {
+        .binding         = 0,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+    };
+    VkDescriptorSetLayoutCreateInfo lci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &b
+    };
+    vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &immSSBOLayout);
+
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT };
+    VkDescriptorPoolCreateInfo pci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps
+    };
+    vkCreateDescriptorPool(ctx->device, &pci, NULL, &immSSBOPool);
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkBufferCreateInfo bci = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(ctx->device, &bci, NULL, &immSSBOBuffer[i]);
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(ctx->device, immSSBOBuffer[i], &mr);
+        VkMemoryAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, mr.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        vkAllocateMemory(ctx->device, &ai, NULL, &immSSBOMemory[i]);
+        vkBindBufferMemory(ctx->device, immSSBOBuffer[i], immSSBOMemory[i], 0);
+        vkMapMemory(ctx->device, immSSBOMemory[i], 0, size, 0, (void**)&immSSBOMapped[i]);
+
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = immSSBOPool, .descriptorSetCount = 1,
+            .pSetLayouts = &immSSBOLayout
+        };
+        vkAllocateDescriptorSets(ctx->device, &dsai, &immSSBOSets[i]);
+
+        VkDescriptorBufferInfo dbi = { .buffer = immSSBOBuffer[i], .offset = 0, .range = size };
+        VkWriteDescriptorSet w = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = immSSBOSets[i], .dstBinding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1, .pBufferInfo = &dbi
+        };
+        vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+    }
+    fprintf(stdout, "Immediate SSBO: %.1f MB x%d frames\n",
+            (double)(IMM_SSBO_MAX_ENTRIES * sizeof(MeshGPUData)) / (1024*1024),
+            MAX_FRAMES_IN_FLIGHT);
+}
+
+void imm_ssbo_shutdown(VulkanContext* ctx) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (immSSBOMapped[i])   { vkUnmapMemory(ctx->device, immSSBOMemory[i]); immSSBOMapped[i] = NULL; }
+        if (immSSBOBuffer[i])   { vkDestroyBuffer(ctx->device, immSSBOBuffer[i], NULL); immSSBOBuffer[i] = VK_NULL_HANDLE; }
+        if (immSSBOMemory[i])   { vkFreeMemory(ctx->device, immSSBOMemory[i], NULL);    immSSBOMemory[i] = VK_NULL_HANDLE; }
+    }
+    if (immSSBOLayout) { vkDestroyDescriptorSetLayout(ctx->device, immSSBOLayout, NULL); immSSBOLayout = VK_NULL_HANDLE; }
+    if (immSSBOPool)   { vkDestroyDescriptorPool(ctx->device, immSSBOPool, NULL);        immSSBOPool   = VK_NULL_HANDLE; }
+}
+
+void imm_ssbo_begin_frame(VulkanContext* ctx, uint32_t frameIndex) {
+    (void)ctx;
+    immFrameIndex   = frameIndex;
+    imm_frame_index = frameIndex;
+    immSlotCount    = 0;
+    immDrawCount    = 0;
+    vertex_count    = 0;
+    lineVertexCount = 0;
+}
+
+VkDescriptorSet      imm_ssbo_get_set(uint32_t frameIndex)  { return immSSBOSets[frameIndex]; }
+VkDescriptorSetLayout imm_ssbo_get_layout(void)             { return immSSBOLayout; }
 
 static void create_mapped_buffer(VkDevice dev, VkPhysicalDevice physDev, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer* buffer, VkDeviceMemory* memory, void** mapped) {
     VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
@@ -89,7 +254,11 @@ void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool
     physicalDevice = physDev;
     commandPool = cmdPool;
     graphicsQueue = queue;
-    create_mapped_buffer(device, physicalDevice, sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &vertexBuffer, &vertexBufferMemory, &vertexBufferMapped);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        create_mapped_buffer(device, physicalDevice, sizeof(vertices),
+                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                             &vertexBuffer[i], &vertexBufferMemory[i], &vertexBufferMapped[i]);
+    }
 }
 
 void vertex_with_normal(vec3 pos, Color color, vec3 normal) {
@@ -117,85 +286,37 @@ void vertex(vec3 pos, vec4 color) {
 }
 
 void triangle(vec3 a, vec3 b, vec3 c, Color color) {
+    uint32_t first = vertex_count;
     vec3 edge1, edge2, normal;
     glm_vec3_sub(b, a, edge1);
     glm_vec3_sub(c, a, edge2);
     glm_vec3_cross(edge1, edge2, normal);
     glm_vec3_normalize(normal);
-
     vertex_with_normal(a, color, normal);
     vertex_with_normal(b, color, normal);
     vertex_with_normal(c, color, normal);
-}
-
-
-static int get_3d_batch(Texture2D* texture) {
-    if (texture3DBatchCount > 0 && texture3DBatches[texture3DBatchCount - 1].texture == texture) {
-        return texture3DBatchCount - 1;
-    }
-    if (texture3DBatchCount >= MAX_TEXTURES) return -1;
-    int idx = texture3DBatchCount++;
-    texture3DBatches[idx].texture = texture;
-    texture3DBatches[idx].startVertex = vertex_count_3D_textured;
-    texture3DBatches[idx].vertexCount = 0;
-    texture3DBatches[idx].is_sdf = false;
-    return idx;
-}
-
-void texturedPlane(vec3 origin, vec2 size, Texture2D* texture, Color tint, float tileX, float tileZ) {
-    if (vertex_count_3D_textured + 6 >= MAX_VERTICES || !texture || !texture->loaded) {
-        return;
-    }
-
-    float w = size[0] / 2.0f;
-    float h = size[1] / 2.0f;
-    float x = origin[0], y = origin[1], z = origin[2];
-
-    Vertex plane[6] = {
-        // First triangle - use separate tileX and tileZ for UV coordinates
-        {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileZ}, 0},
-        {{x+w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileX, tileZ}, 0},
-        {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileX, 0.0f}, 0},
-
-        // Second triangle
-        {{x-w, y, z-h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, tileZ}, 0},
-        {{x+w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {tileX, 0.0f}, 0},
-        {{x-w, y, z+h}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, 0}
-    };
-
-    int batchIndex = get_3d_batch(texture);
-    if (batchIndex < 0) return;
-
-    memcpy(&vertices3D_textured[vertex_count_3D_textured], plane, sizeof(plane));
-    vertex_count_3D_textured += 6;
-    texture3DBatches[batchIndex].vertexCount += 6;
+    mat4 identity; glm_mat4_identity(identity);
+    imm_emit(first, 3, identity);
 }
 
 void plane(vec3 origin, vec2 size, Color color) {
+    uint32_t first = vertex_count;
     float w = size[0] / 2.0f;
     float h = size[1] / 2.0f;
-
     vec3 a, b, c, d;
-
-    // Define the four corners of the plane
     glm_vec3_add(origin, (vec3){-w, 0.0f, -h}, a);
     glm_vec3_add(origin, (vec3){+w, 0.0f, -h}, b);
     glm_vec3_add(origin, (vec3){+w, 0.0f, +h}, c);
     glm_vec3_add(origin, (vec3){-w, 0.0f, +h}, d);
-
-    // Normal pointing up (Y-axis)
     vec3 normal = {0.0f, 1.0f, 0.0f};
-
-    // Create two triangles to form the plane
-    // First triangle
     vertex_with_normal(a, color, normal);
     vertex_with_normal(b, color, normal);
     vertex_with_normal(c, color, normal);
-
-    // Second triangle
     vertex_with_normal(a, color, normal);
     vertex_with_normal(c, color, normal);
     vertex_with_normal(d, color, normal);
+    mat4 identity; glm_mat4_identity(identity);
+    imm_emit(first, 6, identity);
 }
 
 //    h-------g
@@ -207,6 +328,7 @@ void plane(vec3 origin, vec2 size, Color color) {
 //  a-------b
 
 void cube(vec3 origin, float size, Color color) {
+    uint32_t first = vertex_count;
     float s = size / 2.0f;
     vec3 a, b, c, d, e, f, g, h;
 
@@ -266,79 +388,13 @@ void cube(vec3 origin, float size, Color color) {
     vertex_with_normal(a, color, n_bottom);
     vertex_with_normal(f, color, n_bottom);
     vertex_with_normal(b, color, n_bottom);
-}
-
-
-void texturedCube(vec3 position, float size, Texture2D* texture, Color tint) {
-    if (vertex_count_3D_textured + 36 >= MAX_VERTICES || !texture || !texture->loaded) {
-        return;
-    }
-
-    float s = size / 2.0f;
-    float x = position[0], y = position[1], z = position[2];
-
-    // Define cube vertices with proper normals and texture coordinates
-    // Each face is properly rotated to form a cube
-    Vertex cube[36] = {
-        // Front face (facing +Z)
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, 0},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, 0},
-
-        // Back face (facing -Z) - rotated 180 degrees
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, 0},
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}, 0},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, 0},
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, 0},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, 0},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}, 0},
-
-        // Right face (facing +X) - rotated 90 degrees around Y
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, 0},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, 0},
-
-        // Left face (facing -X) - rotated -90 degrees around Y
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, 0},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, 0},
-
-        // Top face (facing +Y) - rotated 90 degrees around X
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}, 0},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y+s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y+s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, 0},
-
-        // Bottom face (facing -Y) - rotated -90 degrees around X
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, 0},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y-s, z-s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, 0},
-        {{x+s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, 0},
-        {{x-s, y-s, z+s}, {tint.r, tint.g, tint.b, tint.a}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, 0}
-    };
-
-    int batchIndex = get_3d_batch(texture);
-    if (batchIndex < 0) return;
-
-    memcpy(&vertices3D_textured[vertex_count_3D_textured], cube, sizeof(cube));
-    vertex_count_3D_textured += 36;
-    texture3DBatches[batchIndex].vertexCount += 36;
+    mat4 identity; glm_mat4_identity(identity);
+    imm_emit(first, 36, identity);
 }
 
 // TODO It should be shader based so it's cheaper and higher quality
 void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
+    uint32_t first = vertex_count;
     for (int lat = 0; lat < latDiv; ++lat) {
         float theta1 = (float)lat / latDiv * GLM_PI;
         float theta2 = (float)(lat + 1) / latDiv * GLM_PI;
@@ -387,24 +443,57 @@ void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
             vertex_with_normal(v3, color, n3);
         }
     }
+    mat4 identity; glm_mat4_identity(identity);
+    imm_emit(first, vertex_count - first, identity);
+}
+
+
+/* Call after filling vertices for one primitive — records the draw call */
+void imm_emit(uint32_t firstVertex, uint32_t count, mat4 model) {
+    if (immDrawCount >= IMM_SSBO_MAX_ENTRIES) return;
+    int slot = imm_alloc_slot(model);
+    immDrawList[immDrawCount++] = (ImmDrawCall){ firstVertex, count, slot };
+}
+
+/* Emit with a pre-allocated slot — use when batching multiple primitives
+   under the same transform/material to save SSBO entries (e.g. text3D).  */
+void imm_emit_with_slot(uint32_t firstVertex, uint32_t count, int slot) {
+    if (immDrawCount >= IMM_SSBO_MAX_ENTRIES) return;
+    immDrawList[immDrawCount++] = (ImmDrawCall){ firstVertex, count, slot };
 }
 
 void renderer_upload() {
     if (vertex_count == 0) return;
-    memcpy(vertexBufferMapped, vertices, vertex_count * sizeof(Vertex));
+    memcpy(vertexBufferMapped[imm_frame_index], vertices, vertex_count * sizeof(Vertex));
 }
 
 void renderer_draw(VkCommandBuffer cmd) {
-    if (vertex_count == 0) return;
-    glm_mat4_identity(pushConstants.model);
-    vkCmdPushConstants(cmd, context.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+    if (immDrawCount == 0) return;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline);
     VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, offsets);
-    vkCmdDraw(cmd, vertex_count, 1, 0, 0);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer[imm_frame_index], offsets);
+    for (uint32_t i = 0; i < immDrawCount; i++) {
+        pushConstants.meshIndex = immDrawList[i].slot;
+        vkCmdPushConstants(cmd, context.pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pushConstants);
+        vkCmdDraw(cmd, immDrawList[i].count, 1, immDrawList[i].firstVertex, 0);
+    }
+}
+
+/* Draw a range of vertices with a specific imm SSBO slot */
+void renderer_draw_single(VkCommandBuffer cmd, uint32_t firstVertex,
+                          uint32_t count, int slot) {
+    pushConstants.meshIndex = slot;
+    vkCmdPushConstants(cmd, context.pipelineLayout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(PushConstants), &pushConstants);
+    vkCmdDraw(cmd, count, 1, firstVertex, 0);
 }
 
 void renderer_clear() {
-    vertex_count = 0;
+    vertex_count  = 0;
+    immDrawCount  = 0;
 }
 
 void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
@@ -444,16 +533,12 @@ void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
 
 // WITH TEXTURES AND UNLIT
 void mesh(VkCommandBuffer cmd, Mesh* mesh) {
-    glm_mat4_copy(mesh->model, pushConstants.model);
-    pushConstants.isUnlit = mesh->is_unlit ? 1 : 0;
-    pushConstants.textureIndex = (mesh->texture && mesh->texture->loaded) ? (int)mesh->texture->bindlessSlot : -1;
-
-    VkPipeline pipeline = pushConstants.textureIndex >= 0 ? context.graphicsPipelineTextured3D : context.graphicsPipeline;
-    VkPipelineLayout layout = pushConstants.textureIndex >= 0 ? context.pipelineLayoutTextured3D : context.pipelineLayout;
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
-
+    /* legacy direct-draw path — model/material data comes from SSBO for
+       indirect meshes; this path is only used for dynamic/morph meshes  */
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured3D);
+    vkCmdPushConstants(cmd, context.pipelineLayoutTextured3D,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(PushConstants), &pushConstants);
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vertexBuffer, offsets);
     vkCmdDraw(cmd, mesh->vertexCount, 1, 0, 0);
@@ -631,20 +716,13 @@ void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
            only draw dynamic meshes (morph targets) here.                  */
         if (m->megaBaseVertex != UINT32_MAX) continue;
 
-        bool textured        = m->texture && m->texture->loaded;
-        VkPipeline       want_pipe   = context.graphicsPipelineTextured3D;
-        VkPipelineLayout want_layout = context.pipelineLayoutTextured3D;
+        VkPipeline       want_pipe   = context.graphicsPipeline;
+        VkPipelineLayout want_layout = context.pipelineLayout;
 
         if (want_pipe != bound_pipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want_pipe);
             bound_pipeline = want_pipe;
         }
-
-        glm_mat4_copy(m->model, pushConstants.model);
-        pushConstants.isUnlit      = m->is_unlit ? 1 : 0;
-        pushConstants.alphaMode    = m->alpha_mode;
-        pushConstants.alphaCutoff  = m->alpha_cutoff;
-        pushConstants.textureIndex = textured ? (int)m->texture->bindlessSlot : -1;
 
         vkCmdPushConstants(cmd, want_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -694,33 +772,17 @@ Mesh* get_mesh(const char* name) {
 
 Vertex2D vertices2D[MAX_VERTICES];
 uint32_t vertexCount2D = 0;
-uint32_t coloredVertexCount = 0;
-TextureBatch textureBatches[MAX_TEXTURES];
-uint32_t textureBatchCount = 0;
-
-static uint32_t texturedStartVertex = 0;
 
 void renderer2D_init() {
-    create_mapped_buffer(context.device, context.physicalDevice, sizeof(vertices2D), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &context.vertexBuffer2D, &context.vertexBufferMemory2D, &context.vertexBuffer2DMapped);
-}
-
-// Shift textured vertices when colored quads are added after textures
-static void shift_textured_vertices_right(uint32_t shift_amount) {
-    if (textureBatchCount == 0 || shift_amount == 0) return;
-
-    // Calculate how many textured vertices we have
-    uint32_t textured_vertex_count = vertexCount2D - coloredVertexCount;
-    if (textured_vertex_count == 0) return;
-
-    // Move textured vertices to the right to make room for new colored vertices
-    // Move from right to left to avoid overwriting
-    for (int i = (int)textured_vertex_count - 1; i >= 0; i--) {
-        vertices2D[coloredVertexCount + shift_amount + i] = vertices2D[coloredVertexCount + i];
-    }
-
-    // Update all batch start vertices
-    for (uint32_t i = 0; i < textureBatchCount; i++) {
-        textureBatches[i].startVertex += shift_amount;
+    /* allocate MAX_FRAMES_IN_FLIGHT buffers; store all in context using index 0
+       as the base — context holds vertexBuffer2D[MAX_FRAMES_IN_FLIGHT] so we
+       write each slot directly */
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        create_mapped_buffer(context.device, context.physicalDevice, sizeof(vertices2D),
+                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                             &context.vertexBuffer2D[i],
+                             &context.vertexBufferMemory2D[i],
+                             &context.vertexBuffer2DMapped[i]);
     }
 }
 
@@ -730,38 +792,18 @@ void quad2D(vec2 position, vec2 size, Color color) {
     float x = position[0], y = position[1];
     float w = size[0], h = size[1];
 
+    /* textureIndex = -1: shader outputs fragColor directly, no texture sample */
     Vertex2D quad[6] = {
-        {{x, y}, color, {0.0f, 0.0f}, 0},
-        {{x + w, y}, color, {1.0f, 0.0f}, 0},
-        {{x + w, y + h}, color, {1.0f, 1.0f}, 0},
-
-        {{x, y}, color, {0.0f, 0.0f}, 0},
-        {{x + w, y + h}, color, {1.0f, 1.0f}, 0},
-        {{x, y + h}, color, {0.0f, 1.0f}, 0}
+        {{x,     y    }, color, {0.0f, 0.0f}, -1},
+        {{x + w, y    }, color, {1.0f, 0.0f}, -1},
+        {{x + w, y + h}, color, {1.0f, 1.0f}, -1},
+        {{x,     y    }, color, {0.0f, 0.0f}, -1},
+        {{x + w, y + h}, color, {1.0f, 1.0f}, -1},
+        {{x,     y + h}, color, {0.0f, 1.0f}, -1}
     };
 
-    // If we already have textured vertices, we need to shift them right
-    if (textureBatchCount > 0) {
-        shift_textured_vertices_right(6);
-    }
-
-    // Insert colored vertices at the end of the colored section
-    memcpy(&vertices2D[coloredVertexCount], quad, sizeof(quad));
-    coloredVertexCount += 6;
+    memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
     vertexCount2D += 6;
-}
-
-static int get_2d_batch(Texture2D* texture) {
-    if (textureBatchCount > 0 && textureBatches[textureBatchCount - 1].texture == texture) {
-        return textureBatchCount - 1;
-    }
-    if (textureBatchCount >= MAX_TEXTURES) return -1;
-    int idx = textureBatchCount++;
-    textureBatches[idx].texture = texture;
-    textureBatches[idx].startVertex = vertexCount2D;
-    textureBatches[idx].vertexCount = 0;
-    textureBatches[idx].is_sdf = false;
-    return idx;
 }
 
 void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
@@ -774,30 +816,25 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
     float x = position[0], y = position[1];
     float w = size[0], h = size[1];
 
-    int batchIndex = get_2d_batch(texture);
-    if (batchIndex < 0) {
-        fprintf(stderr, "Too many texture batches!\n");
-        return;
-    }
+    if (!texture->loaded) return;
 
+    int32_t slot = (int32_t)texture->bindlessSlot;
     Vertex2D quad[6] = {
-        {{x, y}, tint, {0.0f, 1.0f}, 0},
-        {{x + w, y}, tint, {1.0f, 1.0f}, 0},
-        {{x + w, y + h}, tint, {1.0f, 0.0f}, 0},
-
-        {{x, y}, tint, {0.0f, 1.0f}, 0},
-        {{x + w, y + h}, tint, {1.0f, 0.0f}, 0},
-        {{x, y + h}, tint, {0.0f, 0.0f}, 0}
+        {{x,     y    }, tint, {0.0f, 1.0f}, slot},
+        {{x + w, y    }, tint, {1.0f, 1.0f}, slot},
+        {{x + w, y + h}, tint, {1.0f, 0.0f}, slot},
+        {{x,     y    }, tint, {0.0f, 1.0f}, slot},
+        {{x + w, y + h}, tint, {1.0f, 0.0f}, slot},
+        {{x,     y + h}, tint, {0.0f, 0.0f}, slot}
     };
 
     memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
     vertexCount2D += 6;
-    textureBatches[batchIndex].vertexCount += 6;
 }
 
 void renderer2D_upload() {
     if (vertexCount2D == 0) return;
-    memcpy(context.vertexBuffer2DMapped, vertices2D, vertexCount2D * sizeof(Vertex2D));
+    memcpy(context.vertexBuffer2DMapped[imm_frame_index], vertices2D, vertexCount2D * sizeof(Vertex2D));
 }
 
 void renderer2D_draw(VkCommandBuffer cmd) {
@@ -808,39 +845,24 @@ void renderer2D_draw(VkCommandBuffer cmd) {
               (float)context.swapChainExtent.height, 0.0f,
               -1.0f, 1.0f, projection);
 
+    /* Unified 2D pipeline: set=0 is the bindless texture array.
+       Colored quads have textureIndex=-1 in the vertex data so the
+       shader skips sampling. Textured quads carry the bindless slot.
+       Everything is interleaved in one buffer — single draw call.    */
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline2D);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            context.pipelineLayoutTextured2D, 0, 1,
+                            &context.bindlessSet, 0, NULL);
+    vkCmdPushConstants(cmd, context.pipelineLayoutTextured2D,
+                       VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mat4), &projection);
+
     VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D, offsets);
-
-    // Draw colored content first (non-textured quads)
-    if (coloredVertexCount > 0) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline2D);
-        vkCmdPushConstants(cmd, context.pipelineLayout2D, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mat4), &projection);
-        vkCmdDraw(cmd, coloredVertexCount, 1, 0, 0);
-    }
-
-    // Draw each texture batch (text and textured quads)
-    if (textureBatchCount > 0) {
-        for (uint32_t i = 0; i < textureBatchCount; i++) {
-            TextureBatch* batch = &textureBatches[i];
-
-            if (batch->vertexCount == 0) continue;
-
-            VkPipeline pipeline = batch->is_sdf ? context.graphicsPipelineSDF2D : context.graphicsPipelineTextured2D;
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            vkCmdPushConstants(cmd, context.pipelineLayoutTextured2D, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mat4), &projection);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.pipelineLayoutTextured2D, 0, 1, &batch->texture->descriptorSet, 0, NULL);
-
-            // Draw this batch
-            vkCmdDraw(cmd, batch->vertexCount, 1, batch->startVertex, 0);
-        }
-    }
+    vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D[imm_frame_index], offsets);
+    vkCmdDraw(cmd, vertexCount2D, 1, 0, 0);
 }
 
 void renderer2D_clear(void) {
     vertexCount2D = 0;
-    coloredVertexCount = 0;
-    textureBatchCount = 0;
-    texturedStartVertex = 0;
 }
 
 // --- Texture Loading ---
@@ -874,7 +896,7 @@ bool load_texture_from_rgba(VulkanContext* context, unsigned char* rgba_data,
 
 bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture,
                               unsigned char* rgba_data, int width, int height) {
-    if (width != texture->width || height != texture->height) {
+    if ((uint32_t)width != texture->width || (uint32_t)height != texture->height) {
         if (texture->view) vkDestroyImageView(context->device, texture->view, NULL);
         if (texture->image) vkDestroyImage(context->device, texture->image, NULL);
         if (texture->memory) vkFreeMemory(context->device, texture->memory, NULL);
@@ -1071,148 +1093,34 @@ void destroy_texture(VulkanContext* context, Texture2D* texture) {
     texture->loaded = false;
 }
 
-
-
 /// 3D TEXTURES
 
-// Initialize 3D textured vertex buffer
-void renderer_init_textured3D() {
-    create_mapped_buffer(device, physicalDevice, sizeof(vertices3D_textured), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &vertexBuffer3D_textured, &vertexBufferMemory3D_textured, &vertexBuffer3D_texturedMapped);
-}
-
-void texture3D(vec3 position, vec2 size, Texture2D* texture, Color tint) {
-    if (vertex_count_3D_textured + 6 >= MAX_VERTICES || !texture || !texture->loaded) {
-        if (!texture) printf("texture3D: NULL texture\n");
-        else if (!texture->loaded) printf("texture3D: texture not loaded\n");
-        return;
-    }
-
-    float x = position[0], y = position[1], z = position[2];
-    float w = size[0], h = size[1];
-
-    int batchIndex = get_3d_batch(texture);
-    if (batchIndex < 0) {
-        fprintf(stderr, "Too many texture batches in 3D!\n");
-        return;
-    }
-
-    Vertex quad[6] = {
-        // Triangle 1
-        { .pos = {x - w/2, y - h/2, z},
-          .color = {tint.r, tint.g, tint.b, tint.a},
-          .normal = {0.0f, 0.0f, 1.0f},
-          .texCoord = {1.0f, 1.0f} },
-
-        { .pos = {x + w/2, y - h/2, z},
-          .color = {tint.r, tint.g, tint.b, tint.a},
-          .normal = {0.0f, 0.0f, 1.0f},
-          .texCoord = {0.0f, 1.0f} },
-
-        { .pos = {x + w/2, y + h/2, z},
-          .color = {tint.r, tint.g, tint.b, tint.a},
-          .normal = {0.0f, 0.0f, 1.0f},
-          .texCoord = {0.0f, 0.0f} },
-
-        // Triangle 2
-        { .pos = {x - w/2, y - h/2, z},
-          .color = {tint.r, tint.g, tint.b, tint.a},
-          .normal = {0.0f, 0.0f, 1.0f},
-          .texCoord = {1.0f, 1.0f} },
-
-        { .pos = {x + w/2, y + h/2, z},
-          .color = {tint.r, tint.g, tint.b, tint.a},
-          .normal = {0.0f, 0.0f, 1.0f},
-          .texCoord = {0.0f, 0.0f} },
-
-        { .pos = {x - w/2, y + h/2, z},
-          .color = {tint.r, tint.g, tint.b, tint.a},
-          .normal = {0.0f, 0.0f, 1.0f},
-          .texCoord = {1.0f, 0.0f} }
-    };
-
-    memcpy(&vertices3D_textured[vertex_count_3D_textured], quad, sizeof(quad));
-    vertex_count_3D_textured += 6;
-    texture3DBatches[batchIndex].vertexCount += 6;
-}
-
-void renderer_upload_textured3D() {
-    if (vertex_count_3D_textured == 0) return;
-    memcpy(vertexBuffer3D_texturedMapped, vertices3D_textured, vertex_count_3D_textured * sizeof(Vertex));
-}
-
-void renderer_draw_textured3D(VkCommandBuffer cmd) {
-    if (texture3DBatchCount == 0) return;
-
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer3D_textured, offsets);
-
-    /* sets 0/1/2 already bound — just switch pipeline and push texture index */
-    glm_mat4_identity(pushConstants.model);
-    pushConstants.isUnlit = 0;
-    pushConstants.alphaMode = 0;
-    pushConstants.alphaCutoff = 0.5f;
-
-    VkPipeline bound_pipeline = VK_NULL_HANDLE;
-
-    for (uint32_t i = 0; i < texture3DBatchCount; i++) {
-        Texture3DBatch* batch = &texture3DBatches[i];
-        if (batch->vertexCount == 0) continue;
-
-        VkPipeline pipeline = batch->is_sdf
-            ? context.graphicsPipelineSDF3D
-            : context.graphicsPipelineTextured3D;
-        VkPipelineLayout layout = context.pipelineLayoutTextured3D;
-
-        if (pipeline != bound_pipeline) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            bound_pipeline = pipeline;
-        }
-
-        /* Use bindless slot — no per-batch descriptor bind needed */
-        pushConstants.textureIndex = (batch->texture && batch->texture->loaded)
-            ? (int)batch->texture->bindlessSlot : -1;
-
-        vkCmdPushConstants(cmd, layout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pushConstants);
-
-        vkCmdDraw(cmd, batch->vertexCount, 1, batch->startVertex, 0);
-    }
-}
-
-// Clear 3D textured content
-void renderer_clear_textured3D() {
-    vertex_count_3D_textured = 0;
-    texture3DBatchCount = 0;
-}
-
 void renderer_shutdown() {
-    vkDestroyBuffer(device, vertexBuffer, NULL);
-    vkFreeMemory(device, vertexBufferMemory, NULL);
-
-    // Add cleanup for 3D textured buffer
-    if (vertexBuffer3D_textured) {
-        vkDestroyBuffer(device, vertexBuffer3D_textured, NULL);
-        vkFreeMemory(device, vertexBufferMemory3D_textured, NULL);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (vertexBuffer[i])       { vkDestroyBuffer(device, vertexBuffer[i],       NULL); vertexBuffer[i]       = VK_NULL_HANDLE; }
+        if (vertexBufferMemory[i]) { vkFreeMemory   (device, vertexBufferMemory[i], NULL); vertexBufferMemory[i] = VK_NULL_HANDLE; }
     }
 }
-
 
 /// LINE
 
 // --- Line Renderer ---
-static Vertex lineVertices[MAX_VERTICES];
-uint32_t lineVertexCount = 0;
-static VkBuffer lineVertexBuffer;
-static VkDeviceMemory lineVertexBufferMemory;
-static void* lineVertexBufferMapped = NULL;
+static Vertex         lineVertices[MAX_VERTICES];
+uint32_t              lineVertexCount = 0;
+static VkBuffer       lineVertexBuffer[MAX_FRAMES_IN_FLIGHT];
+static VkDeviceMemory lineVertexBufferMemory[MAX_FRAMES_IN_FLIGHT];
+static void*          lineVertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
 
 void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool, VkQueue queue) {
     device = dev;
     physicalDevice = physDev;
     commandPool = cmdPool;
     graphicsQueue = queue;
-    create_mapped_buffer(device, physicalDevice, sizeof(lineVertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &lineVertexBuffer, &lineVertexBufferMemory, &lineVertexBufferMapped);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        create_mapped_buffer(device, physicalDevice, sizeof(lineVertices),
+                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                             &lineVertexBuffer[i], &lineVertexBufferMemory[i], &lineVertexBufferMapped[i]);
+    }
 }
 
 void line(vec3 start, vec3 end, Color color) {
@@ -1237,14 +1145,25 @@ void line(vec3 start, vec3 end, Color color) {
 
 void line_renderer_upload() {
     if (lineVertexCount == 0) return;
-    memcpy(lineVertexBufferMapped, lineVertices, lineVertexCount * sizeof(Vertex));
+    memcpy(lineVertexBufferMapped[imm_frame_index], lineVertices, lineVertexCount * sizeof(Vertex));
 }
 
 void line_renderer_draw(VkCommandBuffer cmd) {
     if (lineVertexCount == 0) return;
 
+    /* Lines use the PBR pipeline/layout — bind the imm SSBO so the shader
+       has a valid set=2, and push meshIndex=-1 (no SSBO lookup needed for
+       lines since color comes from the vertex attribute directly).         */
+    VkDescriptorSet immSet = imm_ssbo_get_set(imm_frame_index);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            context.pipelineLayout, 2, 1, &immSet, 0, NULL);
+    pushConstants.meshIndex = -2; /* sentinel: line draw, ignore SSBO material */
+    vkCmdPushConstants(cmd, context.pipelineLayout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(PushConstants), &pushConstants);
+
     VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &lineVertexBuffer, offsets);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &lineVertexBuffer[imm_frame_index], offsets);
     vkCmdDraw(cmd, lineVertexCount, 1, 0, 0);
 }
 
@@ -1253,10 +1172,12 @@ void line_renderer_clear() {
 }
 
 void line_renderer_shutdown() {
-    if (lineVertexBuffer) {
-        vkDestroyBuffer(device, lineVertexBuffer, NULL);
-        vkFreeMemory(device, lineVertexBufferMemory, NULL);
-        lineVertexBuffer = VK_NULL_HANDLE;
-        lineVertexBufferMemory = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (lineVertexBuffer[i]) {
+            vkDestroyBuffer(device, lineVertexBuffer[i], NULL);
+            vkFreeMemory(device, lineVertexBufferMemory[i], NULL);
+            lineVertexBuffer[i]       = VK_NULL_HANDLE;
+            lineVertexBufferMemory[i] = VK_NULL_HANDLE;
+        }
     }
 }

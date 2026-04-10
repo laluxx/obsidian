@@ -51,9 +51,7 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     createInstance(&context);
 
     vec3 camera_pos = {0.0f, 3.0f, 0.0f};
-    vec3 camera_target = {0.0f, 2.0f, 0.0f};
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
-
     camera.active = true;
 
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
@@ -90,6 +88,8 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
         context.graphicsQueue
     );
 
+    imm_ssbo_init(&context);
+
     // 128 MB for static mesh geometry (Sponza + typical scenes fit in ~30–60 MB)
     createMegaVertexBuffer(&context, 128ULL * 1024 * 1024);
     // 64 MB for indices — much smaller than vertices (4 bytes vs 32 bytes per entry)
@@ -97,17 +97,15 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     // 32 MB dynamic budget: 2D UI + lines + morph-target meshes
     createDynamicBuffers(&context, 32ULL * 1024 * 1024);
 
-    createMeshSSBO(&context, 4096);       // supports up to 4096 meshes
-    createIndirectPipelineLayout(&context);
+    createMeshSSBO(&context, 4096);
     createIndirectBuffer(&context, 4096);
 
+    createLightingDescriptors(&context);
     createAllPipelineLayouts(&context);
     createGraphicsPipelines(&context);
     createComputeCullPipeline(&context);
 
     renderer2D_init();
-
-    renderer_init_textured3D();
 
     line_renderer_init(
         context.device,
@@ -122,6 +120,18 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     createSyncObjects(&context);
 
     scene_init(&scene);
+
+    // Default scene lighting — sun from upper-right, moderate ambient
+    LightingData* ld = CTX_LIGHTING(&context);
+    ld->sun.direction[0] = -0.3f; ld->sun.direction[1] = -0.8f;
+    ld->sun.direction[2] = -0.5f; ld->sun.direction[3] =  0.0f;
+    ld->sun.color[0]     =  1.0f; ld->sun.color[1]     =  0.95f;
+    ld->sun.color[2]     =  0.8f; ld->sun.color[3]     =  3.0f;  // w=intensity
+    ld->pointLightCount  = 0;
+    ld->ambientIntensity = 0.4f;
+    ld->iblEnabled       = 0;
+    ld->cameraPos[0]     = 0.0f; ld->cameraPos[1] = 0.0f;
+    ld->cameraPos[2]     = 0.0f; ld->cameraPos[3] = 0.0f;
 
     texture_pool_init();
 
@@ -148,6 +158,12 @@ void beginFrame() {
     delta_time = current_frame - last_frame;
     last_frame = current_frame;
 
+    /* Reset ALL per-frame CPU render state first — before any user draw calls.
+       imm_ssbo_begin_frame resets immSlotCount, immDrawCount, vertex_count,
+       lineVertexCount, and sets the correct frame index.                      */
+    imm_ssbo_begin_frame(&context, context.currentFrame);
+    renderer2D_clear();
+
     animate_scene(&scene, current_frame);
     markMeshesSSBODirty(&context);  /* animations modified transforms */
 
@@ -168,12 +184,6 @@ void beginFrame() {
 
     flushMeshSSBO(&context, &scene.meshes);
     updateUniformBuffer(&context);
-
-    // Clear all render buffers
-    renderer_clear();
-    renderer_clear_textured3D();
-    line_renderer_clear();
-    renderer2D_clear();
 }
 
 void endFrame() {
@@ -181,25 +191,25 @@ void endFrame() {
     if (context.framebufferResized) {
         context.framebufferResized = false;
         recreateSwapChain(&context);
-        return; // Skip this frame after recreation
+        return;
     }
 
-    // Upload all geometry to GPU
+    // Upload all geometry to GPU (slots/counts were set in beginFrame)
     renderer_upload();
-    renderer_upload_textured3D();
     line_renderer_upload();
     renderer2D_upload();
 
-    // RENDER FRAME
-    uint32_t frameIndex = context.currentFrame;
-    VkFence inFlightFence = context.inFlightFences[frameIndex];
+    uint32_t frameIndex   = context.currentFrame;
+    VkFence  inFlightFence = context.inFlightFences[frameIndex];
+
+    vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
         context.device, context.swapChain, UINT64_MAX,
         context.imageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex
     );
 
-    // Only handle critical errors - resize is handled by callback
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapChain(&context);
         return;
@@ -208,17 +218,9 @@ void endFrame() {
         exit(EXIT_FAILURE);
     }
 
-    vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-
-    if (context.imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
-        vkWaitForFences(context.device, 1, &context.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
-    }
-    context.imagesInFlight[imageIndex] = inFlightFence;
     vkResetFences(context.device, 1, &inFlightFence);
 
-    // Re-record command buffer with new geometry
     recordCommandBuffer(&context, imageIndex);
-
     VkSemaphore waitSemaphores[] = { context.imageAvailableSemaphores[frameIndex] };
     VkSemaphore signalSemaphores[] = { context.renderFinishedSemaphores[imageIndex] };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };

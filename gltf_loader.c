@@ -172,6 +172,8 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     cgltf_accessor* texcoord_accessor = NULL;
     cgltf_accessor* color_accessor = NULL;
 
+    cgltf_accessor* tangent_accessor = NULL;
+
     for (size_t j = 0; j < prim->attributes_count; ++j) {
         cgltf_attribute* attr = &prim->attributes[j];
         switch (attr->type) {
@@ -186,6 +188,9 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
                 break;
             case cgltf_attribute_type_color:
                 color_accessor = attr->data;
+                break;
+            case cgltf_attribute_type_tangent:
+                tangent_accessor = attr->data;
                 break;
             default:
                 break;
@@ -264,6 +269,73 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
 
     mesh.is_unlit = is_unlit;
 
+    /* PBR material defaults */
+    glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mesh.baseColorFactor);
+    mesh.metallicFactor    = 1.0f;
+    mesh.roughnessFactor   = 1.0f;
+    mesh.emissiveStrength  = 1.0f;
+    glm_vec3_copy((vec3){0.0f, 0.0f, 0.0f}, mesh.emissiveFactor);
+    mesh.normalMapIndex      = -1;
+    mesh.metallicRoughIndex  = -1;
+    mesh.aoIndex             = -1;
+    mesh.emissiveIndex       = -1;
+
+    if (prim->material && prim->material->has_pbr_metallic_roughness) {
+        cgltf_pbr_metallic_roughness* pbr = &prim->material->pbr_metallic_roughness;
+        memcpy(mesh.baseColorFactor, pbr->base_color_factor, sizeof(vec4));
+        mesh.metallicFactor   = pbr->metallic_factor;
+        mesh.roughnessFactor  = pbr->roughness_factor;
+
+        /* Normal map */
+        if (prim->material->normal_texture.texture) {
+            for (size_t t = 0; t < data->textures_count; t++) {
+                if (&data->textures[t] == prim->material->normal_texture.texture) {
+                    if (t < gltf_texture_count && gltf_texture_indices[t] >= 0)
+                        mesh.normalMapIndex = gltf_texture_indices[t];
+                    break;
+                }
+            }
+        }
+
+        /* Metallic-roughness combined map */
+        if (pbr->metallic_roughness_texture.texture) {
+            for (size_t t = 0; t < data->textures_count; t++) {
+                if (&data->textures[t] == pbr->metallic_roughness_texture.texture) {
+                    if (t < gltf_texture_count && gltf_texture_indices[t] >= 0)
+                        mesh.metallicRoughIndex = gltf_texture_indices[t];
+                    break;
+                }
+            }
+        }
+
+        /* Occlusion map */
+        if (prim->material->occlusion_texture.texture) {
+            for (size_t t = 0; t < data->textures_count; t++) {
+                if (&data->textures[t] == prim->material->occlusion_texture.texture) {
+                    if (t < gltf_texture_count && gltf_texture_indices[t] >= 0)
+                        mesh.aoIndex = gltf_texture_indices[t];
+                    break;
+                }
+            }
+        }
+
+        /* Emissive map */
+        if (prim->material->emissive_texture.texture) {
+            for (size_t t = 0; t < data->textures_count; t++) {
+                if (&data->textures[t] == prim->material->emissive_texture.texture) {
+                    if (t < gltf_texture_count && gltf_texture_indices[t] >= 0)
+                        mesh.emissiveIndex = gltf_texture_indices[t];
+                    break;
+                }
+            }
+        }
+
+        /* Emissive factor and KHR_materials_emissive_strength */
+        glm_vec3_copy(prim->material->emissive_factor, mesh.emissiveFactor);
+        if (prim->material->has_emissive_strength)
+            mesh.emissiveStrength = prim->material->emissive_strength.emissive_strength;
+    }
+
     // Create vertex array with material colors
     Vertex* vertices = malloc(vertex_count * sizeof(Vertex));
 
@@ -288,6 +360,17 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         } else {
             vertices[v].texCoord[0] = 0.0f;
             vertices[v].texCoord[1] = 0.0f;
+        }
+
+        // Tangent (vec4: xyz=tangent, w=bitangent sign)
+        if (tangent_accessor) {
+            cgltf_accessor_read_float(tangent_accessor, v, vertices[v].tangent, 4);
+        } else {
+            // Fallback tangent — will look wrong for normal maps but won't crash
+            vertices[v].tangent[0] = 1.0f;
+            vertices[v].tangent[1] = 0.0f;
+            vertices[v].tangent[2] = 0.0f;
+            vertices[v].tangent[3] = 1.0f;
         }
 
         // Color - prioritize vertex colors, fallback to material base color
