@@ -901,12 +901,12 @@ bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture,
         if (texture->image) vkDestroyImage(context->device, texture->image, NULL);
         if (texture->memory) vkFreeMemory(context->device, texture->memory, NULL);
 
-        alloc_texture_image(context, width, height, VK_FORMAT_R8G8B8A8_SRGB, &texture->image, &texture->memory);
-        upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED);
+        alloc_texture_image(context, width, height, VK_FORMAT_R8G8B8A8_UNORM, &texture->image, &texture->memory);
+        upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED);
 
         VkImageViewCreateInfo viewInfo = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = texture->image,
-            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_SRGB,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
             .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
         };
         vkCreateImageView(context->device, &viewInfo, NULL, &texture->view);
@@ -918,7 +918,7 @@ bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture,
         texture->width = width; texture->height = height;
         return true;
     }
-    return upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 // Shared staging buffer upload helper — stages pixels, transitions, copies, cleans up.
@@ -1046,7 +1046,7 @@ static bool finalize_texture(VulkanContext* ctx, Texture2D* texture,
 
 static bool load_texture_from_pixels(VulkanContext* ctx, stbi_uc* pixels, int w, int h, Texture2D* texture) {
     if (!pixels) return false;
-    VkFormat fmt = VK_FORMAT_R8G8B8A8_SRGB;
+    VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
     bool ok = alloc_texture_image(ctx, w, h, fmt, &texture->image, &texture->memory) &&
               upload_pixels_to_image(ctx, pixels, (VkDeviceSize)w*h*4, texture->image, w, h, fmt, VK_IMAGE_LAYOUT_UNDEFINED) &&
               finalize_texture(ctx, texture, fmt, VK_SAMPLER_ADDRESS_MODE_REPEAT);

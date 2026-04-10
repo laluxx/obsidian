@@ -1,0 +1,40 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D equirectangularMap;
+layout(set = 0, binding = 1, rgba32f) uniform writeonly image2DArray outputCubemap;
+
+const vec2 invAtan = vec2(0.1591, 0.3183);
+
+vec2 SampleSphericalMap(vec3 v) {
+    vec2 uv = vec2(atan(v.z, v.x), asin(v.y));
+    uv *= invAtan;
+    uv += 0.5;
+    return uv;
+}
+
+vec3 getDir(uint face, vec2 uv) {
+    vec3 dir;
+    if      (face == 0) dir = vec3( 1.0, -uv.y, -uv.x); // +X
+    else if (face == 1) dir = vec3(-1.0, -uv.y,  uv.x); // -X
+    else if (face == 2) dir = vec3( uv.x,  1.0,  uv.y); // +Y
+    else if (face == 3) dir = vec3( uv.x, -1.0, -uv.y); // -Y
+    else if (face == 4) dir = vec3( uv.x, -uv.y,  1.0); // +Z
+    else if (face == 5) dir = vec3(-uv.x, -uv.y, -1.0); // -Z
+    return normalize(dir);
+}
+
+void main() {
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+    ivec2 size = imageSize(outputCubemap).xy;
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    vec2 uv = (vec2(pos.xy) + 0.5) / vec2(size);
+    uv = uv * 2.0 - 1.0;
+
+    vec3 dir = getDir(pos.z, uv);
+    vec2 sphUV = SampleSphericalMap(normalize(dir));
+
+    vec3 color = texture(equirectangularMap, sphUV).rgb;
+    imageStore(outputCubemap, pos, vec4(color, 1.0));
+}

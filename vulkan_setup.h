@@ -98,13 +98,16 @@ void recordCommandBuffer(VulkanContext* context, uint32_t imageIndex);
 
 /* ── misc ──────────────────────────────────────── */
 void clear_background(Color color);
+void toggle_ambient_occlusion(void);
+extern bool skyboxEnabled;
+void toggle_skybox(void);
+
 void cleanup(VulkanContext* context);
 uint32_t findMemoryType(VkPhysicalDevice physDev, uint32_t typeFilter, VkMemoryPropertyFlags props);
 VkCommandBuffer beginSingleTimeCommands(VkDevice device, VkCommandPool pool);
 void endSingleTimeCommands(VkDevice device, VkCommandPool pool, VkQueue queue, VkCommandBuffer cmd);
 void copyBuffer(VkDevice device, VkCommandPool pool, VkQueue queue,
                 VkBuffer src, VkBuffer dst, VkDeviceSize size, VkDeviceSize srcOffset, VkDeviceSize dstOffset);
-void toggle_ambient_occlusion(void);
 
 /* ── mega-buffer / dynamic buffer helpers ─────── */
 void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size);

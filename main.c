@@ -468,7 +468,7 @@ int main() {
     Texture2D* texture5 = texture_pool_get(tex5);
 
     /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
-    /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
+    load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // FIXME
 
     /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene); // FIXME ? */
     /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
@@ -484,7 +484,6 @@ int main() {
     /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO Materials */
     /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS */
     /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
-    load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // FIXME
     /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */
     /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene); // PASS FIXME FLICKER ? */
     /* load_gltf("./assets/gltf/Fox.glb", &scene); // FIXME ANIMATIONS */
@@ -494,7 +493,12 @@ int main() {
 
     Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
 
+    // Bake and load the HDR Environment Map
+    /* loadIBL(&context, "./assets/hdr/ferndale_studio_04_4k.hdr"); */
+    loadIBL(&context, "./assets/hdr/ferndale_studio_05_4k.hdr");
+
     registerKeyCallback(key_callback);
+
     registerScrollCallback(scroll_callback);
     registerCursorPosCallback(cursor_pos_callback);
     registerMouseButtonCallback(mouse_button_callback);
@@ -507,7 +511,7 @@ int main() {
     keychord_bind(&keymap, "C-<right>", otherTestFunc,      "TestFunc description", PRESS);
     keychord_bind(&keymap, "S-<down>",  otherTestFunc,      "TestFunc description", PRESS);
     keychord_bind(&keymap, "<up>",      otherTestFunc,      "TestFunc description", PRESS);
-    keychord_bind(&keymap, "TAB",       otherTestFunc,      "TestFunc description", PRESS);
+    keychord_bind(&keymap, "TAB",       toggle_skybox,      "Toggle the skybox",    PRESS);
     keychord_bind(&keymap, "M-x n L",   otherTestFunc,      "TestFunc description", PRESS);
     keychord_bind(&keymap, "C-g",       keymap_reset_state, "TestFunc description", PRESS);
 

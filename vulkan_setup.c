@@ -14,6 +14,21 @@
 #include "2D.vert.spv.h"
 #include "2D.frag.spv.h"
 #include "cull.comp.spv.h"
+#include "stb_image.h"
+#include "equirect2cube.comp.spv.h"
+#include "irradiance.comp.spv.h"
+#include "prefilter.comp.spv.h"
+#include "brdf_lut.comp.spv.h"
+#include "skybox.vert.spv.h"
+#include "skybox.frag.spv.h"
+
+/// Globals
+bool skyboxEnabled = true;
+VkPipeline skyboxPipeline = VK_NULL_HANDLE;
+VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
+VkImage iblSkyboxImage = VK_NULL_HANDLE;
+VkDeviceMemory iblSkyboxMemory = VK_NULL_HANDLE;
+VkImageView iblSkyboxView = VK_NULL_HANDLE;
 
 /// Validation
 
@@ -700,6 +715,10 @@ void createAllPipelineLayouts(VulkanContext* ctx)
 // all created in ONE batch call
 void createGraphicsPipelines(VulkanContext* ctx)
 {
+    VkDescriptorSetLayout skyboxLayouts[2] = { ctx->descriptorSetLayout, ctx->lightingSetLayout };
+    VkPipelineLayoutCreateInfo skyboxPlci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 2, .pSetLayouts = skyboxLayouts };
+    vkCreatePipelineLayout(ctx->device, &skyboxPlci, NULL, &skyboxPipelineLayout);
+
     VkPipelineCacheCreateInfo cacheCI = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
     vkCreatePipelineCache(ctx->device, &cacheCI, NULL, &pipelineCache);
 
@@ -740,6 +759,14 @@ void createGraphicsPipelines(VulkanContext* ctx)
                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsPBR) };
     VkPipelineShaderStageCreateInfo ss2DColor[2] = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fs2D)  };
+
+    VkShaderModule vsSkybox = createShaderModule(ctx->device, skybox_vert_spv, sizeof(skybox_vert_spv));
+    VkShaderModule fsSkybox = createShaderModule(ctx->device, skybox_frag_spv, sizeof(skybox_frag_spv));
+    VkPipelineShaderStageCreateInfo ssSkybox[2]  = { STAGE(VK_SHADER_STAGE_VERTEX_BIT, vsSkybox),
+                                                      STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsSkybox) };
+
+    VkPipelineDepthStencilStateCreateInfo depthSkybox = makeDepth(true, false);
+    depthSkybox.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     /*
        Index  Pipeline
@@ -785,10 +812,23 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .layout              = ctx->pipelineLayoutTextured2D,
             .renderPass          = ctx->renderPass
         },
+        /* 3: Skybox */
+        {
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .stageCount          = 2, .pStages             = ssSkybox,
+            .pVertexInputState   = &(VkPipelineVertexInputStateCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO },
+            .pInputAssemblyState = &ia3D,
+            .pViewportState      = &kViewportState,
+            .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
+            .pColorBlendState    = &blend, .pDepthStencilState = &depthSkybox,
+            .pDynamicState       = &kDynamicState,
+            .layout              = skyboxPipelineLayout,
+            .renderPass          = ctx->renderPass
+        }
     };
 
-    VkPipeline pipelines[3];
-    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 3, pci, NULL, pipelines) != VK_SUCCESS) {
+    VkPipeline pipelines[4];
+    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 4, pci, NULL, pipelines) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipelines\n");
         exit(EXIT_FAILURE);
     }
@@ -804,11 +844,14 @@ void createGraphicsPipelines(VulkanContext* ctx)
     /* Single unified 2D pipeline — handles colored and textured quads */
     ctx->graphicsPipeline2D         = pipelines[2];
     ctx->graphicsPipelineTextured2D = pipelines[2];
+    skyboxPipeline                  = pipelines[3];
 
     vkDestroyShaderModule(ctx->device, vsPBR, NULL);
     vkDestroyShaderModule(ctx->device, fsPBR, NULL);
     vkDestroyShaderModule(ctx->device, vs2D,  NULL);
     vkDestroyShaderModule(ctx->device, fs2D,  NULL);
+    vkDestroyShaderModule(ctx->device, vsSkybox, NULL);
+    vkDestroyShaderModule(ctx->device, fsSkybox, NULL);
 }
 
 /* Indirect pipeline layout — created AFTER createMeshSSBO so ssboSetLayout is valid */
@@ -1269,6 +1312,9 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
+    pushConstants.iblEnabled = ctx->iblLoaded ? 1 : 0;
+    CTX_LIGHTING(ctx)->iblEnabled = ctx->iblLoaded ? 1 : 0;
+    CTX_LIGHTING(ctx)->ambientIntensity = 1.0f; // Ensure IBL isn't multiplied by 0!
 
     updateLightingUBO(ctx);
 
@@ -1315,6 +1361,14 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     if (lineVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
         line_renderer_draw(cmd);
+    }
+
+    /* ── Skybox ─────────────────────────────────────────────────────── */
+    if (skyboxEnabled && iblSkyboxView != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
+        VkDescriptorSet skyboxSets[2] = { ctx->descriptorSets[ctx->currentFrame], ctx->lightingSets[ctx->currentFrame] };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 2, skyboxSets, 0, NULL);
+        vkCmdDraw(cmd, 36, 1, 0, 0);
     }
 
     /* ── 2D ─────────────────────────────────────────────────────────── */
@@ -1578,6 +1632,9 @@ void cleanup(VulkanContext* ctx)
     DESTROY_LAYOUT(pipelineLayoutTextured3D)
     DESTROY_LAYOUT(pipelineLayoutLine)
     DESTROY_LAYOUT(pipelineLayoutIndirect)
+
+    if (skyboxPipeline) { vkDestroyPipeline(ctx->device, skyboxPipeline, NULL); skyboxPipeline = VK_NULL_HANDLE; }
+    if (skyboxPipelineLayout) { vkDestroyPipelineLayout(ctx->device, skyboxPipelineLayout, NULL); skyboxPipelineLayout = VK_NULL_HANDLE; }
 
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
@@ -1950,22 +2007,25 @@ void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
 
 void createLightingDescriptors(VulkanContext* ctx)
 {
-    VkDescriptorSetLayoutBinding b = {
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT
+    VkDescriptorSetLayoutBinding b[5] = {
+        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT },
+        { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
     };
-    VkDescriptorSetLayoutCreateInfo lci = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1, .pBindings = &b
-    };
+    VkDescriptorBindingFlagsEXT flags[5] = { 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT };
+    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT flagsInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 5, .pBindingFlags = flags };
+    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &flagsInfo, .bindingCount = 5, .pBindings = b };
     vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->lightingSetLayout);
 
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT };
+    VkDescriptorPoolSize ps[2] = {
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT * 4 }
+    };
     VkDescriptorPoolCreateInfo pci = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps
+        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 2, .pPoolSizes = ps
     };
     vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->lightingPool);
 
@@ -2203,8 +2263,235 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
     ctx->ssboFramesDirty--;
 }
 
+static void create_ibl_image(VulkanContext* ctx, uint32_t w, uint32_t h, uint32_t mips, uint32_t layers, VkFormat format, VkImageUsageFlags usage, VkImage* img, VkDeviceMemory* mem) {
+    VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = format,
+        .extent = {w, h, 1}, .mipLevels = mips, .arrayLayers = layers, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = usage, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    if (layers == 6) ci.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    vkCreateImage(ctx->device, &ci, NULL, img);
+    VkMemoryRequirements req; vkGetImageMemoryRequirements(ctx->device, *img, &req);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    vkAllocateMemory(ctx->device, &ai, NULL, mem);
+    vkBindImageMemory(ctx->device, *img, *mem, 0);
+}
+
+static VkImageView create_ibl_view(VulkanContext* ctx, VkImage img, VkFormat format, VkImageViewType type, uint32_t baseMip, uint32_t mipCount, uint32_t layerCount) {
+    VkImageViewCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = type, .format = format,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, baseMip, mipCount, 0, layerCount } };
+    VkImageView view; vkCreateImageView(ctx->device, &ci, NULL, &view);
+    return view;
+}
+
+static void transition_image_compute(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t baseMip, uint32_t mipCount, uint32_t layerCount) {
+    VkImageMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = oldLayout, .newLayout = newLayout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, mipCount, 0, layerCount} };
+
+    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) barrier.srcAccessMask = 0;
+    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    else if (oldLayout == VK_IMAGE_LAYOUT_GENERAL) barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+    if (newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    else if (newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    else if (newLayout == VK_IMAGE_LAYOUT_GENERAL) barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+}
+
+static void write_ibl_descriptor_set(VkDevice device, VkSampler tempSampler, VkDescriptorSet set, VkImageView sampView, VkImageView storView) {
+    VkDescriptorImageInfo dSamp = { .sampler = tempSampler, .imageView = sampView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo dStor = { .imageView = storView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w[2] = {
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dSamp },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .pImageInfo = &dStor }
+    };
+    vkUpdateDescriptorSets(device, sampView ? 2 : 1, sampView ? w : &w[1], 0, NULL);
+}
+
+bool loadIBL(VulkanContext* ctx, const char* hdr_path) {
+    int w, h, channels;
+    float* pixels = stbi_loadf(hdr_path, &w, &h, &channels, 4);
+    if (!pixels) { fprintf(stderr, "Failed to load HDR: %s\n", hdr_path); return false; }
+
+    VkFormat fmt32 = VK_FORMAT_R32G32B32A32_SFLOAT;
+
+    // 1. Source HDR Image
+    VkImage hdrImg; VkDeviceMemory hdrMem;
+    create_ibl_image(ctx, w, h, 1, 1, fmt32, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &hdrImg, &hdrMem);
+    VkImageView hdrView = create_ibl_view(ctx, hdrImg, fmt32, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1);
+
+    VkDeviceSize size = w * h * 4 * sizeof(float);
+    VkBuffer stgBuf; VkDeviceMemory stgMem;
+    createBuffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stgBuf, &stgMem);
+    void* mapped; vkMapMemory(ctx->device, stgMem, 0, size, 0, &mapped);
+    memcpy(mapped, pixels, size); vkUnmapMemory(ctx->device, stgMem);
+    stbi_image_free(pixels);
+
+    // 2. Temp Environment Cubemap
+    VkImage envImg; VkDeviceMemory envMem;
+    create_ibl_image(ctx, 1024, 1024, 1, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &envImg, &envMem);
+    VkImageView envCubeView = create_ibl_view(ctx, envImg, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 1, 6);
+    VkImageView envArrayView = create_ibl_view(ctx, envImg, fmt32, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0, 1, 6);
+
+    // 3. Final IBL Images
+    destroyIBL(ctx);
+    create_ibl_image(ctx, 32, 32, 1, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblIrradianceImage, &ctx->iblIrradianceMemory);
+    ctx->iblIrradianceView = create_ibl_view(ctx, ctx->iblIrradianceImage, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 1, 6);
+    VkImageView irradArrayView = create_ibl_view(ctx, ctx->iblIrradianceImage, fmt32, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0, 1, 6);
+
+    create_ibl_image(ctx, 128, 128, 5, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblPrefilterImage, &ctx->iblPrefilterMemory);
+    ctx->iblPrefilterView = create_ibl_view(ctx, ctx->iblPrefilterImage, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 5, 6);
+    VkImageView prefArrayViews[5];
+    for(uint32_t i=0; i<5; i++) prefArrayViews[i] = create_ibl_view(ctx, ctx->iblPrefilterImage, fmt32, VK_IMAGE_VIEW_TYPE_2D_ARRAY, i, 1, 6);
+
+    create_ibl_image(ctx, 512, 512, 1, 1, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblBrdfLutImage, &ctx->iblBrdfLutMemory);
+    ctx->iblBrdfLutView = create_ibl_view(ctx, ctx->iblBrdfLutImage, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1);
+
+    // Temp Sampler
+    VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxAnisotropy = 1.0f };
+    VkSampler tempSampler; vkCreateSampler(ctx->device, &sci, NULL, &tempSampler);
+
+    // Descriptor Layouts & Pipelines
+    VkDescriptorSetLayoutBinding bGen[] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}
+    };
+    VkDescriptorSetLayoutBinding bLut[] = { {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL} };
+
+    VkDescriptorSetLayoutCreateInfo lciGen = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = bGen };
+    VkDescriptorSetLayoutCreateInfo lciLut = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = bLut };
+    VkDescriptorSetLayout layoutGen, layoutLut;
+    vkCreateDescriptorSetLayout(ctx->device, &lciGen, NULL, &layoutGen);
+    vkCreateDescriptorSetLayout(ctx->device, &lciLut, NULL, &layoutLut);
+
+    VkPushConstantRange pcRange = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = sizeof(float) };
+    VkPipelineLayoutCreateInfo plciGen = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &layoutGen, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcRange };
+    VkPipelineLayoutCreateInfo plciLut = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &layoutLut };
+    VkPipelineLayout pipeLayoutGen, pipeLayoutLut;
+    vkCreatePipelineLayout(ctx->device, &plciGen, NULL, &pipeLayoutGen);
+    vkCreatePipelineLayout(ctx->device, &plciLut, NULL, &pipeLayoutLut);
+
+    VkShaderModule modEq   = createShaderModule(ctx->device, equirect2cube_comp_spv, sizeof(equirect2cube_comp_spv));
+    VkShaderModule modIrr  = createShaderModule(ctx->device, irradiance_comp_spv, sizeof(irradiance_comp_spv));
+    VkShaderModule modPref = createShaderModule(ctx->device, prefilter_comp_spv, sizeof(prefilter_comp_spv));
+    VkShaderModule modBrdf = createShaderModule(ctx->device, brdf_lut_comp_spv, sizeof(brdf_lut_comp_spv));
+
+    VkComputePipelineCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main" } };
+    VkPipeline pipeEq, pipeIrr, pipePref, pipeBrdf;
+    cpci.layout = pipeLayoutGen; cpci.stage.module = modEq;   vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &cpci, NULL, &pipeEq);
+    cpci.layout = pipeLayoutGen; cpci.stage.module = modIrr;  vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &cpci, NULL, &pipeIrr);
+    cpci.layout = pipeLayoutGen; cpci.stage.module = modPref; vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &cpci, NULL, &pipePref);
+    cpci.layout = pipeLayoutLut; cpci.stage.module = modBrdf; vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &cpci, NULL, &pipeBrdf);
+
+    // Descriptor Sets
+    VkDescriptorPoolSize pSizes[] = { {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10} };
+    VkDescriptorPoolCreateInfo poolCI = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 10, .poolSizeCount = 2, .pPoolSizes = pSizes };
+    VkDescriptorPool tempPool; vkCreateDescriptorPool(ctx->device, &poolCI, NULL, &tempPool);
+
+    VkDescriptorSetLayout layouts[] = {layoutGen, layoutGen, layoutGen, layoutGen, layoutGen, layoutGen, layoutGen, layoutLut};
+    VkDescriptorSetAllocateInfo dsai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = tempPool, .descriptorSetCount = 8, .pSetLayouts = layouts };
+    VkDescriptorSet sets[8]; vkAllocateDescriptorSets(ctx->device, &dsai, sets);
+
+    write_ibl_descriptor_set(ctx->device, tempSampler, sets[0], hdrView, envArrayView);
+    write_ibl_descriptor_set(ctx->device, tempSampler, sets[1], envCubeView, irradArrayView);
+    for(uint32_t i=0; i<5; i++) write_ibl_descriptor_set(ctx->device, tempSampler, sets[2+i], envCubeView, prefArrayViews[i]);
+
+    VkDescriptorImageInfo dLut = { .imageView = ctx->iblBrdfLutView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet wLut = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = sets[7], .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .pImageInfo = &dLut };
+    vkUpdateDescriptorSets(ctx->device, 1, &wLut, 0, NULL);
+
+    // Execute Compute
+    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+
+    transition_image_compute(cmd, hdrImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1, 1);
+    VkBufferImageCopy region = { .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {(uint32_t)w, (uint32_t)h, 1} };
+    vkCmdCopyBufferToImage(cmd, stgBuf, hdrImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    transition_image_compute(cmd, hdrImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 1);
+
+    transition_image_compute(cmd, envImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, 1, 6);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEq);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayoutGen, 0, 1, &sets[0], 0, NULL);
+    vkCmdDispatch(cmd, 1024/8, 1024/8, 6);
+
+    transition_image_compute(cmd, envImg, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 6);
+    transition_image_compute(cmd, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, 1, 6);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeIrr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayoutGen, 0, 1, &sets[1], 0, NULL);
+    vkCmdDispatch(cmd, 32/8, 32/8, 6);
+    transition_image_compute(cmd, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 6);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipePref);
+    for(uint32_t i=0; i<5; i++) {
+        uint32_t mipSize = 128 >> i;
+        transition_image_compute(cmd, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, i, 1, 6);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayoutGen, 0, 1, &sets[2+i], 0, NULL);
+        float roughness = (float)i / 4.0f;
+        vkCmdPushConstants(cmd, pipeLayoutGen, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(float), &roughness);
+        vkCmdDispatch(cmd, mipSize/8, mipSize/8, 6);
+        transition_image_compute(cmd, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, i, 1, 6);
+    }
+
+    transition_image_compute(cmd, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, 1, 1);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeBrdf);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayoutLut, 0, 1, &sets[7], 0, NULL);
+    vkCmdDispatch(cmd, 512/8, 512/8, 1);
+    transition_image_compute(cmd, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 1);
+
+    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+
+    // Persist the Skybox
+    iblSkyboxImage = envImg;
+    iblSkyboxMemory = envMem;
+    iblSkyboxView = envCubeView;
+
+    // Cleanup Temp Resources
+    vkDestroyBuffer(ctx->device, stgBuf, NULL); vkFreeMemory(ctx->device, stgMem, NULL);
+    vkDestroyImageView(ctx->device, hdrView, NULL); vkDestroyImage(ctx->device, hdrImg, NULL); vkFreeMemory(ctx->device, hdrMem, NULL);
+    vkDestroyImageView(ctx->device, envArrayView, NULL);
+    for(uint32_t i=0; i<5; i++) vkDestroyImageView(ctx->device, prefArrayViews[i], NULL);
+    vkDestroyImageView(ctx->device, irradArrayView, NULL);
+    vkDestroySampler(ctx->device, tempSampler, NULL);
+    vkDestroyPipeline(ctx->device, pipeEq, NULL); vkDestroyPipeline(ctx->device, pipeIrr, NULL);
+    vkDestroyPipeline(ctx->device, pipePref, NULL); vkDestroyPipeline(ctx->device, pipeBrdf, NULL);
+    vkDestroyPipelineLayout(ctx->device, pipeLayoutGen, NULL); vkDestroyPipelineLayout(ctx->device, pipeLayoutLut, NULL);
+    vkDestroyDescriptorSetLayout(ctx->device, layoutGen, NULL); vkDestroyDescriptorSetLayout(ctx->device, layoutLut, NULL);
+    vkDestroyDescriptorPool(ctx->device, tempPool, NULL);
+    vkDestroyShaderModule(ctx->device, modEq, NULL); vkDestroyShaderModule(ctx->device, modIrr, NULL);
+    vkDestroyShaderModule(ctx->device, modPref, NULL); vkDestroyShaderModule(ctx->device, modBrdf, NULL);
+
+    // Create Permanent Samplers
+    sci.maxLod = 1.0f; vkCreateSampler(ctx->device, &sci, NULL, &ctx->iblIrradianceSampler);
+    sci.maxLod = 5.0f; vkCreateSampler(ctx->device, &sci, NULL, &ctx->iblPrefilterSampler);
+    sci.maxLod = 1.0f; vkCreateSampler(ctx->device, &sci, NULL, &ctx->iblBrdfLutSampler);
+
+    // Inject directly into lighting sets (set = 3) for ALL frames!
+    VkDescriptorImageInfo iInfos[4] = {
+        { .sampler = ctx->iblIrradianceSampler, .imageView = ctx->iblIrradianceView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        { .sampler = ctx->iblPrefilterSampler,  .imageView = ctx->iblPrefilterView,  .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        { .sampler = ctx->iblBrdfLutSampler,    .imageView = ctx->iblBrdfLutView,    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        { .sampler = ctx->iblPrefilterSampler,  .imageView = iblSkyboxView,          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }
+    };
+    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+        VkWriteDescriptorSet writes[4];
+        for(int i=0; i<4; i++) {
+            writes[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[f],
+                .dstBinding = i + 1, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1, .pImageInfo = &iInfos[i] };
+        }
+        vkUpdateDescriptorSets(ctx->device, 4, writes, 0, NULL);
+    }
+
+    ctx->iblLoaded = true;
+    printf("IBL dynamically baked and loaded successfully from: %s\n", hdr_path);
+    return true;
+}
+
 void destroyIBL(VulkanContext* ctx)
 {
+    if (iblSkyboxView)   { vkDestroyImageView(ctx->device, iblSkyboxView,   NULL); iblSkyboxView   = VK_NULL_HANDLE; }
+    if (iblSkyboxImage)  { vkDestroyImage    (ctx->device, iblSkyboxImage,  NULL); iblSkyboxImage  = VK_NULL_HANDLE; }
+    if (iblSkyboxMemory) { vkFreeMemory      (ctx->device, iblSkyboxMemory, NULL); iblSkyboxMemory = VK_NULL_HANDLE; }
     if (ctx->iblIrradianceView)   { vkDestroyImageView(ctx->device, ctx->iblIrradianceView,   NULL); ctx->iblIrradianceView   = VK_NULL_HANDLE; }
     if (ctx->iblIrradianceImage)  { vkDestroyImage    (ctx->device, ctx->iblIrradianceImage,  NULL); ctx->iblIrradianceImage  = VK_NULL_HANDLE; }
     if (ctx->iblIrradianceMemory) { vkFreeMemory      (ctx->device, ctx->iblIrradianceMemory, NULL); ctx->iblIrradianceMemory = VK_NULL_HANDLE; }
@@ -2225,3 +2512,4 @@ void destroyIBL(VulkanContext* ctx)
 
 void clear_background(Color color)  { context.clearColor = color; }
 void toggle_ambient_occlusion(void) { ambientOcclusionEnabled = !ambientOcclusionEnabled; }
+void toggle_skybox(void) { skyboxEnabled = !skyboxEnabled; }

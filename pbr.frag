@@ -128,29 +128,25 @@ vec3 lightContrib(vec3 L, vec3 lightColor, float attenuation,
 }
 
 // ── IBL diffuse + specular ────────────────────────────────────────────────────
-// Slots reserved at the top of the bindless array
-#define IBL_IRRADIANCE_SLOT  253
-#define IBL_PREFILTER_SLOT   254
-#define IBL_BRDF_LUT_SLOT    255
-#define IBL_MAX_LOD          5.0
+layout(set = 3, binding = 1) uniform samplerCube irradianceMap;
+layout(set = 3, binding = 2) uniform samplerCube prefilterMap;
+layout(set = 3, binding = 3) uniform sampler2D   brdfLUT;
+
+#define IBL_MAX_LOD 5.0
 
 vec3 iblAmbient(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, vec3 F0, float ao) {
     vec3 F    = F_SchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
     vec3 kD   = (vec3(1.0) - F) * (1.0 - metallic);
 
-    // Equirectangular sampling: convert direction to UV
-    vec2 irradUV = vec2(atan(N.z, N.x) * INV_PI * 0.5 + 0.5, acos(clamp(N.y, -1.0, 1.0)) * INV_PI);
-    vec3 irradiance = texture(textures[IBL_IRRADIANCE_SLOT], irradUV).rgb;
+    // Diffuse: Sample the irradiance cubemap directly using the normal
+    vec3 irradiance = texture(irradianceMap, N).rgb;
     vec3 diffuse    = kD * irradiance * albedo;
 
-    // Specular: prefiltered env + BRDF LUT
-    vec3 R          = reflect(-V, N);
-    vec2 prefilterUV = vec2(atan(R.z, R.x) * INV_PI * 0.5 + 0.5, acos(clamp(R.y, -1.0, 1.0)) * INV_PI);
-    vec3 prefilteredColor = textureLod(textures[IBL_PREFILTER_SLOT], prefilterUV,
-                                       roughness * IBL_MAX_LOD).rgb;
-    vec2 brdfLUT    = texture(textures[IBL_BRDF_LUT_SLOT],
-                              vec2(max(dot(N, V), 0.0), roughness)).rg;
-    vec3 specular   = prefilteredColor * (F * brdfLUT.x + brdfLUT.y);
+    // Specular: Sample the prefiltered cubemap and BRDF lookup table
+    vec3 R                = reflect(-V, N);
+    vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * IBL_MAX_LOD).rgb;
+    vec2 brdfLUT_val      = texture(brdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg;
+    vec3 specular         = prefilteredColor * (F * brdfLUT_val.x + brdfLUT_val.y);
 
     return (diffuse + specular) * ao;
 }
@@ -163,12 +159,19 @@ void main() {
     vec4 albedoSample = (m.albedoIndex >= 0)
         ? texture(textures[nonuniformEXT(m.albedoIndex)], inTexCoord)
         : vec4(1.0);
+
+    // Convert SRGB texture to Linear space IMMEDIATELY.
+    // We load all textures as UNORM to preserve raw data for Normal/Metallic maps,
+    // which means we must manually decode SRGB for color maps.
+    albedoSample.rgb = pow(albedoSample.rgb, vec3(2.2));
+
+    // m.baseColorFactor and inColor are already linear
     vec4 baseColor = albedoSample * m.baseColorFactor * inColor;
 
     // Alpha handling
     if (m.alphaMode == 1 && baseColor.a < m.alphaCutoff) discard;
 
-    vec3 albedo = pow(baseColor.rgb, vec3(2.2));  // sRGB -> linear
+    vec3 albedo = baseColor.rgb;
 
     // ── Normal mapping ────────────────────────────────────────────────────────
     vec3 N;
@@ -199,6 +202,8 @@ void main() {
 
     // ── Unlit path ────────────────────────────────────────────────────────────
     if (m.isUnlit != 0) {
+        // Base color is now strictly linear. Output it directly.
+        // Vulkan's SRGB swapchain will handle the Linear -> SRGB conversion.
         outColor = vec4(baseColor.rgb, baseColor.a);
         return;
     }
@@ -256,8 +261,10 @@ void main() {
     // ACES fitted approximation by Krzysztof Narkowicz
     color = (color * (2.51 * color + 0.03)) / (color * (2.51 * color + 0.59) + 0.06);
 
-    // ── Gamma correction ──────────────────────────────────────────────────────
-    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+    // NOTE: We write to an SRGB swapchain (VK_FORMAT_B8G8R8A8_SRGB),
+    // so Vulkan hardware automatically applies gamma correction.
+    // Doing pow(..., 1/2.2) here would double-gamma correct and wash out colors!
+    color = clamp(color, 0.0, 1.0);
 
     outColor = vec4(color, baseColor.a);
 }
