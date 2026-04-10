@@ -24,6 +24,7 @@
 
 /// Globals
 bool skyboxEnabled = true;
+bool iblLightingEnabled = true;
 VkPipeline skyboxPipeline = VK_NULL_HANDLE;
 VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
 VkImage iblSkyboxImage = VK_NULL_HANDLE;
@@ -1312,12 +1313,12 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     pushConstants.ambientOcclusionEnabled = ambientOcclusionEnabled ? 1 : 0;
-    pushConstants.iblEnabled = ctx->iblLoaded ? 1 : 0;
-    CTX_LIGHTING(ctx)->iblEnabled = ctx->iblLoaded ? 1 : 0;
+    pushConstants.iblEnabled = (ctx->iblLoaded && iblLightingEnabled) ? 1 : 0;
+
+    CTX_LIGHTING(ctx)->iblEnabled = (ctx->iblLoaded && iblLightingEnabled) ? 1 : 0;
     CTX_LIGHTING(ctx)->ambientIntensity = 1.0f; // Ensure IBL isn't multiplied by 0!
 
     updateLightingUBO(ctx);
-
 
     /* ── Bind the 4 descriptor sets once — valid for ALL 3D draws ───────
        set=0  UBO
@@ -2513,3 +2514,4 @@ void destroyIBL(VulkanContext* ctx)
 void clear_background(Color color)  { context.clearColor = color; }
 void toggle_ambient_occlusion(void) { ambientOcclusionEnabled = !ambientOcclusionEnabled; }
 void toggle_skybox(void) { skyboxEnabled = !skyboxEnabled; }
+void toggle_ibl_lighting(void) { iblLightingEnabled = !iblLightingEnabled; }

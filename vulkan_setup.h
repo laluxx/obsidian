@@ -101,6 +101,8 @@ void clear_background(Color color);
 void toggle_ambient_occlusion(void);
 extern bool skyboxEnabled;
 void toggle_skybox(void);
+extern bool iblLightingEnabled;
+void toggle_ibl_lighting(void);
 
 void cleanup(VulkanContext* context);
 uint32_t findMemoryType(VkPhysicalDevice physDev, uint32_t typeFilter, VkMemoryPropertyFlags props);

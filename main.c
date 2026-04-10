@@ -4,7 +4,6 @@
 
 #include "gltf_loader.h"
 #include "font.h"
-#include "obj.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -16,8 +15,9 @@
 #include "context.h"
 #include "common.h"
 #include "input.h"
-#include <time.h>
 #include "window.h"
+#include "keychords.h"
+#include "vertico.h"
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -431,19 +431,6 @@ vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
 vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
 vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
-#include "keychords.h"
-
-
-void testFunc() {
-    printf("Pressed: C-x l\n");
-}
-
-void otherTestFunc() {
-    printf("Pressed C-x C-l\n");
-}
-
-#include "vertico.h"
-
 int main() {
     /* context.currentFrame = 0; */
 
@@ -503,18 +490,9 @@ int main() {
     registerCursorPosCallback(cursor_pos_callback);
     registerMouseButtonCallback(mouse_button_callback);
 
-    keychord_bind(&keymap, "C-x L",     testFunc,           "TestFunc description", PRESS);
-    keychord_bind(&keymap, "L",         testFunc,           "TestFunc description", PRESS);
-    keychord_bind(&keymap, "C-c S-l",   testFunc,           "TestFunc description", PRESS);
-    keychord_bind(&keymap, "C-x C-t c", otherTestFunc,      "TestFunc description", PRESS);
-    keychord_bind(&keymap, "<left>",    otherTestFunc,      "TestFunc description", PRESS);
-    keychord_bind(&keymap, "C-<right>", otherTestFunc,      "TestFunc description", PRESS);
-    keychord_bind(&keymap, "S-<down>",  otherTestFunc,      "TestFunc description", PRESS);
-    keychord_bind(&keymap, "<up>",      otherTestFunc,      "TestFunc description", PRESS);
     keychord_bind(&keymap, "TAB",       toggle_skybox,      "Toggle the skybox",    PRESS);
-    keychord_bind(&keymap, "M-x n L",   otherTestFunc,      "TestFunc description", PRESS);
+    keychord_bind(&keymap, "t",         toggle_ibl_lighting,"Toggle IBL lighting",  PRESS);
     keychord_bind(&keymap, "C-g",       keymap_reset_state, "TestFunc description", PRESS);
-
     keymap_print_bindings(&keymap);
 
 

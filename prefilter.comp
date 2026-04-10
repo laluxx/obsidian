@@ -93,9 +93,10 @@ void main() {
             float saTexel  = 4.0 * PI / (6.0 * resolution * resolution);
             float saSample = 1.0 / (float(SAMPLE_COUNT) * pdf + 0.0001);
 
-            float mipLevel = pc.roughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel);
-
-            prefilteredColor += textureLod(environmentMap, L, mipLevel).rgb * NdotL;
+            // Our source environmentMap only has 1 mip level (0.0).
+            // Sampling higher mips will return black on some drivers.
+            // With 4096 samples, forcing LOD 0.0 still yields cinematic quality.
+            prefilteredColor += textureLod(environmentMap, L, 0.0).rgb * NdotL;
             totalWeight      += NdotL;
         }
     }

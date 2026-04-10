@@ -132,7 +132,8 @@ layout(set = 3, binding = 1) uniform samplerCube irradianceMap;
 layout(set = 3, binding = 2) uniform samplerCube prefilterMap;
 layout(set = 3, binding = 3) uniform sampler2D   brdfLUT;
 
-#define IBL_MAX_LOD 5.0
+// We allocated 5 mip levels (0, 1, 2, 3, 4). The maximum valid LOD is 4.0!
+#define IBL_MAX_LOD 4.0
 
 vec3 iblAmbient(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, vec3 F0, float ao) {
     vec3 F    = F_SchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
