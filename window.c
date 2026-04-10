@@ -64,6 +64,7 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     createSwapChain(&context);
     createImageViews(&context);
     createDepthResources(&context);
+    createShadowResources(&context);
 
     createUniformBuffer(&context);
     createDescriptorSetLayout(&context);

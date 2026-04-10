@@ -21,10 +21,14 @@
 #include "brdf_lut.comp.spv.h"
 #include "skybox.vert.spv.h"
 #include "skybox.frag.spv.h"
+#include "shadow.vert.spv.h"
 
 /// Globals
+static uint64_t meshSSBOAddr[MAX_FRAMES_IN_FLIGHT];
+VkPipeline shadowPipeline = VK_NULL_HANDLE;
 bool skyboxEnabled = true;
 bool iblLightingEnabled = true;
+bool shadowsEnabled = true;
 VkPipeline skyboxPipeline = VK_NULL_HANDLE;
 VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
 VkImage iblSkyboxImage = VK_NULL_HANDLE;
@@ -179,11 +183,12 @@ static VkPipelineColorBlendStateCreateInfo makeColorBlend(
 
 static const VkDynamicState kDynStates[] = {
     VK_DYNAMIC_STATE_VIEWPORT,
-    VK_DYNAMIC_STATE_SCISSOR
+    VK_DYNAMIC_STATE_SCISSOR,
+    VK_DYNAMIC_STATE_DEPTH_BIAS
 };
 static const VkPipelineDynamicStateCreateInfo kDynamicState = {
     .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-    .dynamicStateCount = 2,
+    .dynamicStateCount = 3,
     .pDynamicStates    = kDynStates
 };
 
@@ -374,9 +379,16 @@ void createLogicalDevice(VulkanContext* ctx)
         .shaderDrawParameters = VK_TRUE,
     };
 
+    // AAA FEATURE: Enable Physical Buffer Device Addresses
+    VkPhysicalDeviceVulkan12Features features12 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = &features11,
+        .bufferDeviceAddress = VK_TRUE,
+    };
+
     VkPhysicalDeviceVulkan13Features features13 = {
         .sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext            = &features11,
+        .pNext            = &features12,
         .dynamicRendering = VK_TRUE,
         .shaderDemoteToHelperInvocation = VK_TRUE,
     };
@@ -628,16 +640,16 @@ void createAllPipelineLayouts(VulkanContext* ctx)
     /* aliases — both 2D paths use the same unified layout */
     ctx->pipelineLayout2D    = ctx->pipelineLayoutTextured2D;
 
-    /* ── 3D unified PBR layout ───────────────────────────────────────────
-       set=0  UBO
-       set=1  bindless texture array
-       set=2  SSBO  (gltf meshes OR immediate-mode slots)
-       set=3  lighting UBO
-       push   PushConstants { aoEnabled, iblEnabled, meshIndex, _pad }   */
+    // We create a dummy empty layout so we don't have to shift the Lighting Set (Set 3)
+    // in all of our shaders. Set 2 is now completely dead and unused!
+    VkDescriptorSetLayout emptySetLayout;
+    VkDescriptorSetLayoutCreateInfo emptyInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    vkCreateDescriptorSetLayout(ctx->device, &emptyInfo, NULL, &emptySetLayout);
+
     VkDescriptorSetLayout pbr3DSets[4] = {
         ctx->descriptorSetLayout,   /* set=0 UBO     */
         ctx->bindlessSetLayout,     /* set=1 bindless*/
-        ctx->ssboSetLayout,         /* set=2 SSBO    */
+        emptySetLayout,             /* set=2 DEAD (Replaced by physical pointers) */
         ctx->lightingSetLayout,     /* set=3 lighting*/
     };
     vkCreatePipelineLayout(ctx->device,
@@ -709,6 +721,20 @@ void createGraphicsPipelines(VulkanContext* ctx)
     VkPipelineShaderStageCreateInfo ssSkybox[2]  = { STAGE(VK_SHADER_STAGE_VERTEX_BIT, vsSkybox),
                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsSkybox) };
 
+    VkShaderModule vsShadow = createShaderModule(ctx->device, shadow_vert_spv, sizeof(shadow_vert_spv));
+    VkPipelineShaderStageCreateInfo ssShadow[1]  = { STAGE(VK_SHADER_STAGE_VERTEX_BIT, vsShadow) };
+
+    VkPipelineRasterizationStateCreateInfo rastShadow = makeRasterizer(1.0f);
+    rastShadow.depthBiasEnable = VK_TRUE;
+    // AAA Standard: Cull front faces for shadows. Halves geometry load,
+    // natively eliminates Peter Panning, and skyrockets FPS.
+    rastShadow.cullMode = VK_CULL_MODE_FRONT_BIT;
+
+    VkPipelineRenderingCreateInfo shadowRenderingCI = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
+    };
+
     VkPipelineDepthStencilStateCreateInfo depthSkybox = makeDepth(true, false);
     depthSkybox.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
@@ -727,7 +753,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
        2      2D color
        3      2D textured
     */
-    VkGraphicsPipelineCreateInfo pci[4] = {
+    VkGraphicsPipelineCreateInfo pci[5] = {
         /* 0: 3D PBR triangles */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -776,11 +802,23 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pColorBlendState    = &blend, .pDepthStencilState = &depthSkybox,
             .pDynamicState       = &kDynamicState,
             .layout              = skyboxPipelineLayout,
+        },
+        /* 4: Shadows */
+        {
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = &shadowRenderingCI,
+            .stageCount          = 1, .pStages             = ssShadow,
+            .pVertexInputState   = &vi3D, .pInputAssemblyState = &ia3D,
+            .pViewportState      = &kViewportState,
+            .pRasterizationState = &rastShadow, .pMultisampleState  = &kMultisampling,
+            .pColorBlendState    = NULL, .pDepthStencilState = &depth3D,
+            .pDynamicState       = &kDynamicState,
+            .layout              = ctx->pipelineLayout,
         }
     };
 
-    VkPipeline pipelines[4];
-    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 4, pci, NULL, pipelines) != VK_SUCCESS) {
+    VkPipeline pipelines[5];
+    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 5, pci, NULL, pipelines) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipelines\n");
         exit(EXIT_FAILURE);
     }
@@ -797,7 +835,9 @@ void createGraphicsPipelines(VulkanContext* ctx)
     ctx->graphicsPipeline2D         = pipelines[2];
     ctx->graphicsPipelineTextured2D = pipelines[2];
     skyboxPipeline                  = pipelines[3];
+    shadowPipeline                  = pipelines[4];
 
+    vkDestroyShaderModule(ctx->device, vsShadow, NULL);
     vkDestroyShaderModule(ctx->device, vsPBR, NULL);
     vkDestroyShaderModule(ctx->device, fsPBR, NULL);
     vkDestroyShaderModule(ctx->device, vs2D,  NULL);
@@ -817,71 +857,26 @@ void createComputeCullPipeline(VulkanContext* ctx)
 {
     /* ── descriptor set layout ─────────────────────────────────────── */
     VkDescriptorSetLayoutBinding bindings[4] = {
-        /* binding 0: mesh SSBO (readonly) */
-        {
-            .binding         = 0,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
-        },
-        /* binding 1: source draw commands (readonly, CPU-written) */
-        {
-            .binding         = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
-        },
-        /* binding 2: destination draw commands (writeonly, GPU-read) */
-        {
-            .binding         = 2,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
-        },
-        /* binding 3: frustum UBO */
-        {
-            .binding         = 3,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT
-        }
+        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT }
     };
-
-    VkDescriptorSetLayoutCreateInfo lci = {
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 4,
-        .pBindings    = bindings
-    };
+    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = bindings };
     vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->computeCullSetLayout);
 
     /* ── pipeline layout ────────────────────────────────────────────── */
-    VkPipelineLayoutCreateInfo plci = {
-        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts    = &ctx->computeCullSetLayout
-    };
+    VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &ctx->computeCullSetLayout };
     vkCreatePipelineLayout(ctx->device, &plci, NULL, &ctx->computeCullPipelineLayout);
 
     /* ── shader module ──────────────────────────────────────────────── */
-    VkShaderModule cullShader = createShaderModule(ctx->device,
-                                    cull_comp_spv, sizeof(cull_comp_spv));
-
-    VkComputePipelineCreateInfo cpci = {
-        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage  = {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = cullShader,
-            .pName  = "main"
-        },
-        .layout = ctx->computeCullPipelineLayout
-    };
-    vkCreateComputePipelines(ctx->device, pipelineCache, 1, &cpci, NULL,
-                             &ctx->computeCullPipeline);
+    VkShaderModule cullShader = createShaderModule(ctx->device, cull_comp_spv, sizeof(cull_comp_spv));
+    VkComputePipelineCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cullShader, .pName = "main" }, .layout = ctx->computeCullPipelineLayout };
+    vkCreateComputePipelines(ctx->device, pipelineCache, 1, &cpci, NULL, &ctx->computeCullPipeline);
     vkDestroyShaderModule(ctx->device, cullShader, NULL);
 
-    /* ── frustum UBOs (one per frame) ───────────────────────────────── */
-    typedef struct { vec4 planes[6]; uint32_t meshCount; uint32_t _pad[3]; } FrustumUBO;
+    /* ── Mega frustum UBOs ──────────────────────────────────────────── */
+    typedef struct { vec4 planes[5][6]; uint32_t meshCount; uint32_t frustumCount; uint32_t _pad[2]; } FrustumUBO;
     VkDeviceSize uboSize = sizeof(FrustumUBO);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -890,115 +885,80 @@ void createComputeCullPipeline(VulkanContext* ctx)
     }
 
     /* ── descriptor pool ────────────────────────────────────────────── */
-    VkDescriptorPoolSize poolSizes[2] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 3 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT     }
-    };
-    VkDescriptorPoolCreateInfo pci = {
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = MAX_FRAMES_IN_FLIGHT,
-        .poolSizeCount = 2,
-        .pPoolSizes    = poolSizes
-    };
+    VkDescriptorPoolSize poolSizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 3 }, { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT } };
+    VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 2, .pPoolSizes = poolSizes };
     vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->computeCullPool);
 
     /* ── descriptor sets ────────────────────────────────────────────── */
     VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT];
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        layouts[i] = ctx->computeCullSetLayout;
-
-    VkDescriptorSetAllocateInfo dai = {
-        .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool     = ctx->computeCullPool,
-        .descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
-        .pSetLayouts        = layouts
-    };
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) layouts[i] = ctx->computeCullSetLayout;
+    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = ctx->computeCullPool, .descriptorSetCount = MAX_FRAMES_IN_FLIGHT, .pSetLayouts = layouts };
     vkAllocateDescriptorSets(ctx->device, &dai, ctx->computeCullSets);
 
-    /* write descriptors — SSBO sizes known from createMeshSSBO/createIndirectBuffer */
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorBufferInfo ssboInfo = {
-            .buffer = ctx->meshSSBO[i], .offset = 0, .range = VK_WHOLE_SIZE
-        };
-        VkDescriptorBufferInfo srcInfo = {
-            .buffer = ctx->srcIndirectBuffer, .offset = 0, .range = VK_WHOLE_SIZE
-        };
-        VkDescriptorBufferInfo dstInfo = {
-            .buffer = ctx->indirectBuffer, .offset = 0, .range = VK_WHOLE_SIZE
-        };
-        VkDescriptorBufferInfo uboInfo = {
-            .buffer = ctx->frustumUBOBuffer[i], .offset = 0, .range = VK_WHOLE_SIZE
-        };
+        VkDescriptorBufferInfo ssboInfo = { .buffer = ctx->meshSSBO[i], .offset = 0, .range = VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo srcInfo = { .buffer = ctx->srcIndirectBuffer, .offset = 0, .range = VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo dstInfo = { .buffer = ctx->indirectBuffer, .offset = 0, .range = VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo uboInfo = { .buffer = ctx->frustumUBOBuffer[i], .offset = 0, .range = VK_WHOLE_SIZE };
         VkWriteDescriptorSet writes[4] = {
-            {
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = ctx->computeCullSets[i],
-                .dstBinding      = 0,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .descriptorCount = 1,
-                .pBufferInfo     = &ssboInfo
-            },
-            {
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = ctx->computeCullSets[i],
-                .dstBinding      = 1,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .descriptorCount = 1,
-                .pBufferInfo     = &srcInfo
-            },
-            {
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = ctx->computeCullSets[i],
-                .dstBinding      = 2,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .descriptorCount = 1,
-                .pBufferInfo     = &dstInfo
-            },
-            {
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = ctx->computeCullSets[i],
-                .dstBinding      = 3,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .descriptorCount = 1,
-                .pBufferInfo     = &uboInfo
-            }
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCullSets[i], .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &ssboInfo },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCullSets[i], .dstBinding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &srcInfo },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCullSets[i], .dstBinding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &dstInfo },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCullSets[i], .dstBinding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &uboInfo }
         };
         vkUpdateDescriptorSets(ctx->device, 4, writes, 0, NULL);
     }
+    fprintf(stdout, "Compute Mega-frustum cull pipeline created\n");
+}
 
-    fprintf(stdout, "Compute frustum cull pipeline created\n");
+static void extractPlanes(mat4 m, vec4* planes) {
+    for (int j = 0; j < 4; j++) {
+        planes[0][j] = m[j][3] + m[j][0]; // Left
+        planes[1][j] = m[j][3] - m[j][0]; // Right
+        planes[2][j] = m[j][3] - m[j][1]; // Top
+        planes[3][j] = m[j][3] + m[j][1]; // Bottom
+        planes[4][j] = m[j][2];           // Near
+        planes[5][j] = m[j][3] - m[j][2]; // Far
+    }
+    // MANIACAL SPEED: 1 division + 1 sqrt per plane instead of 4 divisions!
+    for (int i = 0; i < 6; i++) {
+        float lenSq = planes[i][0]*planes[i][0] + planes[i][1]*planes[i][1] + planes[i][2]*planes[i][2];
+        if (lenSq > 0.0f) {
+            float invLen = 1.0f / sqrtf(lenSq);
+            planes[i][0] *= invLen; planes[i][1] *= invLen;
+            planes[i][2] *= invLen; planes[i][3] *= invLen;
+        }
+    }
 }
 
 static void updateFrustumUBO(VulkanContext* ctx)
 {
     if (ctx->indirectDrawCount == 0) return;
+    typedef struct { vec4 planes[5][6]; uint32_t meshCount; uint32_t frustumCount; uint32_t _pad[2]; } FrustumUBO;
 
     uint32_t f = ctx->currentFrame;
-
-    typedef struct { vec4 planes[6]; uint32_t meshCount; uint32_t _pad[3]; } FrustumUBO;
     FrustumUBO ubo;
     ubo.meshCount = ctx->indirectDrawCount;
+    ubo.frustumCount = shadowsEnabled ? 5 : 1;
 
+    // 1. Main Camera Frustum -> Index 0
     mat4 vp;
     glm_mat4_mul(camera.projection_matrix, camera.view_matrix, vp);
+    extractPlanes(vp, ubo.planes[0]);
 
-    for (int j = 0; j < 4; j++) {
-        ubo.planes[0][j] = vp[j][3] + vp[j][0]; ubo.planes[1][j] = vp[j][3] - vp[j][0];
-        ubo.planes[2][j] = vp[j][3] + vp[j][1]; ubo.planes[3][j] = vp[j][3] - vp[j][1];
-        ubo.planes[4][j] = vp[j][3] + vp[j][2]; ubo.planes[5][j] = vp[j][3] - vp[j][2];
-    }
-
-    for (int i = 0; i < 6; i++) {
-        float len = sqrtf(ubo.planes[i][0]*ubo.planes[i][0] + ubo.planes[i][1]*ubo.planes[i][1] + ubo.planes[i][2]*ubo.planes[i][2]);
-        if (len > 0.0f) {
-            ubo.planes[i][0] /= len; ubo.planes[i][1] /= len;
-            ubo.planes[i][2] /= len; ubo.planes[i][3] /= len;
+    // 2. Shadow Cascades -> Index 1 to 4
+    if (shadowsEnabled) {
+        for (int i = 0; i < 4; i++) {
+            mat4 shadow_vp;
+            glm_mat4_copy(CTX_LIGHTING(ctx)->cascadeSpace[i], shadow_vp);
+            shadow_vp[1][1] *= -1.0f; // Un-flip Vulkan Y
+            extractPlanes(shadow_vp, ubo.planes[i + 1]);
         }
     }
     memcpy(ctx->frustumUBOMapped[f], &ubo, sizeof(FrustumUBO));
 }
 
-static void execute_cull_pass(VkCommandBuffer cmd, void* user_data)
+static void execute_mega_cull_pass(VkCommandBuffer cmd, void* user_data)
 {
     VulkanContext* ctx = (VulkanContext*)user_data;
     if (ctx->indirectDrawCount == 0) return;
@@ -1007,6 +967,117 @@ static void execute_cull_pass(VkCommandBuffer cmd, void* user_data)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->computeCullPipelineLayout, 0, 1, &ctx->computeCullSets[f], 0, NULL);
     uint32_t groupCount = (ctx->indirectDrawCount + 63) / 64;
     vkCmdDispatch(cmd, groupCount, 1, 1);
+}
+
+static void update_cascade_matrices(VulkanContext* ctx) {
+    vec3 lightDir = {0.3f, -1.0f, 0.2f};
+    glm_vec3_normalize(lightDir);
+    CTX_LIGHTING(ctx)->sun.direction[0] = lightDir[0];
+    CTX_LIGHTING(ctx)->sun.direction[1] = lightDir[1];
+    CTX_LIGHTING(ctx)->sun.direction[2] = lightDir[2];
+
+    // AAA Tight Cascades: Cascade 0 is now extremely dense for objects close to the camera!
+    float cascadeSplits[5] = { 0.1f, 5.0f, 15.0f, 50.0f, 200.0f };
+    for(int i=0; i<4; i++) CTX_LIGHTING(ctx)->cascadeSplits[i] = cascadeSplits[i+1];
+
+    float fov = glm_rad(camera.fov);
+    float aspect = camera.aspect_ratio;
+    float tanHalfFov = tanf(fov / 2.0f);
+
+    vec3 camPos = { camera.position[0], camera.position[1], camera.position[2] };
+    vec3 camForward = { -camera.view_matrix[0][2], -camera.view_matrix[1][2], -camera.view_matrix[2][2] };
+    glm_vec3_normalize(camForward);
+
+    for (int i = 0; i < 4; i++) {
+        float n = cascadeSplits[i];
+        float f = cascadeSplits[i+1];
+
+        // 1. Analytic Bounding Sphere Center (Fixed along Camera Z)
+        // This stops the shadow matrix from morphing when you look around!
+        float centerZ = (f + n) / 2.0f;
+        vec3 center;
+        glm_vec3_scale(camForward, centerZ, center);
+        glm_vec3_add(camPos, center, center);
+
+        // 2. Analytic Radius (Derived strictly from FOV and depths)
+        float xf = f * tanHalfFov * aspect;
+        float yf = f * tanHalfFov;
+        float dz = f - centerZ;
+        float radius = sqrtf(xf*xf + yf*yf + dz*dz);
+        radius = ceilf(radius * 16.0f) / 16.0f; // Round up to prevent float precision micro-stutters
+
+        // 3. Create Light View Matrix
+        vec3 eye;
+        glm_vec3_scale(lightDir, -radius * 5.0f, eye);
+        glm_vec3_add(center, eye, eye);
+
+        mat4 lightView;
+        glm_lookat(eye, center, (vec3){0.0f, 1.0f, 0.0f}, lightView);
+
+        // 4. Create Projection Matrix
+        mat4 lightProj;
+        float zNear = 0.0f;
+        float zFar = radius * 10.0f;
+        glm_ortho(-radius, radius, -radius, radius, zNear, zFar, lightProj);
+
+        // PERFECT VULKAN Z-CLIPPING FIX
+        // Converts OpenGL [-1, 1] Z to Vulkan [0, 1] Z.
+        // This stops shadows from randomly disappearing when objects are behind you!
+        lightProj[1][1] *= -1.0f;
+        lightProj[2][2] *= 0.5f;
+        lightProj[3][2] = lightProj[3][2] * 0.5f + 0.5f;
+
+        // 5. Sub-Texel Snapping (Eliminates Shimmering)
+        mat4 shadowMatrix;
+        glm_mat4_mul(lightProj, lightView, shadowMatrix);
+
+        float shadowMapRes = 1024.0f;
+        vec4 shadowOrigin = {0.0f, 0.0f, 0.0f, 1.0f};
+        glm_mat4_mulv(shadowMatrix, shadowOrigin, shadowOrigin);
+        shadowOrigin[0] *= (shadowMapRes / 2.0f);
+        shadowOrigin[1] *= (shadowMapRes / 2.0f);
+
+        vec2 roundedOrigin = { roundf(shadowOrigin[0]), roundf(shadowOrigin[1]) };
+        vec2 roundOffset = { roundedOrigin[0] - shadowOrigin[0], roundedOrigin[1] - shadowOrigin[1] };
+
+        lightProj[3][0] += roundOffset[0] * (2.0f / shadowMapRes);
+        lightProj[3][1] += roundOffset[1] * (2.0f / shadowMapRes);
+
+        glm_mat4_mul(lightProj, lightView, CTX_LIGHTING(ctx)->cascadeSpace[i]);
+    }
+}
+
+static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
+{
+    VulkanContext* ctx = (VulkanContext*)user_data;
+    if (ctx->indirectDrawCount == 0 || !shadowsEnabled) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+    vkCmdSetDepthBias(cmd, 1.25f, 0.0f, 1.75f); // Constant, clamp, slope
+
+    VkDescriptorSet gltfSets[4] = { ctx->descriptorSets[ctx->currentFrame], ctx->bindlessSet, ctx->ssboSets[ctx->currentFrame], ctx->lightingSets[ctx->currentFrame] };
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
+
+    VkDeviceSize zero = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
+    vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+    for (int i = 0; i < 4; i++) {
+        VkViewport vp = { .width = 1024.0f, .height = 1024.0f, .minDepth = 0.0f, .maxDepth = 1.0f };
+        vp.x = (i % 2) * 1024.0f; vp.y = (i / 2) * 1024.0f;
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        VkRect2D sc = { { (int32_t)vp.x, (int32_t)vp.y }, { 1024, 1024 } };
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+
+        pushConstants.cascadeIndex = i;
+        pushConstants.meshIndex = -1;
+        pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
+        vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+
+        // Offset is (i + 1) because Cascade 0 is at offset 1 (Main camera is offset 0)
+        VkDeviceSize offset = (i + 1) * ctx->indirectDrawCount * sizeof(VkDrawIndexedIndirectCommand);
+        vkCmdDrawIndexedIndirect(cmd, ctx->indirectBuffer, offset, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+    }
 }
 
 static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
@@ -1042,6 +1113,7 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
 
     pushConstants.meshIndex = -1;
+    pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
     vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
     if (ctx->indirectDrawCount > 0) {
@@ -1051,8 +1123,6 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
         vkCmdDrawIndexedIndirect(cmd, ctx->indirectBuffer, 0, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
     }
 
-    VkDescriptorSet immSet = imm_ssbo_get_set(ctx->currentFrame);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 2, 1, &immSet, 0, NULL);
     renderer_draw(cmd);
 
     if (lineVertexCount > 0) {
@@ -1143,6 +1213,39 @@ void createSyncObjects(VulkanContext* ctx)
 
 /// Depth resources
 
+void createShadowResources(VulkanContext* ctx)
+{
+    // Create 2K Shadow Map Atlas (1024x1024 per cascade)
+    VkImageCreateInfo imgCI = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_D32_SFLOAT,
+        .extent = {2048, 2048, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    vkCreateImage(ctx->device, &imgCI, NULL, &ctx->shadowImage);
+
+    VkMemoryRequirements req; vkGetImageMemoryRequirements(ctx->device, ctx->shadowImage, &req);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->shadowMemory);
+    vkBindImageMemory(ctx->device, ctx->shadowImage, ctx->shadowMemory, 0);
+
+    VkImageViewCreateInfo viewCI = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = ctx->shadowImage, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_D32_SFLOAT, .subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 } };
+    vkCreateImageView(ctx->device, &viewCI, NULL, &ctx->shadowView);
+
+    VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .compareEnable = VK_TRUE, .compareOp = VK_COMPARE_OP_LESS_OR_EQUAL, .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE };
+    vkCreateSampler(ctx->device, &sci, NULL, &ctx->shadowSampler);
+
+    // Map it to Binding 5 right away (if lighting sets are already created)!
+    if (ctx->lightingSets[0] != VK_NULL_HANDLE) {
+        for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+            VkDescriptorImageInfo dInfo = { .sampler = ctx->shadowSampler, .imageView = ctx->shadowView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[f], .dstBinding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dInfo };
+            vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        }
+    }
+}
+
 void createDepthResources(VulkanContext* ctx)
 {
     ctx->depthFormat = VK_FORMAT_D32_SFLOAT;
@@ -1193,7 +1296,7 @@ void createDepthResources(VulkanContext* ctx)
 /// Uniform buffer
 
 static void createBuffer(VulkanContext* ctx, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer* buffer, VkDeviceMemory* bufferMemory) {
-    VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
     vkCreateBuffer(ctx->device, &bufferInfo, NULL, buffer);
     VkMemoryRequirements memReq;
     vkGetBufferMemoryRequirements(ctx->device, *buffer, &memReq);
@@ -1244,9 +1347,11 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     }
     rg_reset(ctx->renderGraph);
 
+    update_cascade_matrices(ctx); // MUST happen before updateFrustumUBO!
     updateFrustumUBO(ctx);
 
     uint32_t f = ctx->currentFrame;
+    uint32_t f_shadow = ctx->currentFrame + MAX_FRAMES_IN_FLIGHT;
 
     // 1. Import Resources
     RgResId swapchainImg = rg_import_image(ctx->renderGraph, "Swapchain", ctx->swapChainImages[imageIndex], ctx->swapChainImageViews[imageIndex], ctx->swapChainImageFormat, ctx->swapChainExtent.width, ctx->swapChainExtent.height, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -1254,20 +1359,29 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     RgResId indirectBuf = rg_import_buffer(ctx->renderGraph, "IndirectBuffer", ctx->indirectBuffer);
     RgResId frustumUBO = rg_import_buffer(ctx->renderGraph, "FrustumUBO", ctx->frustumUBOBuffer[f]);
 
-    // 2. Define Culling Pass
-    RgPass* cullPass = rg_add_pass(ctx->renderGraph, "FrustumCull");
+    // 2. Define Mega Culling Pass (1 Dispatch for everything!)
+    RgPass* cullPass = rg_add_pass(ctx->renderGraph, "MegaCull");
     rg_pass_read_buffer(cullPass, frustumUBO, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
     rg_pass_write_buffer(cullPass, indirectBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-    rg_pass_execute(cullPass, execute_cull_pass, ctx);
+    rg_pass_execute(cullPass, execute_mega_cull_pass, ctx);
 
-    // 3. Define Main Geometry Pass
+    // 3. Define Shadow Pass (Creates the Atlas)
+    RgResId shadowAtlasId = rg_import_image(ctx->renderGraph, "ShadowAtlas", ctx->shadowImage, ctx->shadowView, VK_FORMAT_D32_SFLOAT, 2048, 2048, VK_IMAGE_LAYOUT_UNDEFINED);
+    RgPass* shadowPass = rg_add_pass(ctx->renderGraph, "CascadedShadows");
+    rg_pass_read_buffer(shadowPass, indirectBuf, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+
+    rg_pass_depth_attachment(shadowPass, shadowAtlasId, true);
+    rg_pass_execute(shadowPass, execute_shadow_pass, ctx);
+
+    // 4. Define Main Geometry Pass
     RgPass* mainPass = rg_add_pass(ctx->renderGraph, "MainForward");
+    rg_pass_read_image(mainPass, shadowAtlasId, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     rg_pass_read_buffer(mainPass, indirectBuf, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     rg_pass_color_attachment(mainPass, swapchainImg, true, ctx->clearColor);
     rg_pass_depth_attachment(mainPass, depthImg, true);
     rg_pass_execute(mainPass, execute_main_pass, ctx);
 
-    // 4. Execute the Graph!
+    // 5. Execute the Graph!
     rg_execute(ctx->renderGraph, cmd);
 
     /* Transition color image to presentable format */
@@ -1353,6 +1467,11 @@ void drawFrame(VulkanContext* ctx)
 void cleanupSwapChainResources(VulkanContext* ctx, VkSwapchainKHR oldSwapchain)
 {
     vkDeviceWaitIdle(ctx->device);
+
+    if (ctx->shadowSampler) { vkDestroySampler(ctx->device, ctx->shadowSampler, NULL); ctx->shadowSampler = VK_NULL_HANDLE; }
+    if (ctx->shadowView)    { vkDestroyImageView(ctx->device, ctx->shadowView, NULL); ctx->shadowView = VK_NULL_HANDLE; }
+    if (ctx->shadowImage)   { vkDestroyImage(ctx->device, ctx->shadowImage, NULL); ctx->shadowImage = VK_NULL_HANDLE; }
+    if (ctx->shadowMemory)  { vkFreeMemory(ctx->device, ctx->shadowMemory, NULL); ctx->shadowMemory = VK_NULL_HANDLE; }
 
     if (ctx->commandBuffers && ctx->commandPool) {
         vkFreeCommandBuffers(ctx->device, ctx->commandPool,
@@ -1445,6 +1564,7 @@ void recreateSwapChain(VulkanContext* ctx)
 
     createImageViews(ctx);
     createDepthResources(ctx);
+    createShadowResources(ctx);
     createCommandBuffers(ctx);
 
     camera.aspect_ratio = (float)ctx->swapChainExtent.width / (float)ctx->swapChainExtent.height;
@@ -1545,7 +1665,7 @@ void cleanup(VulkanContext* ctx)
     if (ctx->computeCullSetLayout)      { vkDestroyDescriptorSetLayout(ctx->device, ctx->computeCullSetLayout, NULL); ctx->computeCullSetLayout      = VK_NULL_HANDLE; }
     if (ctx->computeCullPool)           { vkDestroyDescriptorPool(ctx->device, ctx->computeCullPool,           NULL); ctx->computeCullPool           = VK_NULL_HANDLE; }
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (ctx->frustumUBOMapped[i])   { vkUnmapMemory  (ctx->device, ctx->frustumUBOMemory[i]);                    ctx->frustumUBOMapped[i]       = NULL;           }
+        if (ctx->frustumUBOMapped[i])   { vkUnmapMemory  (ctx->device, ctx->frustumUBOMemory[i]);                    ctx->frustumUBOMapped[i]       = NULL;            }
         if (ctx->frustumUBOBuffer[i])   { vkDestroyBuffer(ctx->device, ctx->frustumUBOBuffer[i],   NULL);            ctx->frustumUBOBuffer[i]       = VK_NULL_HANDLE; }
         if (ctx->frustumUBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->frustumUBOMemory[i],   NULL);            ctx->frustumUBOMemory[i]       = VK_NULL_HANDLE; }
     }
@@ -1908,21 +2028,22 @@ void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
 
 void createLightingDescriptors(VulkanContext* ctx)
 {
-    VkDescriptorSetLayoutBinding b[5] = {
+    VkDescriptorSetLayoutBinding b[6] = {
         { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT },
         { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
-        { .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
+        { .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
     };
-    VkDescriptorBindingFlagsEXT flags[5] = { 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT };
-    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT flagsInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 5, .pBindingFlags = flags };
-    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &flagsInfo, .bindingCount = 5, .pBindings = b };
+    VkDescriptorBindingFlagsEXT flags[6] = { 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT };
+    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT flagsInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 6, .pBindingFlags = flags };
+    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &flagsInfo, .bindingCount = 6, .pBindings = b };
     vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->lightingSetLayout);
 
     VkDescriptorPoolSize ps[2] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT * 4 }
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT * 5 }
     };
     VkDescriptorPoolCreateInfo pci = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1965,6 +2086,15 @@ void createLightingDescriptors(VulkanContext* ctx)
         };
         vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
     }
+
+    // If shadows were created before lighting, map Binding 5 now!
+    if (ctx->shadowView != VK_NULL_HANDLE) {
+        for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+            VkDescriptorImageInfo dInfo = { .sampler = ctx->shadowSampler, .imageView = ctx->shadowView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[f], .dstBinding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dInfo };
+            vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        }
+    }
     fprintf(stdout, "Lighting UBO descriptors created\n");
 }
 
@@ -1979,52 +2109,15 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
 {
     VkDeviceSize size = maxMeshes * sizeof(MeshGPUData);
 
-    VkDescriptorSetLayoutBinding b = {
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
-    };
-    VkDescriptorSetLayoutCreateInfo lci = {
-        .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1, .pBindings = &b
-    };
-    vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->ssboSetLayout);
-
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT };
-    VkDescriptorPoolCreateInfo pci = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps
-    };
-    vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->ssboPool);
-
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         createBuffer(ctx, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->meshSSBO[i], &ctx->meshSSBOMemory[i]);
         vkMapMemory(ctx->device, ctx->meshSSBOMemory[i], 0, size, 0, &ctx->meshSSBOMapped[i]);
 
-        /* Allocate + write descriptor set */
-        VkDescriptorSetAllocateInfo dsai = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = ctx->ssboPool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &ctx->ssboSetLayout
-        };
-        vkAllocateDescriptorSets(ctx->device, &dsai, &ctx->ssboSets[i]);
-
-        VkDescriptorBufferInfo dbi = {
-            .buffer = ctx->meshSSBO[i], .offset = 0, .range = size
-        };
-        VkWriteDescriptorSet w = {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = ctx->ssboSets[i],
-            .dstBinding      = 0,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo     = &dbi
-        };
-        vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        // EXTRACT THE RAW GPU POINTER! No descriptor sets needed ever again.
+        VkBufferDeviceAddressInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ctx->meshSSBO[i] };
+        meshSSBOAddr[i] = vkGetBufferDeviceAddress(ctx->device, &info);
     }
-    fprintf(stdout, "Mesh SSBO: %.1f MB x%d frames\n",
+    fprintf(stdout, "Mesh SSBO (Physical Pointers): %.1f MB x%d frames\n",
             (double)size/(1024*1024), MAX_FRAMES_IN_FLIGHT);
 
     /* allocate per-mesh dirty bitfield — one uint64 per 64 meshes per frame */
@@ -2040,14 +2133,14 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
 {
     VkDeviceSize size = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
 
-    /* Source buffer: CPU writes original draw commands, compute reads */
-    createBuffer(ctx, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->srcIndirectBuffer, &ctx->srcIndirectBufferMemory);
+    /* Source buffer: CPU writes, compute reads */
+    createBuffer(ctx, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->srcIndirectBuffer, &ctx->srcIndirectBufferMemory);
     vkMapMemory(ctx->device, ctx->srcIndirectBufferMemory, 0, size, 0, &ctx->srcIndirectBufferMapped);
 
-    /* Destination buffer: compute writes, GPU draw reads — DEVICE_LOCAL */
-    createBuffer(ctx, size, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->indirectBuffer, &ctx->indirectBufferMemory);
+    /* MEGA Destination buffer: Holds Main Camera (0) + 4 Cascades (1-4) — DEVICE_LOCAL */
+    createBuffer(ctx, size * 5, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->indirectBuffer, &ctx->indirectBufferMemory);
 
-    fprintf(stdout, "Indirect buffers: %u draw slots (src HOST_VISIBLE, dst DEVICE_LOCAL)\n", maxMeshes);
+    fprintf(stdout, "Mega Indirect buffer: %u draw slots allocated (Camera + Cascades)\n", maxMeshes * 5);
 }
 
 void markMeshesSSBODirty(VulkanContext* ctx)
@@ -2415,3 +2508,4 @@ void clear_background(Color color)  { context.clearColor = color; }
 void toggle_ambient_occlusion(void) { ambientOcclusionEnabled = !ambientOcclusionEnabled; }
 void toggle_skybox(void) { skyboxEnabled = !skyboxEnabled; }
 void toggle_ibl_lighting(void) { iblLightingEnabled = !iblLightingEnabled; }
+void toggle_shadows(void) { shadowsEnabled = !shadowsEnabled; }

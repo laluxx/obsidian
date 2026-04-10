@@ -81,8 +81,9 @@ void createCommandPool(VulkanContext* context);
 void createCommandBuffers(VulkanContext* context);
 void createSyncObjects(VulkanContext* context);
 
-/* ── depth ─────────────────────────────────────── */
+/* ── depth & shadows ───────────────────────────── */
 void createDepthResources(VulkanContext* context);
+void createShadowResources(VulkanContext* context);
 
 /* ── uniform buffer ────────────────────────────── */
 void createUniformBuffer(VulkanContext* context);
@@ -99,6 +100,8 @@ extern bool skyboxEnabled;
 void toggle_skybox(void);
 extern bool iblLightingEnabled;
 void toggle_ibl_lighting(void);
+extern bool shadowsEnabled;
+void toggle_shadows(void);
 
 void cleanup(VulkanContext* context);
 uint32_t findMemoryType(VkPhysicalDevice physDev, uint32_t typeFilter, VkMemoryPropertyFlags props);

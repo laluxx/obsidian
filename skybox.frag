@@ -5,7 +5,10 @@ layout(location = 0) out vec4 outColor;
 layout(set = 1, binding = 4) uniform samplerCube skyboxMap;
 
 void main() {
-    vec3 color = textureLod(skyboxMap, inUVW, 0.0).rgb;
+    // Vulkan Y-flip for Cubemaps
+    vec3 uvw = inUVW;
+    uvw.y *= -1.0;
+    vec3 color = textureLod(skyboxMap, uvw, 0.0).rgb;
 
     // ACES Tonemapping
     color = (color * (2.51 * color + 0.03)) / (color * (2.51 * color + 0.59) + 0.06);

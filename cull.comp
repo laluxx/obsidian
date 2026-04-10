@@ -32,59 +32,50 @@ struct DrawCommand {
     uint firstInstance;
 };
 
-layout(set = 0, binding = 0) readonly buffer MeshSSBO {
-    MeshData meshes[];
-};
-
-layout(set = 0, binding = 1) readonly buffer SourceDrawSSBO {
-    DrawCommand srcDraws[];
-};
-
-layout(set = 0, binding = 2) writeonly buffer DstDrawSSBO {
-    DrawCommand dstDraws[];
-};
+layout(set = 0, binding = 0) readonly buffer MeshSSBO { MeshData meshes[]; };
+layout(set = 0, binding = 1) readonly buffer SourceDrawSSBO { DrawCommand srcDraws[]; };
+layout(set = 0, binding = 2) writeonly buffer DstDrawSSBO { DrawCommand dstDraws[]; };
 
 layout(set = 0, binding = 3) uniform FrustumUBO {
-    vec4     planes[6];
-    uint     meshCount;
-};
+    vec4 planes[5][6]; // [0] = Camera, [1-4] = Cascades
+    uint meshCount;
+    uint frustumCount;
+    uint _pad[2];
+} ubo;
 
-bool testAABB(vec3 aabbMin, vec3 aabbMax) {
+// Maniacal branchless AABB intersection
+bool testAABB(vec3 worldMin, vec3 worldMax, uint fIdx) {
     for (int i = 0; i < 6; i++) {
-        vec3 n = planes[i].xyz;
-        vec3 p;
-        p.x = n.x >= 0.0 ? aabbMax.x : aabbMin.x;
-        p.y = n.y >= 0.0 ? aabbMax.y : aabbMin.y;
-        p.z = n.z >= 0.0 ? aabbMax.z : aabbMin.z;
-        if (dot(n, p) + planes[i].w < 0.0) return false;
+        vec4 plane = ubo.planes[fIdx][i];
+        vec3 p = mix(worldMin, worldMax, greaterThan(plane.xyz, vec3(0.0)));
+        if (dot(plane.xyz, p) + plane.w < 0.0) return false;
     }
     return true;
 }
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= meshCount) return;
+    if (idx >= ubo.meshCount) return;
 
     DrawCommand src = srcDraws[idx];
 
-    /* slots with no geometry stay invisible */
+    // Slots with no geometry stay invisible across all frustums
     if (src.indexCount == 0) {
-        dstDraws[idx] = src;
-        dstDraws[idx].instanceCount = 0;
+        for(uint c = 0; c < ubo.frustumCount; c++) {
+            dstDraws[c * ubo.meshCount + idx] = src;
+            dstDraws[c * ubo.meshCount + idx].instanceCount = 0;
+        }
         return;
     }
 
     MeshData m = meshes[idx];
 
-    vec3 corners[8];
-    corners[0] = vec3(m.aabbMin.x, m.aabbMin.y, m.aabbMin.z);
-    corners[1] = vec3(m.aabbMax.x, m.aabbMin.y, m.aabbMin.z);
-    corners[2] = vec3(m.aabbMin.x, m.aabbMax.y, m.aabbMin.z);
-    corners[3] = vec3(m.aabbMax.x, m.aabbMax.y, m.aabbMin.z);
-    corners[4] = vec3(m.aabbMin.x, m.aabbMin.y, m.aabbMax.z);
-    corners[5] = vec3(m.aabbMax.x, m.aabbMin.y, m.aabbMax.z);
-    corners[6] = vec3(m.aabbMin.x, m.aabbMax.y, m.aabbMax.z);
-    corners[7] = vec3(m.aabbMax.x, m.aabbMax.y, m.aabbMax.z);
+    vec3 corners[8] = vec3[](
+        vec3(m.aabbMin.x, m.aabbMin.y, m.aabbMin.z), vec3(m.aabbMax.x, m.aabbMin.y, m.aabbMin.z),
+        vec3(m.aabbMin.x, m.aabbMax.y, m.aabbMin.z), vec3(m.aabbMax.x, m.aabbMax.y, m.aabbMin.z),
+        vec3(m.aabbMin.x, m.aabbMin.y, m.aabbMax.z), vec3(m.aabbMax.x, m.aabbMin.y, m.aabbMax.z),
+        vec3(m.aabbMin.x, m.aabbMax.y, m.aabbMax.z), vec3(m.aabbMax.x, m.aabbMax.y, m.aabbMax.z)
+    );
 
     vec3 worldMin = vec3( 1e30);
     vec3 worldMax = vec3(-1e30);
@@ -94,7 +85,9 @@ void main() {
         worldMax = max(worldMax, w);
     }
 
-    /* copy src verbatim, only cull instanceCount */
-    dstDraws[idx] = src;
-    dstDraws[idx].instanceCount = testAABB(worldMin, worldMax) ? 1 : 0;
+    // Output a tailored draw command for EVERY active frustum
+    for(uint c = 0; c < ubo.frustumCount; c++) {
+        dstDraws[c * ubo.meshCount + idx] = src;
+        dstDraws[c * ubo.meshCount + idx].instanceCount = testAABB(worldMin, worldMax, c) ? 1 : 0;
+    }
 }

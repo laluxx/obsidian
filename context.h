@@ -53,10 +53,11 @@ typedef struct {
     VkPipelineLayout computeCullPipelineLayout;
     VkDescriptorSetLayout computeCullSetLayout;
     VkDescriptorPool      computeCullPool;
-    VkDescriptorSet       computeCullSets[2];  /* one per frame in flight */
-    VkBuffer         frustumUBOBuffer[2];
-    VkDeviceMemory   frustumUBOMemory[2];
-    void*            frustumUBOMapped[2];
+    VkDescriptorSet       computeCullSets[4];  /* 2 per frame (camera + sun) */
+    VkBuffer         frustumUBOBuffer[4];
+    VkDeviceMemory   frustumUBOMemory[4];
+    void* frustumUBOMapped[4];
+
     VkPipelineLayout     pipelineLayout2D;         // 2D color
     VkPipelineLayout     pipelineLayoutTextured2D; // 2D textured + SDF2D
     // aliases — point to the same handles, never destroyed separately
@@ -131,6 +132,12 @@ typedef struct {
     VkDeviceMemory   dynamicDeviceMemory;
     VkDeviceSize     dynamicBufferSize;
 
+    // ── shadow mapping ───────────────────────────────────────────────
+    VkImage          shadowImage;
+    VkDeviceMemory   shadowMemory;
+    VkImageView      shadowView;
+    VkSampler        shadowSampler;
+
     // ── bindless texture array ───────────────────────────────────────
     VkDescriptorSetLayout bindlessSetLayout;
     VkDescriptorPool      bindlessPool;
@@ -165,10 +172,10 @@ typedef struct {
     VkDescriptorSet       lightingSets[MAX_FRAMES_IN_FLIGHT];
     VkBuffer              lightingUBO[MAX_FRAMES_IN_FLIGHT];
     VkDeviceMemory        lightingUBOMemory[MAX_FRAMES_IN_FLIGHT];
-    void*                 lightingUBOMapped[MAX_FRAMES_IN_FLIGHT];
+    void* lightingUBOMapped[MAX_FRAMES_IN_FLIGHT];
     /* LightingData is defined in renderer.h — use a raw byte buffer here
        to break the circular dependency. Cast to LightingData* at use sites. */
-    uint8_t               lightingDataRaw[512];  // sizeof(LightingData) <= 512
+    uint8_t               lightingDataRaw[1024];  // expanded for shadow matrices
 
     // ── SSBO: per-mesh data (model matrix, texture index, flags) ─────
     VkBuffer              meshSSBO[MAX_FRAMES_IN_FLIGHT];

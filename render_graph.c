@@ -196,7 +196,10 @@ void rg_execute(RgGraph* graph, VkCommandBuffer cmd) {
                     b->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     b->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     b->image = res->image;
-                    b->subresourceRange.aspectMask = (dep->layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+
+                    bool is_depth = (res->format == VK_FORMAT_D32_SFLOAT || res->format == VK_FORMAT_D16_UNORM || res->format == VK_FORMAT_D24_UNORM_S8_UINT || res->format == VK_FORMAT_D32_SFLOAT_S8_UINT);
+                    b->subresourceRange.aspectMask = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+
                     b->subresourceRange.baseMipLevel = 0;
                     b->subresourceRange.levelCount = 1;
                     b->subresourceRange.baseArrayLayer = 0;

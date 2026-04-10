@@ -56,7 +56,13 @@ void key_callback(int key, int action, int mods) {
     ctrlPressed  = mods & GLFW_MOD_CONTROL;
     altPressed   = mods & GLFW_MOD_ALT;
 
-    if (key == GLFW_KEY_TAB && action == GLFW_PRESS) {
+   if (vertico.is_active) {
+        if (action == PRESS || action == REPEAT)
+            vertico_handle_char_input(key, mods);
+        return;  // Don't process other keys when vertico is active
+    }
+
+    if (key == GLFW_KEY_TAB && action == PRESS) {
         screenshot(
                    context.device,
                    context.physicalDevice,
@@ -70,30 +76,30 @@ void key_callback(int key, int action, int mods) {
                    );
     }
 
-    if (key == GLFW_KEY_Z && action == GLFW_PRESS) {
+    if (key == GLFW_KEY_Z && action == PRESS) {
         print_scene_meshes();
     }
 
     // Arrow keys for camera snapping
-    if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
+    if (key == KEY_LEFT && action == PRESS) {
         camera_snap_to_next_angle(&camera, true, false);  // Counter-clockwise
     }
-    if (key == GLFW_KEY_RIGHT && action == GLFW_PRESS) {
+    if (key == KEY_RIGHT && action == PRESS) {
         camera_snap_to_next_angle(&camera, false, false);   // Clockwise
     }
-    if (key == GLFW_KEY_UP && action == GLFW_PRESS) {
+    if (key == KEY_UP && action == PRESS) {
         camera_snap_to_next_angle(&camera, true, true);   // Pitch up (more negative)
     }
-    if (key == GLFW_KEY_DOWN && action == GLFW_PRESS) {
+    if (key == KEY_DOWN && action == PRESS) {
         camera_snap_to_next_angle(&camera, false, true);    // Pitch down (more positive)
     }
 
-    if (key == GLFW_KEY_T && action == GLFW_PRESS) {
+    if (key == KEY_T && action == PRESS) {
         ambientOcclusionEnabled = !ambientOcclusionEnabled;
         printf("Ambient Occlusion: %s\n", ambientOcclusionEnabled ? "ENABLED" : "DISABLED");
     }
 
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+    if (key == KEY_ESCAPE && action == PRESS) {
         camera.active = !camera.active;
 
         if (camera.active) {
@@ -112,21 +118,21 @@ void key_callback(int key, int action, int mods) {
         }
     }
 
-    if (key == GLFW_KEY_F && action == GLFW_PRESS) {
+    if (key == KEY_F && action == PRESS) {
         vec3 world_origin = {0.0f, 0.0f, 0.0f};
         camera_set_look_at(&camera, world_origin);
         printf("Looking at world origin (0, 0, 0)\n");
     }
 
     // Track WASD key states
-    if (key == GLFW_KEY_W) keyW = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_A) keyA = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_S) keyS = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_D) keyD = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_Q) keyQ = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_E) keyE = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_SPACE) keySpace = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_LEFT_SHIFT) keyShift = (action != GLFW_RELEASE);
+    if (key == KEY_W) keyW = (action != GLFW_RELEASE);
+    if (key == KEY_A) keyA = (action != GLFW_RELEASE);
+    if (key == KEY_S) keyS = (action != GLFW_RELEASE);
+    if (key == KEY_D) keyD = (action != GLFW_RELEASE);
+    if (key == KEY_Q) keyQ = (action != GLFW_RELEASE);
+    if (key == KEY_E) keyE = (action != GLFW_RELEASE);
+    if (key == KEY_SPACE) keySpace = (action != GLFW_RELEASE);
+    if (key == KEY_LEFT_SHIFT) keyShift = (action != GLFW_RELEASE);
 }
 
 void mouse_button_callback(int button, int action, int mods) {
@@ -134,7 +140,7 @@ void mouse_button_callback(int button, int action, int mods) {
     if (!camera.active) {
         // Middle mouse button - orbit/pan
         if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
-            if (action == GLFW_PRESS) {
+            if (action == PRESS) {
                 middleMousePressed = true;
                 glfwGetCursorPos(context.window, &lastPanX, &lastPanY);
                 glfwGetCursorPos(context.window, &lastOrbitX, &lastOrbitY);
@@ -167,7 +173,7 @@ void mouse_button_callback(int button, int action, int mods) {
 
         // Right mouse button - freelook with WASD
         if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-            if (action == GLFW_PRESS) {
+            if (action == PRESS) {
                 rightMousePressed = true;
                 // Get initial position BEFORE disabling cursor
                 glfwGetCursorPos(context.window, &lastX, &lastY);
@@ -479,10 +485,13 @@ int main() {
     /* load_gltf("./assets/gltf/Avocado.glb", &scene); // PASS */
 
     Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
+    vertico_init();
+
 
     // Bake and load the HDR Environment Map
     /* loadIBL(&context, "./assets/hdr/ferndale_studio_04_4k.hdr"); */
     loadIBL(&context, "./assets/hdr/ferndale_studio_05_4k.hdr");
+    /* loadIBL(&context, "./assets/hdr/rogland_clear_night_4k.hdr"); */
 
     registerKeyCallback(key_callback);
 
@@ -490,9 +499,11 @@ int main() {
     registerCursorPosCallback(cursor_pos_callback);
     registerMouseButtonCallback(mouse_button_callback);
 
-    keychord_bind(&keymap, "TAB",       toggle_skybox,      "Toggle the skybox",    PRESS);
-    keychord_bind(&keymap, "t",         toggle_ibl_lighting,"Toggle IBL lighting",  PRESS);
-    keychord_bind(&keymap, "C-g",       keymap_reset_state, "TestFunc description", PRESS);
+    keychord_bind(&keymap, "TAB",       toggle_skybox,             "Toggle the skybox",    PRESS);
+    keychord_bind(&keymap, "t",         toggle_ibl_lighting,       "Toggle IBL lighting",  PRESS);
+    keychord_bind(&keymap, "l",         toggle_shadows,            "Toggle shadows",       PRESS);
+    keychord_bind(&keymap, "C-h c",     vertico_show_keybindings,  "Help keybindings",     PRESS);
+    keychord_bind(&keymap, "C-g",       keymap_reset_state,        "TestFunc description", PRESS);
     keymap_print_bindings(&keymap);
 
 

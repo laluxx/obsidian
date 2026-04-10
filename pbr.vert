@@ -32,7 +32,10 @@ struct MeshData {
     vec4  aabbMax;
 };
 
-layout(set = 2, binding = 0) readonly buffer MeshSSBO {
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
     MeshData meshes[];
 };
 
@@ -40,7 +43,8 @@ layout(push_constant) uniform PC {
     int ambientOcclusionEnabled;
     int iblEnabled;
     int meshIndex;
-    int _pad;
+    int cascadeIndex;
+    MeshBuffer meshData;
 } pc;
 
 layout(location = 0) in vec3 inPos;
@@ -57,7 +61,7 @@ layout(location = 6) out flat int outMeshIndex;
 
 void main() {
     uint idx = (pc.meshIndex >= 0) ? uint(pc.meshIndex) : uint(gl_BaseInstanceARB);
-    MeshData m = meshes[idx];
+    MeshData m = pc.meshData.meshes[idx];
 
     vec4 worldPos = m.model * vec4(inPos, 1.0);
     outWorldPos   = worldPos.xyz;

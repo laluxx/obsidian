@@ -28,7 +28,12 @@ layout(set = 3, binding = 0) uniform LightingUBO {
     int       iblEnabled;
     int       _pad;
     vec4      cameraPos;
+    mat4      cascadeSpace[4];
+    vec4      cascadeSplits;
 } lighting;
+
+// Using sampler2DShadow unlocks hardware-accelerated bilinear depth comparison!
+layout(set = 3, binding = 5) uniform sampler2DShadow shadowMap;
 
 struct MeshData {
     mat4  model;
@@ -51,7 +56,11 @@ struct MeshData {
     vec4  aabbMin;
     vec4  aabbMax;
 };
-layout(set = 2, binding = 0) readonly buffer MeshSSBO {
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
     MeshData meshes[];
 };
 
@@ -59,7 +68,8 @@ layout(push_constant) uniform PC {
     int  ambientOcclusionEnabled;
     int  iblEnabled;
     int  meshIndex;
-    int  _pad;
+    int  cascadeIndex;
+    MeshBuffer meshData;
 } pc;
 
 // ── Inputs from vertex shader ─────────────────────────────────────────────────
@@ -135,26 +145,105 @@ layout(set = 3, binding = 3) uniform sampler2D   brdfLUT;
 // We allocated 5 mip levels (0, 1, 2, 3, 4). The maximum valid LOD is 4.0!
 #define IBL_MAX_LOD 4.0
 
-vec3 iblAmbient(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, vec3 F0, float ao) {
+vec3 iblAmbient(vec3 N, vec3 V, vec3 L, vec3 albedo, float metallic, float roughness, vec3 F0, float ao, float visibility) {
     vec3 F    = F_SchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
     vec3 kD   = (vec3(1.0) - F) * (1.0 - metallic);
 
+    // Vulkan Y-flip for Cubemaps
+    vec3 sampleN = N; sampleN.y *= -1.0;
+
     // Diffuse: Sample the irradiance cubemap directly using the normal
-    vec3 irradiance = texture(irradianceMap, N).rgb;
+    vec3 irradiance = texture(irradianceMap, sampleN).rgb;
     vec3 diffuse    = kD * irradiance * albedo;
 
     // Specular: Sample the prefiltered cubemap and BRDF lookup table
     vec3 R                = reflect(-V, N);
-    vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * IBL_MAX_LOD).rgb;
+    vec3 sampleR          = R; sampleR.y *= -1.0;
+    vec3 prefilteredColor = textureLod(prefilterMap, sampleR, roughness * IBL_MAX_LOD).rgb;
     vec2 brdfLUT_val      = texture(brdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg;
-    vec3 specular         = prefilteredColor * (F * brdfLUT_val.x + brdfLUT_val.y);
 
-    return (diffuse + specular) * ao;
+    // ── AAA SPECULAR OCCLUSION ──
+    // The IBL prefilter map contains the blazing HDR sun. We must prevent shiny objects
+    // from reflecting the sun when they are standing in a shadow!
+    float RdotL = max(dot(R, L), 0.0);
+    // Mask out the reflection if it points towards the occluded sun.
+    // We factor in roughness because rough materials blur the sun out.
+    float specOcclusion = mix(1.0, visibility, smoothstep(0.5, 1.0, RdotL) * (1.0 - roughness));
+
+    vec3 specular = prefilteredColor * (F * brdfLUT_val.x + brdfLUT_val.y) * specOcclusion;
+
+    // ── AAA SKY OCCLUSION ──
+    // A shadow blocks the sun, but an object casting a shadow usually blocks
+    // part of the sky too! We gently darken the IBL in shadowed areas.
+    float skyOcclusion = mix(0.5, 1.0, visibility);
+
+    return (diffuse + specular) * ao * skyOcclusion;
+}
+
+// ── Cascaded Shadow Mapping (Atlas) ──────────────────────────────────────────
+float ShadowCalculation(vec3 worldPos, float NdotL) {
+    vec4 viewPos = ubo.view * vec4(worldPos, 1.0);
+    float z = abs(viewPos.z);
+
+    int cascadeIndex = 0;
+    for(int i = 0; i < 3; ++i) {
+        if(z > lighting.cascadeSplits[i]) cascadeIndex = i + 1;
+    }
+
+    vec4 fragPosLightSpace = lighting.cascadeSpace[cascadeIndex] * vec4(worldPos, 1.0);
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+
+    if(projCoords.z > 1.0 || projCoords.z < 0.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0)
+        return 0.0;
+
+    // Front-Face culling handles most acne, so we can use an extremely small bias
+    float bias = max(0.001 * (1.0 - NdotL), 0.0001);
+    if (cascadeIndex == 1) bias *= 1.2;
+    else if (cascadeIndex == 2) bias *= 1.5;
+    else if (cascadeIndex == 3) bias *= 2.0;
+
+    // Atlas Offsets: 4 quadrants in a 2x2 grid
+    vec2 atlasOffsets[4] = vec2[](
+        vec2(0.0, 0.0), vec2(0.5, 0.0),
+        vec2(0.0, 0.5), vec2(0.5, 0.5)
+    );
+
+    // Scale down UVs by half to fit in one quadrant, then shift to the correct slot
+    vec2 shadowUV = (projCoords.xy * 0.5) + atlasOffsets[cascadeIndex];
+
+    // sampler2DShadow returns 1.0 when LIT and 0.0 when SHADOWED!
+    float visibility = 0.0;
+    vec2 texelSize = 1.0 / textureSize(shadowMap, 0).xy;
+    float depth = projCoords.z - bias;
+
+    // AAA Poisson Disk Filter (16-Tap)
+    // These coordinates are organically scattered in a circle to eliminate pixelated, blocky edges.
+    vec2 poissonDisk[16] = vec2[](
+        vec2( -0.94201624, -0.39906216 ), vec2( 0.94558609, -0.76890725 ),
+        vec2( -0.094184101, -0.92938870 ), vec2( 0.34495938, 0.29387760 ),
+        vec2( -0.91588581, 0.45771432 ), vec2( -0.81544232, -0.87912464 ),
+        vec2( -0.38277543, 0.27676845 ), vec2( 0.97484398, 0.75648379 ),
+        vec2( 0.44323325, -0.97511554 ), vec2( 0.53742981, -0.47373420 ),
+        vec2( -0.26496911, -0.41893023 ), vec2( 0.79197514, 0.19090188 ),
+        vec2( -0.24188840, 0.99706507 ), vec2( -0.81409955, 0.91437590 ),
+        vec2( 0.19984126, 0.78641367 ), vec2( 0.14383161, -0.14100467 )
+    );
+
+    // Increase the filter radius to make the shadow edge softer and more cinematic
+    float filterRadius = 1.5;
+
+    for (int i = 0; i < 16; i++) {
+        visibility += texture(shadowMap, vec3(shadowUV + poissonDisk[i] * texelSize * filterRadius, depth));
+    }
+    visibility /= 16.0;
+
+    return visibility;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 void main() {
-    MeshData m = meshes[inMeshIndex];
+    MeshData m = pc.meshData.meshes[inMeshIndex];
 
     // ── Sample albedo ─────────────────────────────────────────────────────────
     vec4 albedoSample = (m.albedoIndex >= 0)
@@ -215,11 +304,15 @@ void main() {
 
     vec3 Lo = vec3(0.0);
 
+    // Evaluate Directional Shadow globally so we can pass it to the IBL
+    vec3  sunL       = normalize(-lighting.sun.direction.xyz);
+    float sunNdotL   = max(dot(N, sunL), 0.0);
+    float visibility = ShadowCalculation(inWorldPos, sunNdotL);
+
     // Directional light (sun)
     {
-        vec3  L    = normalize(-lighting.sun.direction.xyz);
-        vec3  lc   = lighting.sun.color.rgb * lighting.sun.color.w;
-        Lo += lightContrib(L, lc, 1.0, N, V, albedo, metallic, roughness, F0);
+        vec3 lc = lighting.sun.color.rgb * lighting.sun.color.w;
+        Lo += lightContrib(sunL, lc, 1.0, N, V, albedo, metallic, roughness, F0) * visibility;
     }
 
     // Point lights
@@ -243,10 +336,10 @@ void main() {
     // ── Ambient (IBL or flat) ─────────────────────────────────────────────────
     vec3 ambient;
     if (lighting.iblEnabled != 0 && pc.iblEnabled != 0) {
-        ambient = iblAmbient(N, V, albedo, metallic, roughness, F0, ao);
+        ambient = iblAmbient(N, V, sunL, albedo, metallic, roughness, F0, ao, visibility);
         ambient *= lighting.ambientIntensity;
     } else {
-        ambient = vec3(lighting.ambientIntensity) * albedo * ao;
+        ambient = vec3(lighting.ambientIntensity) * albedo * ao * mix(0.5, 1.0, visibility);
     }
 
     // ── Emissive ──────────────────────────────────────────────────────────────

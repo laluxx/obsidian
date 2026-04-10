@@ -32,6 +32,7 @@ void vertico_init() {
 
     keychord_bind(&vertico.vertico_keymap, "C-n",    vertico_next,       "Next candidate",     PRESS | REPEAT);
     keychord_bind(&vertico.vertico_keymap, "C-p",    vertico_previous,   "Previous candidate", PRESS | REPEAT);
+    keychord_bind(&vertico.vertico_keymap, "DEL",    vertico_backspace,  "Vertico backspace",  PRESS | REPEAT);
     keychord_bind(&vertico.vertico_keymap, "RET",    vertico_select,     "Select candidate",   PRESS);
     keychord_bind(&vertico.vertico_keymap, "C-g",    vertico_quit,       "Vertico quit",       PRESS);
     keychord_bind(&vertico.vertico_keymap, "<down>", vertico_next,       "Next candidate",     PRESS | REPEAT);
@@ -593,6 +594,7 @@ static void keybinding_selected(void* data) {
 
 void vertico_show_keybindings() {
     vertico_clear_candidates();
+    printf("IT WORKED!\n");
 
     // Add all keybindings as candidates
     for (size_t i = 0; i < keymap.count; i++) {

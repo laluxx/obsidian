@@ -24,6 +24,8 @@ typedef struct {
     vec4  color;            // xyz=color, w=intensity
 } PointLight;
 
+#define SHADOW_CASCADE_COUNT 4
+
 typedef struct {
     DirectionalLight sun;
     PointLight       pointLights[MAX_POINT_LIGHTS];
@@ -32,6 +34,8 @@ typedef struct {
     int              iblEnabled;
     int              _pad;
     vec4             cameraPos;   // xyz=pos, w=unused
+    mat4             cascadeSpace[SHADOW_CASCADE_COUNT];
+    vec4             cascadeSplits;
 } LightingData;
 
 typedef struct {
@@ -95,10 +99,11 @@ int32_t texture_pool_add(VulkanContext* context, const char* filename);
 Texture2D* texture_pool_get(int32_t index);
 
 typedef struct {
-    int   ambientOcclusionEnabled;
-    int   iblEnabled;
-    int   meshIndex;   /* -1 = indirect (gl_BaseInstanceARB), >=0 = direct */
-    int   _pad;
+    int ambientOcclusionEnabled;
+    int iblEnabled;
+    int meshIndex;           // -1 = indirect (gl_BaseInstanceARB), >=0 = direct
+    int cascadeIndex;
+    uint64_t meshBufferAddr; // THE MAGIC GPU POINTER
 } PushConstants;
 
 #define IMM_SSBO_MAX_ENTRIES 16384

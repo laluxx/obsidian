@@ -83,10 +83,8 @@ PushConstants pushConstants;
 /* ── Immediate-mode SSBO ─────────────────────────────────────────────────── */
 static VkBuffer             immSSBOBuffer[MAX_FRAMES_IN_FLIGHT];
 static VkDeviceMemory       immSSBOMemory[MAX_FRAMES_IN_FLIGHT];
-static MeshGPUData*         immSSBOMapped[MAX_FRAMES_IN_FLIGHT];
-static VkDescriptorSetLayout immSSBOLayout;
-static VkDescriptorPool     immSSBOPool;
-static VkDescriptorSet      immSSBOSets[MAX_FRAMES_IN_FLIGHT];
+static MeshGPUData* immSSBOMapped[MAX_FRAMES_IN_FLIGHT];
+static uint64_t             immSSBOAddr[MAX_FRAMES_IN_FLIGHT]; // Physical pointers!
 static uint32_t             immSlotCount;   /* slots used this frame        */
 static uint32_t             immFrameIndex;  /* set at begin_frame           */
 
@@ -156,30 +154,10 @@ int imm_alloc_slot(mat4 model) {
 
 void imm_ssbo_init(VulkanContext* ctx) {
     VkDeviceSize size = IMM_SSBO_MAX_ENTRIES * sizeof(MeshGPUData);
-
-    VkDescriptorSetLayoutBinding b = {
-        .binding         = 0,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
-    };
-    VkDescriptorSetLayoutCreateInfo lci = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1, .pBindings = &b
-    };
-    vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &immSSBOLayout);
-
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT };
-    VkDescriptorPoolCreateInfo pci = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps
-    };
-    vkCreateDescriptorPool(ctx->device, &pci, NULL, &immSSBOPool);
-
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkBufferCreateInfo bci = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .size = size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE
         };
         vkCreateBuffer(ctx->device, &bci, NULL, &immSSBOBuffer[i]);
@@ -194,23 +172,10 @@ void imm_ssbo_init(VulkanContext* ctx) {
         vkBindBufferMemory(ctx->device, immSSBOBuffer[i], immSSBOMemory[i], 0);
         vkMapMemory(ctx->device, immSSBOMemory[i], 0, size, 0, (void**)&immSSBOMapped[i]);
 
-        VkDescriptorSetAllocateInfo dsai = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = immSSBOPool, .descriptorSetCount = 1,
-            .pSetLayouts = &immSSBOLayout
-        };
-        vkAllocateDescriptorSets(ctx->device, &dsai, &immSSBOSets[i]);
-
-        VkDescriptorBufferInfo dbi = { .buffer = immSSBOBuffer[i], .offset = 0, .range = size };
-        VkWriteDescriptorSet w = {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = immSSBOSets[i], .dstBinding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1, .pBufferInfo = &dbi
-        };
-        vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        VkBufferDeviceAddressInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = immSSBOBuffer[i] };
+        immSSBOAddr[i] = vkGetBufferDeviceAddress(ctx->device, &info);
     }
-    fprintf(stdout, "Immediate SSBO: %.1f MB x%d frames\n",
+    fprintf(stdout, "Immediate SSBO (Physical Pointers): %.1f MB x%d frames\n",
             (double)(IMM_SSBO_MAX_ENTRIES * sizeof(MeshGPUData)) / (1024*1024),
             MAX_FRAMES_IN_FLIGHT);
 }
@@ -221,8 +186,6 @@ void imm_ssbo_shutdown(VulkanContext* ctx) {
         if (immSSBOBuffer[i])   { vkDestroyBuffer(ctx->device, immSSBOBuffer[i], NULL); immSSBOBuffer[i] = VK_NULL_HANDLE; }
         if (immSSBOMemory[i])   { vkFreeMemory(ctx->device, immSSBOMemory[i], NULL);    immSSBOMemory[i] = VK_NULL_HANDLE; }
     }
-    if (immSSBOLayout) { vkDestroyDescriptorSetLayout(ctx->device, immSSBOLayout, NULL); immSSBOLayout = VK_NULL_HANDLE; }
-    if (immSSBOPool)   { vkDestroyDescriptorPool(ctx->device, immSSBOPool, NULL);        immSSBOPool   = VK_NULL_HANDLE; }
 }
 
 void imm_ssbo_begin_frame(VulkanContext* ctx, uint32_t frameIndex) {
@@ -235,11 +198,8 @@ void imm_ssbo_begin_frame(VulkanContext* ctx, uint32_t frameIndex) {
     lineVertexCount = 0;
 }
 
-VkDescriptorSet      imm_ssbo_get_set(uint32_t frameIndex)  { return immSSBOSets[frameIndex]; }
-VkDescriptorSetLayout imm_ssbo_get_layout(void)             { return immSSBOLayout; }
-
 static void create_mapped_buffer(VkDevice dev, VkPhysicalDevice physDev, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer* buffer, VkDeviceMemory* memory, void** mapped) {
-    VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
     vkCreateBuffer(dev, &bufferInfo, NULL, buffer);
     VkMemoryRequirements memReq;
     vkGetBufferMemoryRequirements(dev, *buffer, &memReq);
@@ -473,6 +433,7 @@ void renderer_draw(VkCommandBuffer cmd) {
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer[imm_frame_index], offsets);
     for (uint32_t i = 0; i < immDrawCount; i++) {
+        pushConstants.meshBufferAddr = immSSBOAddr[imm_frame_index];
         pushConstants.meshIndex = immDrawList[i].slot;
         vkCmdPushConstants(cmd, context.pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -484,6 +445,7 @@ void renderer_draw(VkCommandBuffer cmd) {
 /* Draw a range of vertices with a specific imm SSBO slot */
 void renderer_draw_single(VkCommandBuffer cmd, uint32_t firstVertex,
                           uint32_t count, int slot) {
+    pushConstants.meshBufferAddr = immSSBOAddr[imm_frame_index];
     pushConstants.meshIndex = slot;
     vkCmdPushConstants(cmd, context.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -499,7 +461,6 @@ void renderer_clear() {
 void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
     if (meshes->count <= 1) return;
 
-    // Pass 1: partition opaque/mask to front, blend to back (stable, one pass)
     size_t write_idx = 0;
     for (size_t i = 0; i < meshes->count; i++) {
         if (meshes->items[i].alpha_mode != 2) {
@@ -511,23 +472,29 @@ void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
             write_idx++;
         }
     }
-    size_t non_blended_count = write_idx;
 
-    // Pass 2: insertion sort blended subset back-to-front using distance²  (no sqrt)
-    for (size_t i = non_blended_count + 1; i < meshes->count; i++) {
-        Mesh key = meshes->items[i];
-        vec3 kp  = { key.model[3][0], key.model[3][1], key.model[3][2] };
-        float kd = glm_vec3_distance2(cameraPos, kp);
-        size_t j = i;
-        while (j > non_blended_count) {
-            vec3 pp = { meshes->items[j-1].model[3][0],
-                        meshes->items[j-1].model[3][1],
-                        meshes->items[j-1].model[3][2] };
-            if (glm_vec3_distance2(cameraPos, pp) >= kd) break;
-            meshes->items[j] = meshes->items[j-1];
-            j--;
+    size_t blend_count = meshes->count - write_idx;
+    if (blend_count <= 1) return;
+
+    // In-place Shell Sort!
+    // Slashes O(N^2) to O(N log N) without dynamic allocations or deep recursion.
+    Mesh* blend = &meshes->items[write_idx];
+    size_t gaps[] = { 701, 301, 132, 57, 23, 10, 4, 1 };
+
+    for (int g = 0; g < 8; g++) {
+        size_t gap = gaps[g];
+        for (size_t i = gap; i < blend_count; i++) {
+            Mesh temp = blend[i];
+            float d_temp = glm_vec3_distance2(cameraPos, (vec3){temp.model[3][0], temp.model[3][1], temp.model[3][2]});
+
+            size_t j;
+            for (j = i; j >= gap; j -= gap) {
+                float d_j = glm_vec3_distance2(cameraPos, (vec3){blend[j - gap].model[3][0], blend[j - gap].model[3][1], blend[j - gap].model[3][2]});
+                if (d_j >= d_temp) break;
+                blend[j] = blend[j - gap];
+            }
+            blend[j] = temp;
         }
-        meshes->items[j] = key;
     }
 }
 
@@ -1151,12 +1118,8 @@ void line_renderer_upload() {
 void line_renderer_draw(VkCommandBuffer cmd) {
     if (lineVertexCount == 0) return;
 
-    /* Lines use the PBR pipeline/layout — bind the imm SSBO so the shader
-       has a valid set=2, and push meshIndex=-1 (no SSBO lookup needed for
-       lines since color comes from the vertex attribute directly).         */
-    VkDescriptorSet immSet = imm_ssbo_get_set(imm_frame_index);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            context.pipelineLayout, 2, 1, &immSet, 0, NULL);
+    /* Lines use the PBR layout. We don't read SSBOs for lines, so no need
+       to set a specific pointer. Push meshIndex=-2 as a sentinel. */
     pushConstants.meshIndex = -2; /* sentinel: line draw, ignore SSBO material */
     vkCmdPushConstants(cmd, context.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
