@@ -12,6 +12,7 @@ layout(set = 0, binding = 0) uniform UniformBufferObject {
 /* Must match MeshGPUData in renderer.h exactly — including aabbMin/aabbMax */
 struct MeshData {
     mat4  model;
+    mat4  normalMatrix;
     int   textureIndex;
     int   isUnlit;
     int   alphaMode;
@@ -41,8 +42,7 @@ void main() {
     vec4 worldPos   = mesh.model * vec4(inPosition, 1.0);
     gl_Position     = ubo.vp * worldPos;
 
-    mat3 normalMatrix = mat3(transpose(inverse(mesh.model)));
-    fragNormal      = normalize(normalMatrix * inNormal);
+    fragNormal      = normalize(mat3(mesh.normalMatrix) * inNormal);
     fragWorldPos    = worldPos.xyz;
     fragColor       = inColor;
     fragTexCoord    = inTexCoord;

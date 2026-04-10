@@ -1792,7 +1792,8 @@ void cleanup(VulkanContext* ctx)
         if (ctx->meshSSBO[i])         { vkDestroyBuffer(ctx->device, ctx->meshSSBO[i],         NULL);              ctx->meshSSBO[i]         = VK_NULL_HANDLE; }
         if (ctx->meshSSBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->meshSSBOMemory[i],   NULL);              ctx->meshSSBOMemory[i]   = VK_NULL_HANDLE; }
     }
-    if (ctx->ssboSetLayout)           { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout,        NULL); ctx->ssboSetLayout        = VK_NULL_HANDLE; }
+    if (ctx->meshDirtyBits)        { free(ctx->meshDirtyBits); ctx->meshDirtyBits = NULL; }
+    if (ctx->ssboSetLayout)        { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout,        NULL); ctx->ssboSetLayout        = VK_NULL_HANDLE; }
     if (ctx->ssboPool)                { vkDestroyDescriptorPool     (ctx->device, ctx->ssboPool,             NULL); ctx->ssboPool             = VK_NULL_HANDLE; }
     if (ctx->srcIndirectBufferMapped) { vkUnmapMemory  (ctx->device, ctx->srcIndirectBufferMemory);              ctx->srcIndirectBufferMapped = NULL;           }
     if (ctx->srcIndirectBuffer)       { vkDestroyBuffer(ctx->device, ctx->srcIndirectBuffer,        NULL);       ctx->srcIndirectBuffer       = VK_NULL_HANDLE; }
@@ -2187,6 +2188,14 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
     }
     fprintf(stdout, "Mesh SSBO: %.1f MB x%d frames\n",
             (double)size/(1024*1024), MAX_FRAMES_IN_FLIGHT);
+
+    /* allocate per-mesh dirty bitfield — one uint64 per 64 meshes per frame */
+    ctx->meshDirtyCapacity = ((maxMeshes + 63) / 64) * 64;
+    uint32_t words = ctx->meshDirtyCapacity / 64;
+    ctx->meshDirtyBits = malloc(words * MAX_FRAMES_IN_FLIGHT * sizeof(uint64_t));
+    /* start fully dirty so first frames upload everything */
+    memset(ctx->meshDirtyBits, 0xFF,
+           words * MAX_FRAMES_IN_FLIGHT * sizeof(uint64_t));
 }
 
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
@@ -2248,6 +2257,23 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
 void markMeshesSSBODirty(VulkanContext* ctx)
 {
     ctx->ssboFramesDirty = MAX_FRAMES_IN_FLIGHT;
+    /* mark all meshes dirty across all frames */
+    if (ctx->meshDirtyBits) {
+        uint32_t words = ctx->meshDirtyCapacity / 64;
+        memset(ctx->meshDirtyBits, 0xFF,
+               words * MAX_FRAMES_IN_FLIGHT * sizeof(uint64_t));
+    }
+}
+
+void markMeshDirty(VulkanContext* ctx, uint32_t meshIndex)
+{
+    uint32_t word = meshIndex / 64;
+    uint64_t bit  = 1ULL << (meshIndex % 64);
+    if (ctx->meshDirtyBits && word < ctx->meshDirtyCapacity / 64) {
+        for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++)
+            ctx->meshDirtyBits[word * MAX_FRAMES_IN_FLIGHT + f] |= bit;
+    }
+    ctx->ssboFramesDirty = MAX_FRAMES_IN_FLIGHT;
 }
 
 void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
@@ -2292,12 +2318,24 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
     MeshGPUData* dst = (MeshGPUData*)ctx->meshSSBOMapped[f];
 
     for (uint32_t i = 0; i < count; i++) {
+        /* skip meshes that are clean for this frame */
+        uint32_t word = i / 64;
+        uint64_t bit  = 1ULL << (i % 64);
+        bool dirty = (ctx->meshDirtyBits == NULL) ||
+                     (word < ctx->meshDirtyCapacity / 64 &&
+                      (ctx->meshDirtyBits[word * MAX_FRAMES_IN_FLIGHT + f] & bit));
+        if (!dirty) continue;
+
         Mesh* m = &meshes->items[i];
         if (m->megaBaseVertex == UINT32_MAX) {
             memset(&dst[i], 0, sizeof(MeshGPUData));
             continue;
         }
         glm_mat4_copy(m->model, dst[i].model);
+        mat4 inv;
+        glm_mat4_inv(m->model, inv);
+        glm_mat4_transpose(inv);
+        glm_mat4_copy(inv, dst[i].normalMatrix);
         dst[i].textureIndex = (m->texture && m->texture->loaded)
                               ? (int)m->texture->bindlessSlot : -1;
         dst[i].isUnlit      = m->is_unlit ? 1 : 0;
@@ -2307,6 +2345,10 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
         glm_vec3_copy(m->aabbMax, dst[i].aabbMax);
         dst[i].aabbMin[3]   = 0.0f;
         dst[i].aabbMax[3]   = 0.0f;
+
+        /* clear dirty bit for this frame */
+        if (ctx->meshDirtyBits && word < ctx->meshDirtyCapacity / 64)
+            ctx->meshDirtyBits[word * MAX_FRAMES_IN_FLIGHT + f] &= ~bit;
     }
 
     ctx->ssboFramesDirty--;

@@ -45,6 +45,7 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes);
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes);
 void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes);
 void markMeshesSSBODirty(VulkanContext* ctx);
+void markMeshDirty(VulkanContext* ctx, uint32_t meshIndex);
 void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes);
 void createComputeCullPipeline(VulkanContext* ctx);
 void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd);

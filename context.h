@@ -137,8 +137,10 @@ typedef struct {
     VkBuffer         srcIndirectBuffer;    /* CPU-written source, read by compute */
     VkDeviceMemory   srcIndirectBufferMemory;
     void*            srcIndirectBufferMapped;
-    uint32_t              indirectDrawCount;
-    uint32_t              ssboFramesDirty;    /* counts down from MAX_FRAMES_IN_FLIGHT to 0 */
+    uint32_t         indirectDrawCount;
+    uint32_t         ssboFramesDirty;    /* counts down from MAX_FRAMES_IN_FLIGHT to 0 */
+    uint64_t*        meshDirtyBits;      /* one bit per mesh, per frame */
+    uint32_t         meshDirtyCapacity;  /* in bits */
 } VulkanContext;
 
 extern VulkanContext context;

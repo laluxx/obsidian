@@ -107,12 +107,13 @@ typedef struct {
 /* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */
 typedef struct {
     mat4  model;
+    mat4  normalMatrix;  // precomputed transpose(inverse(model)), updated when model changes
     int   textureIndex;
     int   isUnlit;
     int   alphaMode;
     float alphaCutoff;
-    vec4  aabbMin;   /* w unused, padded for std430 */
-    vec4  aabbMax;   /* w unused, padded for std430 */
+    vec4  aabbMin;       // w unused, padded for std430
+    vec4  aabbMax;       // w unused, padded for std430
 } MeshGPUData;
 
 extern PushConstants pushConstants;
