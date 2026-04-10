@@ -355,6 +355,7 @@ void texturedCube(vec3 position, float size, Texture2D* texture, Color tint) {
     texture3DBatches[batchIndex].vertexCount += 36;
 }
 
+// TODO It should be shader based so it's cheaper and higher quality
 void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
     for (int lat = 0; lat < latDiv; ++lat) {
         float theta1 = (float)lat / latDiv * GLM_PI;

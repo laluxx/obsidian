@@ -111,6 +111,8 @@ typedef struct {
     int   isUnlit;
     int   alphaMode;
     float alphaCutoff;
+    vec4  aabbMin;   /* w unused, padded for std430 */
+    vec4  aabbMax;   /* w unused, padded for std430 */
 } MeshGPUData;
 
 extern PushConstants pushConstants;
@@ -141,6 +143,8 @@ typedef struct {
     VkDeviceMemory   indexBufferMemory;   /* VK_NULL_HANDLE for mega-buffer meshes */
     uint32_t         vertexCount;
     uint32_t         indexCount;          /* 0 = non-indexed draw */
+    vec3             aabbMin;
+    vec3             aabbMax;
     mat4  model;
     mat4  local_transform;
     void* node;

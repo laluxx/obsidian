@@ -41,6 +41,7 @@ bool load_gltf_textures(cgltf_data* data, const char* base_path) {
 
     printf("Loading %zu textures from glTF...\n", data->textures_count);
     gltf_texture_count = 0;
+    memset(gltf_texture_indices, -1, sizeof(gltf_texture_indices));
 
     for (size_t i = 0; i < data->textures_count; i++) {
         cgltf_texture* tex = &data->textures[i];
@@ -379,6 +380,26 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
     }
 
+    /* ── compute local-space AABB directly from position accessor ────── */
+    /* Use the raw accessor before any expansion — always correct,
+       works for both indexed and non-indexed, morph and static.          */
+    {
+        vec3 bmin = { 1e30f,  1e30f,  1e30f};
+        vec3 bmax = {-1e30f, -1e30f, -1e30f};
+        for (size_t v = 0; v < vertex_count; v++) {
+            float p[3];
+            cgltf_accessor_read_float(pos_accessor, v, p, 3);
+            bmin[0] = fminf(bmin[0], p[0]);
+            bmin[1] = fminf(bmin[1], p[1]);
+            bmin[2] = fminf(bmin[2], p[2]);
+            bmax[0] = fmaxf(bmax[0], p[0]);
+            bmax[1] = fmaxf(bmax[1], p[1]);
+            bmax[2] = fmaxf(bmax[2], p[2]);
+        }
+        glm_vec3_copy(bmin, mesh.aabbMin);
+        glm_vec3_copy(bmax, mesh.aabbMax);
+    }
+
     mesh.vertexBuffer       = VK_NULL_HANDLE;
     mesh.vertexBufferMemory = VK_NULL_HANDLE;
     mesh.indexBuffer        = VK_NULL_HANDLE;
@@ -501,15 +522,15 @@ void load_gltf_meshes(cgltf_data* data, Meshes* meshes) {
     }
 
     node_mapping_count = 0;
-    cgltf_scene* scene = data->scene ? data->scene : &data->scenes[0];
+    cgltf_scene* scene_root = data->scene ? data->scene : &data->scenes[0];
 
-    printf("Processing scene with %zu root nodes\n", scene->nodes_count);
+    printf("Processing scene with %zu root nodes\n", scene_root->nodes_count);
 
     mat4 identity;
     glm_mat4_identity(identity);
 
-    for (size_t i = 0; i < scene->nodes_count; i++) {
-        process_node(scene->nodes[i], data, meshes, identity);
+    for (size_t i = 0; i < scene_root->nodes_count; i++) {
+        process_node(scene_root->nodes[i], data, meshes, identity);
     }
 
     printf("Successfully loaded %zu meshes from scene graph\n", meshes->count);

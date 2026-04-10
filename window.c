@@ -103,6 +103,7 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
 
     createAllPipelineLayouts(&context);
     createGraphicsPipelines(&context);
+    createComputeCullPipeline(&context);
 
     renderer2D_init();
 

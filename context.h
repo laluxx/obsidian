@@ -51,7 +51,15 @@ typedef struct {
     // ── pipeline layouts ─────────────────────────────────────────────
     VkPipelineLayout     pipelineLayout;           // 3D solid + line
     VkPipelineLayout     pipelineLayoutTextured3D; // 3D textured + SDF3D
-    VkPipelineLayout     pipelineLayoutIndirect;
+    VkPipelineLayout pipelineLayoutIndirect;
+    VkPipeline       computeCullPipeline;
+    VkPipelineLayout computeCullPipelineLayout;
+    VkDescriptorSetLayout computeCullSetLayout;
+    VkDescriptorPool      computeCullPool;
+    VkDescriptorSet       computeCullSets[2];  /* one per frame in flight */
+    VkBuffer         frustumUBOBuffer[2];
+    VkDeviceMemory   frustumUBOMemory[2];
+    void*            frustumUBOMapped[2];
     VkPipelineLayout     pipelineLayout2D;         // 2D color
     VkPipelineLayout     pipelineLayoutTextured2D; // 2D textured + SDF2D
     // aliases — point to the same handles, never destroyed separately

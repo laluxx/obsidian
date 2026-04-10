@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -std=c23 -Wall -Wextra -g -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
+CFLAGS = -std=c23 -Wall -Wextra -g -Ofast -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
 LDFLAGS = -lvulkan -lglfw -lX11 -lcglm -lm $(shell pkg-config --libs freetype2 guile-3.0)
 
 GLSLANG = glslangValidator
@@ -25,7 +25,8 @@ HEADERS = $(wildcard *.h)
 # Shaders
 SHADER_VERTS = $(wildcard *.vert)
 SHADER_FRAGS = $(wildcard *.frag)
-SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv)
+SHADER_COMPS = $(wildcard *.comp)
+SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv) $(SHADER_COMPS:.comp=.comp.spv)
 SPV_HEADERS = $(SHADER_SPVS:.spv=.spv.h)
 
 # Default target - build executable directly
@@ -33,10 +34,11 @@ all: $(SPV_HEADERS) $(EXECUTABLE)
 
 # Compile shaders to SPIR-V
 %.vert.spv: %.vert
-	$(GLSLANG) -V $< -o $@
-
+	$(GLSLANG) -V --target-env vulkan1.1 $< -o $@
 %.frag.spv: %.frag
-	$(GLSLANG) -V $< -o $@
+	$(GLSLANG) -V --target-env vulkan1.1 $< -o $@
+%.comp.spv: %.comp
+	$(GLSLANG) -V --target-env vulkan1.1 $< -o $@
 
 # Convert SPIR-V to C header
 %.spv.h: %.spv
