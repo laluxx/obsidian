@@ -1856,48 +1856,145 @@ void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size)
 
 /* Upload vertices into the mega buffer, return the BASE VERTEX INDEX for DrawIndexed/Draw offset.
    Uses a temporary staging buffer so the final data lives in DEVICE_LOCAL memory. */
-uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount)
+void createUploadStagingBuffer(VulkanContext* ctx, VkDeviceSize size)
 {
-    VkDeviceSize uploadSize = vertexCount * sizeof(Vertex);
-    VkDeviceSize byteOffset = (VkDeviceSize)ctx->megaVertexBufferOffset * sizeof(Vertex);
+    ctx->uploadStagingSize   = size;
+    ctx->uploadStagingOffset = 0;
 
-    if (byteOffset + uploadSize > ctx->megaVertexBufferSize) {
-        fprintf(stderr, "Mega vertex buffer overflow! Increase size.\n");
-        return UINT32_MAX;
-    }
-
-    /* Temporary staging buffer */
-    VkBuffer       stagingBuf;
-    VkDeviceMemory stagingMem;
     VkBufferCreateInfo bci = {
         .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = uploadSize,
+        .size        = size,
         .usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
-    vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+    vkCreateBuffer(ctx->device, &bci, NULL, &ctx->uploadStagingBuffer);
 
     VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+    vkGetBufferMemoryRequirements(ctx->device, ctx->uploadStagingBuffer, &req);
     VkMemoryAllocateInfo ai = {
         .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize  = req.size,
         .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
     };
-    vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
-    vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+    vkAllocateMemory(ctx->device, &ai, NULL, &ctx->uploadStagingMemory);
+    vkBindBufferMemory(ctx->device, ctx->uploadStagingBuffer,
+                       ctx->uploadStagingMemory, 0);
+    vkMapMemory(ctx->device, ctx->uploadStagingMemory, 0, size, 0,
+                &ctx->uploadStagingMapped);
 
-    void* mapped;
-    vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
-    memcpy(mapped, vertices, uploadSize);
-    vkUnmapMemory(ctx->device, stagingMem);
+    /* pre-allocate region arrays */
+    ctx->pendingVertexCopyCapacity = 256;
+    ctx->pendingVertexCopyCount    = 0;
+    ctx->pendingVertexCopies       = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingIndexCopyCapacity  = 256;
+    ctx->pendingIndexCopyCount     = 0;
+    ctx->pendingIndexCopies        = malloc(256 * sizeof(VkBufferCopy));
 
-    copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue,
-               stagingBuf, ctx->megaVertexBuffer, uploadSize, 0, byteOffset);
+    fprintf(stdout, "Upload staging buffer: %.1f MB\n",
+            (double)size / (1024.0 * 1024.0));
+}
 
-    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
-    vkFreeMemory(ctx->device, stagingMem, NULL);
+void flushUploadStagingBuffer(VulkanContext* ctx)
+{
+    if (ctx->pendingVertexCopyCount == 0 && ctx->pendingIndexCopyCount == 0) return;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+
+    if (ctx->pendingVertexCopyCount > 0) {
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaVertexBuffer,
+                        ctx->pendingVertexCopyCount, ctx->pendingVertexCopies);
+    }
+    if (ctx->pendingIndexCopyCount > 0) {
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaIndexBuffer,
+                        ctx->pendingIndexCopyCount, ctx->pendingIndexCopies);
+    }
+
+    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+
+    /* reset for next batch */
+    ctx->pendingVertexCopyCount = 0;
+    ctx->pendingIndexCopyCount  = 0;
+    ctx->uploadStagingOffset    = 0;
+
+    fprintf(stdout, "Flushed upload staging buffer: %u vertex + %u index regions\n",
+            ctx->pendingVertexCopyCount, ctx->pendingIndexCopyCount);
+}
+
+void destroyUploadStagingBuffer(VulkanContext* ctx)
+{
+    if (ctx->uploadStagingMapped)  { vkUnmapMemory(ctx->device, ctx->uploadStagingMemory); ctx->uploadStagingMapped = NULL; }
+    if (ctx->uploadStagingBuffer)  { vkDestroyBuffer(ctx->device, ctx->uploadStagingBuffer, NULL); ctx->uploadStagingBuffer = VK_NULL_HANDLE; }
+    if (ctx->uploadStagingMemory)  { vkFreeMemory(ctx->device, ctx->uploadStagingMemory, NULL);    ctx->uploadStagingMemory = VK_NULL_HANDLE; }
+    if (ctx->pendingVertexCopies)  { free(ctx->pendingVertexCopies); ctx->pendingVertexCopies = NULL; }
+    if (ctx->pendingIndexCopies)   { free(ctx->pendingIndexCopies);  ctx->pendingIndexCopies  = NULL; }
+    ctx->uploadStagingSize            = 0;
+    ctx->uploadStagingOffset          = 0;
+    ctx->pendingVertexCopyCount       = 0;
+    ctx->pendingVertexCopyCapacity    = 0;
+    ctx->pendingIndexCopyCount        = 0;
+    ctx->pendingIndexCopyCapacity     = 0;
+}
+
+uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount)
+{
+    VkDeviceSize uploadSize = vertexCount * sizeof(Vertex);
+    VkDeviceSize dstOffset  = (VkDeviceSize)ctx->megaVertexBufferOffset * sizeof(Vertex);
+
+    if (dstOffset + uploadSize > ctx->megaVertexBufferSize) {
+        fprintf(stderr, "Mega vertex buffer overflow!\n");
+        return UINT32_MAX;
+    }
+
+    /* if this upload won't fit in the staging buffer, flush first */
+    if (ctx->uploadStagingBuffer &&
+        ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) {
+        flushUploadStagingBuffer(ctx);
+    }
+
+    if (ctx->uploadStagingBuffer) {
+        /* fast path: memcpy into persistent staging, record region */
+        memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset,
+               vertices, uploadSize);
+
+        if (ctx->pendingVertexCopyCount == ctx->pendingVertexCopyCapacity) {
+            ctx->pendingVertexCopyCapacity *= 2;
+            ctx->pendingVertexCopies = realloc(ctx->pendingVertexCopies,
+                ctx->pendingVertexCopyCapacity * sizeof(VkBufferCopy));
+        }
+        ctx->pendingVertexCopies[ctx->pendingVertexCopyCount++] = (VkBufferCopy){
+            .srcOffset = ctx->uploadStagingOffset,
+            .dstOffset = dstOffset,
+            .size      = uploadSize
+        };
+        ctx->uploadStagingOffset += uploadSize;
+    } else {
+        /* fallback: old per-mesh staging path */
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        VkBufferCreateInfo bci = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = uploadSize,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+        VkMemoryAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
+        vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+        void* mapped;
+        vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+        memcpy(mapped, vertices, uploadSize);
+        vkUnmapMemory(ctx->device, stagingMem);
+        copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue,
+                   stagingBuf, ctx->megaVertexBuffer, uploadSize, 0, dstOffset);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+        vkFreeMemory(ctx->device, stagingMem, NULL);
+    }
 
     uint32_t baseVertex = ctx->megaVertexBufferOffset;
     ctx->megaVertexBufferOffset += vertexCount;
@@ -1938,44 +2035,59 @@ void createMegaIndexBuffer(VulkanContext* ctx, VkDeviceSize size)
 uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t indexCount)
 {
     VkDeviceSize uploadSize = indexCount * sizeof(uint32_t);
-    VkDeviceSize byteOffset = (VkDeviceSize)ctx->megaIndexBufferOffset * sizeof(uint32_t);
+    VkDeviceSize dstOffset  = (VkDeviceSize)ctx->megaIndexBufferOffset * sizeof(uint32_t);
 
-    if (byteOffset + uploadSize > ctx->megaIndexBufferSize) {
-        fprintf(stderr, "Mega index buffer overflow! Increase size.\n");
+    if (dstOffset + uploadSize > ctx->megaIndexBufferSize) {
+        fprintf(stderr, "Mega index buffer overflow!\n");
         return UINT32_MAX;
     }
 
-    VkBuffer       stagingBuf;
-    VkDeviceMemory stagingMem;
-    VkBufferCreateInfo bci = {
-        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size        = uploadSize,
-        .usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+    if (ctx->uploadStagingBuffer &&
+        ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) {
+        flushUploadStagingBuffer(ctx);
+    }
 
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    };
-    vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
-    vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+    if (ctx->uploadStagingBuffer) {
+        memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset,
+               indices, uploadSize);
 
-    void* mapped;
-    vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
-    memcpy(mapped, indices, uploadSize);
-    vkUnmapMemory(ctx->device, stagingMem);
-
-    copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue,
-               stagingBuf, ctx->megaIndexBuffer, uploadSize, 0, byteOffset);
-
-    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
-    vkFreeMemory(ctx->device, stagingMem, NULL);
+        if (ctx->pendingIndexCopyCount == ctx->pendingIndexCopyCapacity) {
+            ctx->pendingIndexCopyCapacity *= 2;
+            ctx->pendingIndexCopies = realloc(ctx->pendingIndexCopies,
+                ctx->pendingIndexCopyCapacity * sizeof(VkBufferCopy));
+        }
+        ctx->pendingIndexCopies[ctx->pendingIndexCopyCount++] = (VkBufferCopy){
+            .srcOffset = ctx->uploadStagingOffset,
+            .dstOffset = dstOffset,
+            .size      = uploadSize
+        };
+        ctx->uploadStagingOffset += uploadSize;
+    } else {
+        /* fallback */
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        VkBufferCreateInfo bci = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = uploadSize,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+        };
+        vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+        VkMemoryAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        };
+        vkAllocateMemory(ctx->device, &ai, NULL, &stagingMem);
+        vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+        void* mapped;
+        vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+        memcpy(mapped, indices, uploadSize);
+        vkUnmapMemory(ctx->device, stagingMem);
+        copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue,
+                   stagingBuf, ctx->megaIndexBuffer, uploadSize, 0, dstOffset);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+        vkFreeMemory(ctx->device, stagingMem, NULL);
+    }
 
     uint32_t baseIndex = ctx->megaIndexBufferOffset;
     ctx->megaIndexBufferOffset += indexCount;

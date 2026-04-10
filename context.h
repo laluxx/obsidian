@@ -104,7 +104,24 @@ typedef struct {
     VkBuffer         megaIndexBuffer;
     VkDeviceMemory   megaIndexBufferMemory;
     VkDeviceSize     megaIndexBufferSize;
-    uint32_t         megaIndexBufferOffset; /* next free vertex index */
+    uint32_t         megaIndexBufferOffset;
+
+    // ── persistent upload staging buffer ─────────────────────────────
+    // One large HOST_VISIBLE buffer used for all mesh uploads.
+    // Batched regions are flushed in a single vkCmdCopyBuffer call.
+    VkBuffer         uploadStagingBuffer;
+    VkDeviceMemory   uploadStagingMemory;
+    void*            uploadStagingMapped;
+    VkDeviceSize     uploadStagingSize;
+    VkDeviceSize     uploadStagingOffset;  /* current write head */
+
+    // pending copy regions accumulated during load, flushed once at end
+    VkBufferCopy*    pendingVertexCopies;
+    uint32_t         pendingVertexCopyCount;
+    uint32_t         pendingVertexCopyCapacity;
+    VkBufferCopy*    pendingIndexCopies;
+    uint32_t         pendingIndexCopyCount;
+    uint32_t         pendingIndexCopyCapacity;
 
     // ── per-frame dynamic buffers (2D, lines, morph) ──
     // staging (HOST_VISIBLE|HOST_COHERENT, persistently mapped)

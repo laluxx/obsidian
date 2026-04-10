@@ -671,7 +671,15 @@ bool load_gltf(const char* filepath, Scene* scene) {
         printf("Warning: Failed to load some textures\n");
     }
 
+    /* create one large staging buffer for the entire model upload —
+       all mesh vertex/index data is batched and transferred in one GPU command */
+    createUploadStagingBuffer(&context, 256 * 1024 * 1024); /* 256 MB upload window */
+
     load_gltf_meshes(data, &scene->meshes);
+
+    /* flush all accumulated vertex+index copies in a single command buffer */
+    flushUploadStagingBuffer(&context);
+    destroyUploadStagingBuffer(&context);
 
     instance->mesh_count = scene->meshes.count - instance->mesh_start_index;
 
