@@ -1,0 +1,59 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+layout(set = 0, binding = 0) readonly buffer VisibilityBuffer   { uint visibility[]; };
+layout(set = 0, binding = 1) readonly buffer SrcIndirectBuffer  { DrawCommand srcDraws[]; };
+layout(set = 0, binding = 2) writeonly buffer DstIndirectBuffer { DrawCommand dstDraws[]; };
+layout(set = 0, binding = 3) buffer DrawCountBuffer             { uint drawCounts[]; };
+
+layout(push_constant) uniform PC {
+    uint meshCount;
+    uint maxMeshes;
+};
+
+shared uint sdata[64];
+
+void main() {
+    uint lid        = gl_LocalInvocationID.x;
+    uint gid        = gl_GlobalInvocationID.x;
+    uint frustumIdx = gl_WorkGroupID.y;           // Y dimension = frustum
+    uint base       = frustumIdx * meshCount;
+
+    uint vis = (gid < meshCount) ? visibility[base + gid] : 0u;
+
+    // Kogge-Stone inclusive prefix sum
+    sdata[lid] = vis;
+    barrier();
+    for (uint stride = 1u; stride < 64u; stride <<= 1u) {
+        uint v = (lid >= stride) ? sdata[lid - stride] : 0u;
+        barrier();
+        sdata[lid] += v;
+        barrier();
+    }
+
+    uint localExclusive = sdata[lid] - vis;
+    uint workgroupTotal = sdata[63];
+    barrier();
+
+    uint blockBase = 0u;
+    if (lid == 0u) {
+        blockBase = atomicAdd(drawCounts[frustumIdx], workgroupTotal);
+        sdata[0]  = blockBase;
+    }
+    barrier();
+    blockBase = sdata[0];
+
+    if (vis == 1u && gid < meshCount) {
+        uint dstIdx = frustumIdx * maxMeshes + blockBase + localExclusive;
+        dstDraws[dstIdx] = srcDraws[gid];
+    }
+}

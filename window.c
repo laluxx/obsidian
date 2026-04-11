@@ -102,6 +102,10 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     createAllPipelineLayouts(&context);
     createGraphicsPipelines(&context);
     createComputeCullPipeline(&context);
+    createComputeCompactPipeline(&context);
+
+    // 64 MB persistent upload staging — eliminates per-mesh staging allocations
+    createUploadStagingBuffer(&context, 64ULL * 1024 * 1024);
 
     renderer2D_init();
 
@@ -163,7 +167,6 @@ void beginFrame() {
     renderer2D_clear();
 
     animate_scene(&scene, current_frame);
-    markMeshesSSBODirty(&context);  /* animations modified transforms */
 
     camera_process_keyboard(&camera, context.window, delta_time);
     camera_update(&camera);

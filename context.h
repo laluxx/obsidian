@@ -49,11 +49,17 @@ typedef struct {
     VkPipelineLayout     pipelineLayout;           // 3D solid + line
     VkPipelineLayout     pipelineLayoutTextured3D; // 3D textured + SDF3D
     VkPipelineLayout pipelineLayoutIndirect;
-    VkPipeline       computeCullPipeline;
-    VkPipelineLayout computeCullPipelineLayout;
+    VkPipeline            computeCullPipeline;
+    VkPipelineLayout      computeCullPipelineLayout;
     VkDescriptorSetLayout computeCullSetLayout;
     VkDescriptorPool      computeCullPool;
-    VkDescriptorSet       computeCullSets[4];  /* 2 per frame (camera + sun) */
+    VkDescriptorSet       computeCullSets[MAX_FRAMES_IN_FLIGHT];
+
+    VkPipeline            computeCompactPipeline;
+    VkPipelineLayout      computeCompactPipelineLayout;
+    VkDescriptorSetLayout computeCompactSetLayout;
+    VkDescriptorPool      computeCompactPool;
+    VkDescriptorSet       computeCompactSets[MAX_FRAMES_IN_FLIGHT];
     VkBuffer         frustumUBOBuffer[4];
     VkDeviceMemory   frustumUBOMemory[4];
     void* frustumUBOMapped[4];
@@ -186,15 +192,19 @@ typedef struct {
     VkDescriptorSet       ssboSets[MAX_FRAMES_IN_FLIGHT];
 
     // ── indirect draw buffer ────────────────────────────────────────
-    VkBuffer         indirectBuffer;       /* GPU-written output, read by draw */
+    VkBuffer         indirectBuffer;          /* compacted GPU output, read by draw     */
     VkDeviceMemory   indirectBufferMemory;
-    VkBuffer         srcIndirectBuffer;    /* CPU-written source, read by compute */
+    VkBuffer         srcIndirectBuffer;       /* CPU-written source, read by compact    */
     VkDeviceMemory   srcIndirectBufferMemory;
     void*            srcIndirectBufferMapped;
+    VkBuffer         visibilityBuffer;        /* cull.comp writes uint[frustums][meshes]*/
+    VkDeviceMemory   visibilityBufferMemory;
+    VkBuffer         drawCountBuffer;         /* compact.comp writes uint[frustums]     */
+    VkDeviceMemory   drawCountBufferMemory;
     uint32_t         indirectDrawCount;
-    uint32_t         ssboFramesDirty;    /* counts down from MAX_FRAMES_IN_FLIGHT to 0 */
-    uint64_t*        meshDirtyBits;      /* one bit per mesh, per frame */
-    uint32_t         meshDirtyCapacity;  /* in bits */
+    uint32_t         ssboFramesDirty;
+    uint64_t*        meshDirtyBits;
+    uint32_t         meshDirtyCapacity;
 
     RgGraph* renderGraph;
 } VulkanContext;

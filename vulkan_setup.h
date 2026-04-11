@@ -58,6 +58,7 @@ void markMeshesSSBODirty(VulkanContext* ctx);
 void markMeshDirty(VulkanContext* ctx, uint32_t meshIndex);
 void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes);
 void createComputeCullPipeline(VulkanContext* ctx);
+void createComputeCompactPipeline(VulkanContext* ctx);
 void dispatchFrustumCull(VulkanContext* ctx, VkCommandBuffer cmd);
 
 /* ── pipelines (all created in one batch call) ─── */

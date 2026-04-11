@@ -163,10 +163,16 @@ void imm_ssbo_init(VulkanContext* ctx) {
         vkCreateBuffer(ctx->device, &bci, NULL, &immSSBOBuffer[i]);
         VkMemoryRequirements mr;
         vkGetBufferMemoryRequirements(ctx->device, immSSBOBuffer[i], &mr);
+        VkMemoryAllocateFlagsInfo immFlagsInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+            .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+        };
         VkMemoryAllocateInfo ai = {
-            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext           = &immFlagsInfo,
+            .allocationSize  = mr.size,
             .memoryTypeIndex = findMemoryType(ctx->physicalDevice, mr.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
         };
         vkAllocateMemory(ctx->device, &ai, NULL, &immSSBOMemory[i]);
         vkBindBufferMemory(ctx->device, immSSBOBuffer[i], immSSBOMemory[i], 0);
@@ -199,11 +205,28 @@ void imm_ssbo_begin_frame(VulkanContext* ctx, uint32_t frameIndex) {
 }
 
 static void create_mapped_buffer(VkDevice dev, VkPhysicalDevice physDev, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer* buffer, VkDeviceMemory* memory, void** mapped) {
-    VkBufferCreateInfo bufferInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    VkBufferCreateInfo bufferInfo = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = size,
+        .usage       = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
     vkCreateBuffer(dev, &bufferInfo, NULL, buffer);
+
     VkMemoryRequirements memReq;
     vkGetBufferMemoryRequirements(dev, *buffer, &memReq);
-    VkMemoryAllocateInfo allocInfo = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = memReq.size, .memoryTypeIndex = findMemoryType(physDev, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+
+    VkMemoryAllocateFlagsInfo flagsInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+    };
+    VkMemoryAllocateInfo allocInfo = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext           = &flagsInfo,
+        .allocationSize  = memReq.size,
+        .memoryTypeIndex = findMemoryType(physDev, memReq.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
     vkAllocateMemory(dev, &allocInfo, NULL, memory);
     vkBindBufferMemory(dev, *buffer, *memory, 0);
     vkMapMemory(dev, *memory, 0, size, 0, mapped);
