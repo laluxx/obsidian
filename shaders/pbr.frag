@@ -50,9 +50,9 @@ struct MeshData {
     float metallicFactor;
     float roughnessFactor;
     float emissiveStrength;
-    int   _pad0;
+    int   displacementIndex;
     vec3  emissiveFactor;
-    int   _pad1;
+    float displacementScale;
     vec4  aabbMin;
     vec4  aabbMax;
 };
@@ -251,9 +251,11 @@ float ShadowCalculation(vec3 worldPos, float NdotL) {
 void main() {
     MeshData m = pc.meshData.meshes[inMeshIndex];
 
+    vec2 texCoord = inTexCoord;
+
     // ── Sample albedo ─────────────────────────────────────────────────────────
     vec4 albedoSample = (m.albedoIndex >= 0)
-        ? texture(textures[nonuniformEXT(m.albedoIndex)], inTexCoord)
+        ? texture(textures[nonuniformEXT(m.albedoIndex)], texCoord)
         : vec4(1.0);
 
     // Convert SRGB texture to Linear space IMMEDIATELY.
@@ -272,8 +274,12 @@ void main() {
     // ── Normal mapping ────────────────────────────────────────────────────────
     vec3 N;
     if (m.normalMapIndex >= 0) {
-        vec3 nSample = texture(textures[nonuniformEXT(m.normalMapIndex)], inTexCoord).rgb;
+        vec3 nSample = texture(textures[nonuniformEXT(m.normalMapIndex)], texCoord).rgb;
         nSample = nSample * 2.0 - 1.0;          // unpack [0,1] -> [-1,1]
+
+        // Invert Y to match Vulkan's +Y DOWN coordinate system
+        nSample.y = -nSample.y;
+
         N = normalize(inTBN * nSample);
     } else {
         N = normalize(inTBN[2]);                 // use geometry normal
@@ -283,7 +289,7 @@ void main() {
     float metallic  = m.metallicFactor;
     float roughness = m.roughnessFactor;
     if (m.metallicRoughIndex >= 0) {
-        vec4 mr = texture(textures[nonuniformEXT(m.metallicRoughIndex)], inTexCoord);
+        vec4 mr = texture(textures[nonuniformEXT(m.metallicRoughIndex)], texCoord);
         metallic  *= mr.b;   // glTF: B channel = metallic
         roughness *= mr.g;   // glTF: G channel = roughness
     }
@@ -293,7 +299,7 @@ void main() {
     // ── Ambient Occlusion ─────────────────────────────────────────────────────
     float ao = 1.0;
     if (m.aoIndex >= 0 && pc.ambientOcclusionEnabled != 0) {
-        ao = texture(textures[nonuniformEXT(m.aoIndex)], inTexCoord).r;
+        ao = texture(textures[nonuniformEXT(m.aoIndex)], texCoord).r;
     }
 
     // ── Unlit path ────────────────────────────────────────────────────────────
@@ -357,7 +363,10 @@ void main() {
 
     vec3 color = Lo + ambient + emissive;
 
-    // ── Tone mapping (ACES filmic) ────────────────────────────────────────────
+    // ── Tone mapping (ACES filmic) ─────────────────────────────────
+    float exposure = 0.6;
+    color = color * exposure;
+
     // ACES fitted approximation by Krzysztof Narkowicz
     color = (color * (2.51 * color + 0.03)) / (color * (2.51 * color + 0.59) + 0.06);
 

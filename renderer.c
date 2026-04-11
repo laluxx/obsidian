@@ -5,9 +5,11 @@
 #include "common.h"
 #include "scene.h"
 #include "vulkan_setup.h"
+#include "tinyexr_c.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include <dirent.h>
 
 // --- Texture Pool Management ---
 static Texture2D texturePool[MAX_TEXTURES];
@@ -89,7 +91,7 @@ static uint64_t             immSSBOAddr[MAX_FRAMES_IN_FLIGHT]; // Physical point
 static uint32_t             immSlotCount;   /* slots used this frame        */
 static uint32_t             immFrameIndex;  /* set at begin_frame           */
 
-static ImmMaterial immCurrentMaterial = {
+static Material immCurrentMaterial = {
     .baseColorFactor    = {1.0f, 1.0f, 1.0f, 1.0f},
     .metallicFactor     = 0.0f,
     .roughnessFactor    = 0.5f,
@@ -103,10 +105,10 @@ static ImmMaterial immCurrentMaterial = {
     .emissiveIndex      = -1,
 };
 
-void imm_set_material(const ImmMaterial* mat) { immCurrentMaterial = *mat; }
+void imm_set_material(const Material* mat) { immCurrentMaterial = *mat; }
 
 void imm_reset_material(void) {
-    immCurrentMaterial = (ImmMaterial){
+    immCurrentMaterial = (Material){
         .baseColorFactor    = {1.0f, 1.0f, 1.0f, 1.0f},
         .metallicFactor     = 0.0f,
         .roughnessFactor    = 0.5f,
@@ -118,7 +120,278 @@ void imm_reset_material(void) {
         .metallicRoughIndex = -1,
         .aoIndex            = -1,
         .emissiveIndex      = -1,
+        .displacementIndex  = -1,
+        .displacementScale  = 0.1f, // Default 10cm displacement
     };
+}
+
+static bool load_texture_from_pixels(VulkanContext* ctx, stbi_uc* pixels, int w, int h, Texture2D* texture);
+
+static float* load_exr_as_float(const char* path, int* out_w, int* out_h, bool is_normal, bool is_roughness) {
+    printf("\n[EXR] Decoding %s (HDR 32-bit float)...\n", path);
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char* file_data = malloc(file_size);
+    fread(file_data, 1, file_size, f);
+    fclose(f);
+
+    ExrContextCreateInfo ctx_info = { .api_version = TINYEXR_C_API_VERSION };
+    ExrContext exr_ctx;
+    if (exr_context_create(&ctx_info, &exr_ctx) != EXR_SUCCESS) {
+        free(file_data); return NULL;
+    }
+
+    ExrDataSource src;
+    exr_data_source_from_memory(file_data, file_size, &src);
+
+    ExrDecoderCreateInfo dec_info = { .source = src };
+    ExrDecoder decoder;
+    if (exr_decoder_create(exr_ctx, &dec_info, &decoder) != EXR_SUCCESS) {
+        exr_context_destroy(exr_ctx); free(file_data); return NULL;
+    }
+
+    ExrImage image;
+    if (exr_decoder_parse_header(decoder, &image) != EXR_SUCCESS) {
+        exr_decoder_destroy(decoder); exr_context_destroy(exr_ctx); free(file_data); return NULL;
+    }
+
+    ExrImageInfo img_info;
+    exr_image_get_info(image, &img_info);
+    *out_w = img_info.width;
+    *out_h = img_info.height;
+
+    uint32_t c = img_info.num_channels;
+    ExrPart part;
+    exr_image_get_part(image, 0, &part);
+
+    size_t num_pixels = (size_t)img_info.width * img_info.height;
+    float* float_data = malloc(num_pixels * c * sizeof(float));
+
+    ExrCommandBufferCreateInfo cmd_info = { .decoder = decoder };
+    ExrCommandBuffer cmd;
+    exr_command_buffer_create(exr_ctx, &cmd_info, &cmd);
+    exr_command_buffer_begin(cmd);
+
+    ExrFullImageRequest req = {
+        .part = part,
+        .output = { .data = float_data, .size = num_pixels * c * sizeof(float) },
+        .channels_mask = 0,
+        .output_pixel_type = EXR_PIXEL_FLOAT,
+        .output_layout = EXR_LAYOUT_INTERLEAVED
+    };
+    exr_cmd_request_full_image(cmd, &req);
+    exr_command_buffer_end(cmd);
+
+    ExrSubmitInfo submit = { .command_buffer_count = 1, .command_buffers = &cmd };
+    exr_submit(decoder, &submit);
+    exr_decoder_wait_idle(decoder);
+
+    exr_command_buffer_destroy(cmd);
+    exr_image_destroy(image);
+    exr_decoder_destroy(decoder);
+    exr_context_destroy(exr_ctx);
+    free(file_data);
+
+    // Pack into pristine 32-bit RGBA float
+    float* rgba_float = malloc(num_pixels * 4 * sizeof(float));
+    for (size_t i = 0; i < num_pixels; i++) {
+        float r = float_data[i * c + 0];
+        float g = (c > 1) ? float_data[i * c + 1] : r;
+        float b = (c > 2) ? float_data[i * c + 2] : r;
+        float a = (c > 3) ? float_data[i * c + 3] : 1.0f;
+
+        if (is_normal) {
+            // Polyhaven EXR normals are already encoded in [0.0, 1.0] space.
+            // We pass the pristine 32-bit floats directly to the GPU without mangling them!
+        }
+
+        if (is_roughness) {
+            // EXR roughness is usually in R. glTF expects Roughness in G.
+            float rough = r;
+            r = 1.0f;       // AO default
+            g = rough;      // Roughness
+            b = 0.0f;       // Metallic default
+            a = 1.0f;
+        }
+
+        rgba_float[i * 4 + 0] = r;
+        rgba_float[i * 4 + 1] = g;
+        rgba_float[i * 4 + 2] = b;
+        rgba_float[i * 4 + 3] = a;
+    }
+    free(float_data);
+    printf("[EXR] -> Successfully unpacked and formatted HDR float data.\n");
+
+    return rgba_float;
+}
+
+// Forward declarations for texture utilities
+static bool alloc_texture_image(VulkanContext* ctx, uint32_t w, uint32_t h, VkFormat fmt, VkImage* image, VkDeviceMemory* memory);
+static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels, VkDeviceSize imageSize, VkImage image, uint32_t w, uint32_t h, VkFormat fmt, VkImageLayout srcLayout);
+static bool finalize_texture(VulkanContext* ctx, Texture2D* texture, VkFormat fmt, VkSamplerAddressMode addrMode);
+
+static bool load_texture_from_float_pixels(VulkanContext* ctx, float* pixels, int w, int h, Texture2D* texture) {
+    if (!pixels) return false;
+    // Massive precision upgrade! 32-bit floats preserve the raw EXR values perfectly
+    VkFormat fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
+    bool ok = alloc_texture_image(ctx, w, h, fmt, &texture->image, &texture->memory) &&
+              upload_pixels_to_image(ctx, (unsigned char*)pixels, (VkDeviceSize)w*h*16, texture->image, w, h, fmt, VK_IMAGE_LAYOUT_UNDEFINED) &&
+              finalize_texture(ctx, texture, fmt, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    if (ok) { texture->width = w; texture->height = h; texture->loaded = true; }
+    return ok;
+}
+
+static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const char* roughPath) {
+    if (!roughPath) return -1;
+    int w, h, ch;
+
+    if (strstr(roughPath, ".exr")) {
+        float* floatPixels = load_exr_as_float(roughPath, &w, &h, false, true);
+        if (!floatPixels) return -1;
+        if (textureCount >= MAX_TEXTURES) { free(floatPixels); return -1; }
+        if (load_texture_from_float_pixels(ctx, floatPixels, w, h, &texturePool[textureCount])) {
+            free(floatPixels);
+            return textureCount++;
+        }
+        free(floatPixels);
+        return -1;
+    }
+
+    stbi_uc* roughPixels = stbi_load(roughPath, &w, &h, &ch, 1);
+    if (!roughPixels) {
+        fprintf(stderr, "[WARNING] Failed to load roughness: %s\n", roughPath);
+        return -1;
+    }
+
+    size_t size = (size_t)w * h * 4;
+    stbi_uc* packed = malloc(size);
+    for (int i = 0; i < w * h; i++) {
+        packed[i*4 + 0] = 255;             // AO default
+        packed[i*4 + 1] = roughPixels[i];  // Roughness correctly packed in G!
+        packed[i*4 + 2] = 0;               // Metallic default
+        packed[i*4 + 3] = 255;
+    }
+    free(roughPixels);
+
+    if (textureCount >= MAX_TEXTURES) {
+        free(packed);
+        return -1;
+    }
+
+    bool ok = load_texture_from_pixels(ctx, packed, w, h, &texturePool[textureCount]);
+    free(packed); // Always free the packed roughness buffer after uploading it to the GPU!
+
+    if (ok) {
+        return textureCount++;
+    }
+    return -1;
+}
+
+Material imm_load_pbr_material(const char* albedoPath, const char* normalPath, const char* roughnessPath) {
+    Material mat;
+    imm_reset_material();
+    mat = immCurrentMaterial;
+
+    int32_t pIdx;
+    if (albedoPath) {
+        pIdx = texture_pool_add(&context, albedoPath);
+        if (pIdx >= 0) mat.albedoIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR] Loaded Albedo: %s (Slot: %d)\n", albedoPath, mat.albedoIndex);
+    }
+    if (normalPath) {
+        pIdx = texture_pool_add(&context, normalPath);
+        if (pIdx >= 0) mat.normalMapIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR] Loaded Normal: %s (Slot: %d)\n", normalPath, mat.normalMapIndex);
+    }
+    if (roughnessPath) {
+        pIdx = texture_pool_load_roughness_to_gltf(&context, roughnessPath);
+        if (pIdx >= 0) mat.metallicRoughIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR] Loaded Roughness: %s (Slot: %d)\n", roughnessPath, mat.metallicRoughIndex);
+    }
+
+    // Clear default factors since we are using textures
+    if (albedoPath) glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mat.baseColorFactor);
+    if (roughnessPath) mat.roughnessFactor = 1.0f;
+    if (roughnessPath) mat.metallicFactor = 1.0f;
+
+    return mat;
+}
+
+Material imm_load_pbr_material_dir(const char* dirPath) {
+    DIR *dir;
+    struct dirent *ent;
+    char albedoPath[512] = {0};
+    char normalPath[512] = {0};
+    char roughPath[512] = {0};
+    char aoPath[512] = {0};
+    char dispPath[512] = {0};
+
+    printf("\n[PBR SCAN] ==========================================\n");
+    printf("[PBR SCAN] Scanning directory: %s\n", dirPath);
+
+    if ((dir = opendir(dirPath)) != NULL) {
+        while ((ent = readdir(dir)) != NULL) {
+            // Check for keywords in the filename
+            if (strstr(ent->d_name, "diff") || strstr(ent->d_name, "albedo") || strstr(ent->d_name, "basecolor")) {
+                snprintf(albedoPath, sizeof(albedoPath), "%s/%s", dirPath, ent->d_name);
+            } else if (strstr(ent->d_name, "nor")) {
+                snprintf(normalPath, sizeof(normalPath), "%s/%s", dirPath, ent->d_name);
+            } else if (strstr(ent->d_name, "rough")) {
+                snprintf(roughPath, sizeof(roughPath), "%s/%s", dirPath, ent->d_name);
+            } else if (strstr(ent->d_name, "ao") || strstr(ent->d_name, "ambient")) {
+                snprintf(aoPath, sizeof(aoPath), "%s/%s", dirPath, ent->d_name);
+            } else if (strstr(ent->d_name, "disp") || strstr(ent->d_name, "height")) {
+                snprintf(dispPath, sizeof(dispPath), "%s/%s", dirPath, ent->d_name);
+            }
+        }
+        closedir(dir);
+    } else {
+        fprintf(stderr, "[WARNING] Could not open material directory: %s\n", dirPath);
+    }
+
+    Material mat;
+    imm_reset_material();
+    mat = immCurrentMaterial;
+
+    int32_t pIdx;
+    if (albedoPath[0]) {
+        pIdx = texture_pool_add(&context, albedoPath);
+        if (pIdx >= 0) mat.albedoIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR SCAN] -> Albedo mapped to Bindless Slot: %d\n", mat.albedoIndex);
+    }
+    if (normalPath[0]) {
+        pIdx = texture_pool_add(&context, normalPath);
+        if (pIdx >= 0) mat.normalMapIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR SCAN] -> Normal mapped to Bindless Slot: %d\n", mat.normalMapIndex);
+    }
+    if (roughPath[0]) {
+        pIdx = texture_pool_load_roughness_to_gltf(&context, roughPath);
+        if (pIdx >= 0) mat.metallicRoughIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR SCAN] -> Roughness mapped to Bindless Slot: %d\n", mat.metallicRoughIndex);
+    }
+    if (aoPath[0]) {
+        pIdx = texture_pool_add(&context, aoPath);
+        if (pIdx >= 0) mat.aoIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR SCAN] -> AO mapped to Bindless Slot: %d\n", mat.aoIndex);
+    }
+    if (dispPath[0]) {
+        pIdx = texture_pool_add(&context, dispPath);
+        if (pIdx >= 0) mat.displacementIndex = texture_pool_get(pIdx)->bindlessSlot;
+        printf("[PBR SCAN] -> Displacement mapped to Bindless Slot: %d\n", mat.displacementIndex);
+
+        // Push the scale aggressively so the physical extrusion is undeniably visible!
+        mat.displacementScale = 0.5f;
+    }
+    printf("[PBR SCAN] ==========================================\n\n");
+
+    if (albedoPath[0]) glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mat.baseColorFactor);
+    if (roughPath[0]) mat.roughnessFactor = 1.0f;
+    if (roughPath[0]) mat.metallicFactor = 1.0f;
+
+    return mat;
 }
 
 int imm_alloc_slot(mat4 model) {
@@ -147,6 +420,8 @@ int imm_alloc_slot(mat4 model) {
     d->metallicRoughIndex = immCurrentMaterial.metallicRoughIndex;
     d->aoIndex            = immCurrentMaterial.aoIndex;
     d->emissiveIndex      = immCurrentMaterial.emissiveIndex;
+    d->displacementIndex  = immCurrentMaterial.displacementIndex;
+    d->displacementScale  = immCurrentMaterial.displacementScale;
     /* AABB not used for culling on imm draws */
     glm_vec3_copy((vec3){-1e10f,-1e10f,-1e10f}, d->aabbMin);
     glm_vec3_copy((vec3){ 1e10f, 1e10f, 1e10f}, d->aabbMax);
@@ -247,6 +522,19 @@ void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool
     }
 }
 
+void vertex_full(vec3 pos, Color color, vec3 normal, vec2 uv, vec4 tangent) {
+    if (vertex_count >= MAX_VERTICES) return;
+    glm_vec3_copy(pos, vertices[vertex_count].pos);
+    vertices[vertex_count].color[0] = color.r;
+    vertices[vertex_count].color[1] = color.g;
+    vertices[vertex_count].color[2] = color.b;
+    vertices[vertex_count].color[3] = color.a;
+    glm_vec3_copy(normal, vertices[vertex_count].normal);
+    glm_vec2_copy(uv, vertices[vertex_count].texCoord);
+    glm_vec4_copy(tangent, vertices[vertex_count].tangent);
+    vertex_count++;
+}
+
 void vertex_with_normal(vec3 pos, Color color, vec3 normal) {
     if (vertex_count >= MAX_VERTICES) return;
     glm_vec3_copy(pos, vertices[vertex_count].pos);
@@ -259,6 +547,7 @@ void vertex_with_normal(vec3 pos, Color color, vec3 normal) {
 
     glm_vec3_copy(normal, vertices[vertex_count].normal);
     glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord);
+    glm_vec4_copy((vec4){1.0f, 0.0f, 0.0f, 1.0f}, vertices[vertex_count].tangent);
     vertex_count++;
 }
 
@@ -268,6 +557,7 @@ void vertex(vec3 pos, vec4 color) {
     glm_vec4_copy(color, vertices[vertex_count].color);
     glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, vertices[vertex_count].normal); // Default normal
     glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord); // Default tex coords
+    glm_vec4_copy((vec4){1.0f, 0.0f, 0.0f, 1.0f}, vertices[vertex_count].tangent);
     vertex_count++;
 }
 
@@ -316,123 +606,196 @@ void plane(vec3 origin, vec2 size, Color color) {
 void cube(vec3 origin, float size, Color color) {
     uint32_t first = vertex_count;
     float s = size / 2.0f;
-    vec3 a, b, c, d, e, f, g, h;
 
-    glm_vec3_add(origin, (vec3){-s, -s, -s}, a);
-    glm_vec3_add(origin, (vec3){+s, -s, -s}, b);
-    glm_vec3_add(origin, (vec3){+s, +s, -s}, c);
-    glm_vec3_add(origin, (vec3){-s, +s, -s}, d);
-    glm_vec3_add(origin, (vec3){-s, -s, +s}, e);
-    glm_vec3_add(origin, (vec3){+s, -s, +s}, f);
-    glm_vec3_add(origin, (vec3){+s, +s, +s}, g);
-    glm_vec3_add(origin, (vec3){-s, +s, +s}, h);
+    /* Each face is emitted with correct UVs and tangents for PBR.
+       vertex_full(pos, color, normal, uv, tangent)
+       Tangent w=+1 means bitangent = cross(normal, tangent).        */
 
-    vec3 n_front = {0.0f, 0.0f, -1.0f};
-    vertex_with_normal(a, color, n_front);
-    vertex_with_normal(b, color, n_front);
-    vertex_with_normal(c, color, n_front);
-    vertex_with_normal(a, color, n_front);
-    vertex_with_normal(c, color, n_front);
-    vertex_with_normal(d, color, n_front);
+    /* Front face (Z-) — tangent points +X */
+    vec3 nf = {0.0f, 0.0f, -1.0f};
+    vec4 tf = {1.0f, 0.0f, 0.0f, 1.0f};
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nf, (vec2){0.0f,1.0f}, tf);
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nf, (vec2){1.0f,1.0f}, tf);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nf, (vec2){1.0f,0.0f}, tf);
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nf, (vec2){0.0f,1.0f}, tf);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nf, (vec2){1.0f,0.0f}, tf);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nf, (vec2){0.0f,0.0f}, tf);
 
-    vec3 n_back = {0.0f, 0.0f, 1.0f};
-    vertex_with_normal(e, color, n_back);
-    vertex_with_normal(h, color, n_back);
-    vertex_with_normal(g, color, n_back);
-    vertex_with_normal(e, color, n_back);
-    vertex_with_normal(g, color, n_back);
-    vertex_with_normal(f, color, n_back);
+    /* Back face (Z+) — tangent points -X */
+    vec3 nb = {0.0f, 0.0f, 1.0f};
+    vec4 tb = {-1.0f, 0.0f, 0.0f, 1.0f};
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nb, (vec2){0.0f,1.0f}, tb);
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nb, (vec2){1.0f,1.0f}, tb);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nb, (vec2){1.0f,0.0f}, tb);
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nb, (vec2){0.0f,1.0f}, tb);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nb, (vec2){1.0f,0.0f}, tb);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nb, (vec2){0.0f,0.0f}, tb);
 
-    vec3 n_left = {-1.0f, 0.0f, 0.0f};
-    vertex_with_normal(a, color, n_left);
-    vertex_with_normal(d, color, n_left);
-    vertex_with_normal(h, color, n_left);
-    vertex_with_normal(a, color, n_left);
-    vertex_with_normal(h, color, n_left);
-    vertex_with_normal(e, color, n_left);
+    /* Left face (X-) — tangent points -Z */
+    vec3 nl = {-1.0f, 0.0f, 0.0f};
+    vec4 tl = {0.0f, 0.0f, -1.0f, 1.0f};
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nl, (vec2){0.0f,1.0f}, tl);
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nl, (vec2){1.0f,1.0f}, tl);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nl, (vec2){1.0f,0.0f}, tl);
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nl, (vec2){0.0f,1.0f}, tl);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nl, (vec2){1.0f,0.0f}, tl);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nl, (vec2){0.0f,0.0f}, tl);
 
-    vec3 n_right = {1.0f, 0.0f, 0.0f};
-    vertex_with_normal(b, color, n_right);
-    vertex_with_normal(f, color, n_right);
-    vertex_with_normal(g, color, n_right);
-    vertex_with_normal(b, color, n_right);
-    vertex_with_normal(g, color, n_right);
-    vertex_with_normal(c, color, n_right);
+    /* Right face (X+) — tangent points +Z */
+    vec3 nr = {1.0f, 0.0f, 0.0f};
+    vec4 tr = {0.0f, 0.0f, 1.0f, 1.0f};
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nr, (vec2){0.0f,1.0f}, tr);
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nr, (vec2){1.0f,1.0f}, tr);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nr, (vec2){1.0f,0.0f}, tr);
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nr, (vec2){0.0f,1.0f}, tr);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nr, (vec2){1.0f,0.0f}, tr);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nr, (vec2){0.0f,0.0f}, tr);
 
-    vec3 n_top = {0.0f, 1.0f, 0.0f};
-    vertex_with_normal(d, color, n_top);
-    vertex_with_normal(c, color, n_top);
-    vertex_with_normal(g, color, n_top);
-    vertex_with_normal(d, color, n_top);
-    vertex_with_normal(g, color, n_top);
-    vertex_with_normal(h, color, n_top);
+    /* Top face (Y+) — tangent points +X */
+    vec3 nt = {0.0f, 1.0f, 0.0f};
+    vec4 tt = {1.0f, 0.0f, 0.0f, 1.0f};
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nt, (vec2){0.0f,1.0f}, tt);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nt, (vec2){1.0f,1.0f}, tt);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nt, (vec2){1.0f,0.0f}, tt);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nt, (vec2){0.0f,1.0f}, tt);
+    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nt, (vec2){1.0f,0.0f}, tt);
+    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nt, (vec2){0.0f,0.0f}, tt);
 
-    vec3 n_bottom = {0.0f, -1.0f, 0.0f};
-    vertex_with_normal(a, color, n_bottom);
-    vertex_with_normal(e, color, n_bottom);
-    vertex_with_normal(f, color, n_bottom);
-    vertex_with_normal(a, color, n_bottom);
-    vertex_with_normal(f, color, n_bottom);
-    vertex_with_normal(b, color, n_bottom);
+    /* Bottom face (Y-) — tangent points +X */
+    vec3 nbo = {0.0f, -1.0f, 0.0f};
+    vec4 tbo = {1.0f, 0.0f, 0.0f, 1.0f};
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nbo, (vec2){0.0f,1.0f}, tbo);
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nbo, (vec2){1.0f,1.0f}, tbo);
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nbo, (vec2){1.0f,0.0f}, tbo);
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nbo, (vec2){0.0f,1.0f}, tbo);
+    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nbo, (vec2){1.0f,0.0f}, tbo);
+    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nbo, (vec2){0.0f,0.0f}, tbo);
+
     mat4 identity; glm_mat4_identity(identity);
     imm_emit(first, 36, identity);
 }
 
+/* void cube(vec3 origin, float size, Color color) { */
+/*     uint32_t first = vertex_count; */
+/*     float s = size / 2.0f; */
+/*     vec3 a, b, c, d, e, f, g, h; */
+
+/*     glm_vec3_add(origin, (vec3){-s, -s, -s}, a); */
+/*     glm_vec3_add(origin, (vec3){+s, -s, -s}, b); */
+/*     glm_vec3_add(origin, (vec3){+s, +s, -s}, c); */
+/*     glm_vec3_add(origin, (vec3){-s, +s, -s}, d); */
+/*     glm_vec3_add(origin, (vec3){-s, -s, +s}, e); */
+/*     glm_vec3_add(origin, (vec3){+s, -s, +s}, f); */
+/*     glm_vec3_add(origin, (vec3){+s, +s, +s}, g); */
+/*     glm_vec3_add(origin, (vec3){-s, +s, +s}, h); */
+
+/*     vec3 n_front = {0.0f, 0.0f, -1.0f}; */
+/*     vertex_with_normal(a, color, n_front); */
+/*     vertex_with_normal(b, color, n_front); */
+/*     vertex_with_normal(c, color, n_front); */
+/*     vertex_with_normal(a, color, n_front); */
+/*     vertex_with_normal(c, color, n_front); */
+/*     vertex_with_normal(d, color, n_front); */
+
+/*     vec3 n_back = {0.0f, 0.0f, 1.0f}; */
+/*     vertex_with_normal(e, color, n_back); */
+/*     vertex_with_normal(h, color, n_back); */
+/*     vertex_with_normal(g, color, n_back); */
+/*     vertex_with_normal(e, color, n_back); */
+/*     vertex_with_normal(g, color, n_back); */
+/*     vertex_with_normal(f, color, n_back); */
+
+/*     vec3 n_left = {-1.0f, 0.0f, 0.0f}; */
+/*     vertex_with_normal(a, color, n_left); */
+/*     vertex_with_normal(d, color, n_left); */
+/*     vertex_with_normal(h, color, n_left); */
+/*     vertex_with_normal(a, color, n_left); */
+/*     vertex_with_normal(h, color, n_left); */
+/*     vertex_with_normal(e, color, n_left); */
+
+/*     vec3 n_right = {1.0f, 0.0f, 0.0f}; */
+/*     vertex_with_normal(b, color, n_right); */
+/*     vertex_with_normal(f, color, n_right); */
+/*     vertex_with_normal(g, color, n_right); */
+/*     vertex_with_normal(b, color, n_right); */
+/*     vertex_with_normal(g, color, n_right); */
+/*     vertex_with_normal(c, color, n_right); */
+
+/*     vec3 n_top = {0.0f, 1.0f, 0.0f}; */
+/*     vertex_with_normal(d, color, n_top); */
+/*     vertex_with_normal(c, color, n_top); */
+/*     vertex_with_normal(g, color, n_top); */
+/*     vertex_with_normal(d, color, n_top); */
+/*     vertex_with_normal(g, color, n_top); */
+/*     vertex_with_normal(h, color, n_top); */
+
+/*     vec3 n_bottom = {0.0f, -1.0f, 0.0f}; */
+/*     vertex_with_normal(a, color, n_bottom); */
+/*     vertex_with_normal(e, color, n_bottom); */
+/*     vertex_with_normal(f, color, n_bottom); */
+/*     vertex_with_normal(a, color, n_bottom); */
+/*     vertex_with_normal(f, color, n_bottom); */
+/*     vertex_with_normal(b, color, n_bottom); */
+/*     mat4 identity; glm_mat4_identity(identity); */
+/*     imm_emit(first, 36, identity); */
+/* } */
+
 // TODO It should be shader based so it's cheaper and higher quality
+// High-performance Sphere with UVs, Tangents, and pre-calculated trig
 void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
     uint32_t first = vertex_count;
+
+    float* sin_lon = malloc((longDiv + 1) * sizeof(float));
+    float* cos_lon = malloc((longDiv + 1) * sizeof(float));
+    for (int lon = 0; lon <= longDiv; ++lon) {
+        float phi = (float)lon / longDiv * 2.0f * GLM_PI;
+        sin_lon[lon] = sinf(phi);
+        cos_lon[lon] = cosf(phi);
+    }
+
     for (int lat = 0; lat < latDiv; ++lat) {
+        float v1 = 1.0f - (float)lat / latDiv;
+        float v2 = 1.0f - (float)(lat + 1) / latDiv;
         float theta1 = (float)lat / latDiv * GLM_PI;
         float theta2 = (float)(lat + 1) / latDiv * GLM_PI;
 
-        for (int lon = 0; lon < longDiv; ++lon) {
-            float phi1 = (float)lon / longDiv * 2.0f * GLM_PI;
-            float phi2 = (float)(lon + 1) / longDiv * 2.0f * GLM_PI;
+        float st1 = sinf(theta1), ct1 = cosf(theta1);
+        float st2 = sinf(theta2), ct2 = cosf(theta2);
 
-            vec3 v0 = {
-                center[0] + radius * sinf(theta1) * cosf(phi1),
-                center[1] + radius * cosf(theta1),
-                center[2] + radius * sinf(theta1) * sinf(phi1)
-            };
-            vec3 v1 = {
-                center[0] + radius * sinf(theta2) * cosf(phi1),
-                center[1] + radius * cosf(theta2),
-                center[2] + radius * sinf(theta2) * sinf(phi1)
-            };
-            vec3 v2 = {
-                center[0] + radius * sinf(theta2) * cosf(phi2),
-                center[1] + radius * cosf(theta2),
-                center[2] + radius * sinf(theta2) * sinf(phi2)
-            };
-            vec3 v3 = {
-                center[0] + radius * sinf(theta1) * cosf(phi2),
-                center[1] + radius * cosf(theta1),
-                center[2] + radius * sinf(theta1) * sinf(phi2)
-            };
+        for (int lon = 0; lon < longDiv; ++lon) {
+            float u1 = (float)lon / longDiv;
+            float u2 = (float)(lon + 1) / longDiv;
+
+            vec3 p0 = { center[0] + radius * st1 * cos_lon[lon],     center[1] + radius * ct1, center[2] + radius * st1 * sin_lon[lon] };
+            vec3 p1 = { center[0] + radius * st2 * cos_lon[lon],     center[1] + radius * ct2, center[2] + radius * st2 * sin_lon[lon] };
+            vec3 p2 = { center[0] + radius * st2 * cos_lon[lon + 1], center[1] + radius * ct2, center[2] + radius * st2 * sin_lon[lon + 1] };
+            vec3 p3 = { center[0] + radius * st1 * cos_lon[lon + 1], center[1] + radius * ct1, center[2] + radius * st1 * sin_lon[lon + 1] };
 
             vec3 n0, n1, n2, n3;
-            glm_vec3_sub(v0, center, n0);
-            glm_vec3_normalize(n0);
-            glm_vec3_sub(v1, center, n1);
-            glm_vec3_normalize(n1);
-            glm_vec3_sub(v2, center, n2);
-            glm_vec3_normalize(n2);
-            glm_vec3_sub(v3, center, n3);
-            glm_vec3_normalize(n3);
+            glm_vec3_sub(p0, center, n0); glm_vec3_normalize(n0);
+            glm_vec3_sub(p1, center, n1); glm_vec3_normalize(n1);
+            glm_vec3_sub(p2, center, n2); glm_vec3_normalize(n2);
+            glm_vec3_sub(p3, center, n3); glm_vec3_normalize(n3);
 
-            vertex_with_normal(v0, color, n0);
-            vertex_with_normal(v1, color, n1);
-            vertex_with_normal(v2, color, n2);
+            vec4 t0 = { -sin_lon[lon],     0.0f, cos_lon[lon],     1.0f };
+            vec4 t1 = { -sin_lon[lon],     0.0f, cos_lon[lon],     1.0f };
+            vec4 t2 = { -sin_lon[lon + 1], 0.0f, cos_lon[lon + 1], 1.0f };
+            vec4 t3 = { -sin_lon[lon + 1], 0.0f, cos_lon[lon + 1], 1.0f };
 
-            vertex_with_normal(v0, color, n0);
-            vertex_with_normal(v2, color, n2);
-            vertex_with_normal(v3, color, n3);
+            vertex_full(p0, color, n0, (vec2){u1, v1}, t0);
+            vertex_full(p1, color, n1, (vec2){u1, v2}, t1);
+            vertex_full(p2, color, n2, (vec2){u2, v2}, t2);
+
+            vertex_full(p0, color, n0, (vec2){u1, v1}, t0);
+            vertex_full(p2, color, n2, (vec2){u2, v2}, t2);
+            vertex_full(p3, color, n3, (vec2){u2, v1}, t3);
         }
     }
+    free(sin_lon);
+    free(cos_lon);
     mat4 identity; glm_mat4_identity(identity);
     imm_emit(first, vertex_count - first, identity);
 }
-
 
 /* Call after filling vertices for one primitive — records the draw call */
 void imm_emit(uint32_t firstVertex, uint32_t count, mat4 model) {
@@ -484,9 +847,16 @@ void renderer_clear() {
     immDrawCount  = 0;
 }
 
+uint32_t imm_get_vertex_count(void) {
+    return vertex_count;
+}
+
+Vertex* imm_get_vertices(void) {
+    return vertices;
+}
+
 void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
     if (meshes->count <= 1) return;
-
     size_t write_idx = 0;
     for (size_t i = 0; i < meshes->count; i++) {
         if (meshes->items[i].alpha_mode != 2) {
@@ -842,10 +1212,6 @@ void renderer2D_clear(void) {
 // --- Texture Loading ---
 
 
-static bool alloc_texture_image(VulkanContext* ctx, uint32_t w, uint32_t h, VkFormat fmt, VkImage* image, VkDeviceMemory* memory);
-static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels, VkDeviceSize imageSize, VkImage image, uint32_t w, uint32_t h, VkFormat fmt, VkImageLayout srcLayout);
-static bool finalize_texture(VulkanContext* ctx, Texture2D* texture, VkFormat fmt, VkSamplerAddressMode addrMode);
-
 bool load_texture_from_rgba_with_format(VulkanContext* context, unsigned char* rgba_data,
                                         uint32_t width, uint32_t height,
                                         Texture2D* texture, VkFormat format) {
@@ -981,7 +1347,7 @@ static bool finalize_texture(VulkanContext* ctx, Texture2D* texture,
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
         .addressModeU = addrMode, .addressModeV = addrMode, .addressModeW = addrMode,
-        .anisotropyEnable = VK_FALSE, .maxAnisotropy = 1.0f,
+        .anisotropyEnable = VK_TRUE, .maxAnisotropy = 16.0f, // AAA Texture Sharpness
         .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR
     };
@@ -1024,7 +1390,7 @@ static bool load_texture_from_pixels(VulkanContext* ctx, stbi_uc* pixels, int w,
     bool ok = alloc_texture_image(ctx, w, h, fmt, &texture->image, &texture->memory) &&
               upload_pixels_to_image(ctx, pixels, (VkDeviceSize)w*h*4, texture->image, w, h, fmt, VK_IMAGE_LAYOUT_UNDEFINED) &&
               finalize_texture(ctx, texture, fmt, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    stbi_image_free(pixels);
+    // Removed the rogue stbi_image_free(pixels) here! Memory ownership stays with the caller.
     if (ok) { texture->width = w; texture->height = h; texture->loaded = true; }
     return ok;
 }
@@ -1032,8 +1398,13 @@ static bool load_texture_from_pixels(VulkanContext* ctx, stbi_uc* pixels, int w,
 bool load_texture_from_memory(VulkanContext* ctx, unsigned char* data, size_t data_size, Texture2D* texture) {
     int w, h, ch;
     stbi_uc* pixels = stbi_load_from_memory(data, (int)data_size, &w, &h, &ch, STBI_rgb_alpha);
-    if (!pixels) fprintf(stderr, "Failed to decode texture from memory\n");
-    return load_texture_from_pixels(ctx, pixels, w, h, texture);
+    if (!pixels) {
+        fprintf(stderr, "Failed to decode texture from memory\n");
+        return false;
+    }
+    bool res = load_texture_from_pixels(ctx, pixels, w, h, texture);
+    stbi_image_free(pixels);
+    return res;
 }
 
 int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size) {
@@ -1048,9 +1419,25 @@ int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size) {
 
 bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) {
     int w, h, ch;
+
+    if (strstr(filename, ".exr")) {
+        bool is_normal = (strstr(filename, "nor") != NULL);
+        // Do not pack roughness here, that is handled explicitly by texture_pool_load_roughness_to_gltf
+        float* floatPixels = load_exr_as_float(filename, &w, &h, is_normal, false);
+        if (!floatPixels) return false;
+        bool res = load_texture_from_float_pixels(ctx, floatPixels, w, h, texture);
+        free(floatPixels);
+        return res;
+    }
+
     stbi_uc* pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
-    if (!pixels) fprintf(stderr, "Failed to load texture: %s\n", filename);
-    return load_texture_from_pixels(ctx, pixels, w, h, texture);
+    if (!pixels) {
+        fprintf(stderr, "[WARNING] Failed to load texture: %s\n", filename);
+        return false;
+    }
+    bool res = load_texture_from_pixels(ctx, pixels, w, h, texture);
+    stbi_image_free(pixels);
+    return res;
 }
 
 void destroy_texture(VulkanContext* context, Texture2D* texture) {

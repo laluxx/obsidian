@@ -2,6 +2,7 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_ARB_shader_draw_parameters : require
+#extension GL_EXT_nonuniform_qualifier : enable
 
 layout(set = 0, binding = 0) uniform UBO {
     mat4  vp;
@@ -10,6 +11,8 @@ layout(set = 0, binding = 0) uniform UBO {
     vec4  cameraPos;
     float time;
 } ubo;
+
+layout(set = 1, binding = 0) uniform sampler2D textures[];
 
 struct MeshData {
     mat4  model;
@@ -26,9 +29,9 @@ struct MeshData {
     float metallicFactor;
     float roughnessFactor;
     float emissiveStrength;
-    int   _pad0;
+    int   displacementIndex;
     vec3  emissiveFactor;
-    int   _pad1;
+    float displacementScale;
     vec4  aabbMin;
     vec4  aabbMax;
 };
@@ -76,6 +79,17 @@ void main() {
     vec2 inTexCoord = vec2(pc.vertexData.data[base+11], pc.vertexData.data[base+12]);
     // floats 13, 14, 15 are padding for 16-byte alignment
     vec4 inTangent  = vec4(pc.vertexData.data[base+16], pc.vertexData.data[base+17], pc.vertexData.data[base+18], pc.vertexData.data[base+19]);
+
+    // ── AAA VERTEX DISPLACEMENT ──
+    if (m.displacementIndex >= 0) {
+        // Vertex Shaders cannot compute implicit LOD gradients, so we explicitly read Mip 0.
+        float disp = textureLod(textures[nonuniformEXT(m.displacementIndex)], inTexCoord, 0.0).r;
+
+        // Center the displacement so it carves inward (cracks) AND extrudes outward (rocks).
+        disp = disp - 0.5;
+
+        inPos += inNormal * (disp * m.displacementScale);
+    }
 
     vec4 worldPos = m.model * vec4(inPos, 1.0);
     outWorldPos = worldPos.xyz;

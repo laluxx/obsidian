@@ -489,9 +489,21 @@ int main() {
 
 
     // Bake and load the HDR Environment Map
-    /* loadIBL(&context, "./assets/hdr/ferndale_studio_04_4k.hdr"); */
-    loadIBL(&context, "./assets/hdr/ferndale_studio_05_4k.hdr");
-    /* loadIBL(&context, "./assets/hdr/rogland_clear_night_4k.hdr"); */
+    /* loadIBL(&context, "./assets/hdr/ferndale_studio_05_4k.hdr"); */
+    loadIBL(&context, "./assets/hdr/monochrome_studio_02_4k.hdr");
+
+    // Load our beautiful 4K rock material automatically!
+    Material rockMat = imm_load_pbr_material_dir("./assets/textures/rock_wall_10_4k.blend/textures");
+
+    // --- PRE-CALCULATE 256x256 SPHERE GEOMETRY ---
+    // Instead of doing massive sin/cos math 130,000 times a frame, we do it ONCE here!
+    renderer_clear(); // Reset immediate buffer
+    sphere((vec3){0.0f, 0.0f, 0.0f}, 5.0f, 256, 256, WHITE); // Generate at origin
+
+    uint32_t cached_sphere_count = imm_get_vertex_count();
+    Vertex* cached_sphere_verts = malloc(cached_sphere_count * sizeof(Vertex));
+    memcpy(cached_sphere_verts, imm_get_vertices(), cached_sphere_count * sizeof(Vertex));
+    renderer_clear(); // Reset for actual frame rendering
 
     registerKeyCallback(key_callback);
 
@@ -524,7 +536,21 @@ int main() {
         /* triangle(v3, center, v0, YELLOW); */
 
 
-        sphere((vec3){0, 0, 30}, 5, 16, 16, YELLOW);
+        /* imm_set_material(&rockMat); */
+
+        /* // Fast Cached Render! 65,000 vertices, physical displacement, 144+ FPS. */
+        /* mat4 sphere_model; */
+        /* glm_mat4_identity(sphere_model); */
+        /* glm_translate(sphere_model, (vec3){0.0f, 0.0f, 30.0f}); */
+
+        /* uint32_t first = imm_append_vertices(cached_sphere_verts, cached_sphere_count); */
+        /* imm_emit(first, cached_sphere_count, sphere_model); */
+
+        /* imm_reset_material(); */
+
+        /* imm_set_material(&rockMat); */
+        cube((vec3){0.0f, 0.0f, 10.0f}, 3.0f, WHITE);
+        /* imm_reset_material(); */
 
         // Rotate the cow
         /* static float cow_rotation = 0.0f; */
@@ -546,17 +572,12 @@ int main() {
         glm_mat4_mul(offset_transform, temp, scene.meshes.items[0].model);
         markMeshesSSBODirty(&context);
 
-
-
         text(jetbrains, "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", 150, 50, WHITE);
 
         // Draw 3D text at world position
         text3D(jetbrains, "Hello 3D!", (vec3){0.0f, 5.0f, 10.0f}, 6, WHITE);
         text3D(jetbrains, "Press SPACE", (vec3){0.0f, 4.5f, 10.0f}, 6, RED);
 
-        // Test 2D SDF text
-
-        // Test 2D SDF text
         double time = glfwGetTime();
 
         // Center of the screen - use actual Vulkan swapchain dimensions
@@ -587,47 +608,6 @@ int main() {
         line((vec3){-lineLength, 0.0f, 0.0f}, (vec3){lineLength, 0.0f, 0.0f}, xColor);
         line((vec3){0.0f, -lineLength, 0.0f}, (vec3){0.0f, lineLength, 0.0f}, yColor);
         line((vec3){0.0f, 0.0f, -lineLength}, (vec3){0.0f, 0.0f, lineLength}, zColor);
-
-
-        /* // Create a properly textured plane that maintains texture aspect ratio */
-        /* float floorWidth = 400.0f;   // 40 meter wide floor */
-        /* float floorDepth = 200.0f;   // 20 meter deep floor */
-        /* float textureWorldSize = 2.0f; // Each texture covers 2x2 meters */
-
-        /* // Calculate tiling separately for X and Z to maintain aspect ratio */
-        /* float tileX = floorWidth / textureWorldSize;  // 20 repeats in X */
-        /* float tileZ = floorDepth / textureWorldSize;  // 10 repeats in Z */
-
-        /* texturedPlane( */
-        /*               (vec3){0.0f, 0.0f, 0.0f}, */
-        /*               (vec2){floorWidth, floorDepth}, */
-        /*               texture4, */
-        /*               WHITE, */
-        /*               tileX,  // Separate X tiling */
-        /*               tileZ   // Separate Z tiling */
-        /*               ); */
-
-
-        /* // 3D TEXTURED GEOMETRY - Create a centered floor of cubes */
-        /* int gridSize = 5;          // 5x5 grid (odd number to have center at 0,0) */
-        /* float cubeSize = 2.0f;     // Size of each cube */
-        /* float spacing = cubeSize;   // No padding - cubes touch each other */
-
-        /* for (int x = -gridSize/2; x <= gridSize/2; x++) { */
-        /*     for (int z = -gridSize/2; z <= gridSize/2; z++) { */
-        /*         vec3 cubePos = { */
-        /*             x * spacing,    // This will give positions like: -4, -2, 0, 2, 4 */
-        /*             0.0f,          // All cubes on the ground */
-        /*             z * spacing     // Same for Z direction */
-        /*         }; */
-        /*         texturedCube(cubePos, cubeSize, texture3, WHITE); */
-        /*     } */
-        /* } */
-
-        // Billboards
-        /* texture3D((vec3){0.0f, 2.0f, 5.0f}, (vec2){2.0f, 2.0f}, texture1, WHITE); */
-        /* texture3D((vec3){-3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture5, WHITE); */
-        /* texture3D((vec3){3.0f, 1.0f, 8.0f}, (vec2){1.5f, 1.5f}, texture1, WHITE); */
 
         endFrame();
     }

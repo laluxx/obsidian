@@ -131,10 +131,10 @@ typedef struct {
     float metallicFactor;
     float roughnessFactor;
     float emissiveStrength;
-    int   _pad0;
+    int   displacementIndex;
 
     vec3  emissiveFactor;
-    int   _pad1;
+    float displacementScale;
 
     vec4  aabbMin;
     vec4  aabbMax;
@@ -211,6 +211,8 @@ void renderer_shutdown(void);
 void renderer_upload(void);
 void renderer_draw(VkCommandBuffer cmd);
 void renderer_clear(void);
+uint32_t imm_get_vertex_count(void);
+Vertex* imm_get_vertices(void);
 
 /* ── Immediate-mode material API ─────────────────────────────────────
    Call imm_set_material() before any draw call to set PBR properties.
@@ -227,10 +229,14 @@ typedef struct {
     int   metallicRoughIndex;/* default -1        */
     int   aoIndex;           /* default -1        */
     int   emissiveIndex;     /* default -1        */
-} ImmMaterial;
+    int   displacementIndex;
+    float displacementScale;
+} Material;
 
-void imm_set_material(const ImmMaterial* mat);
+void imm_set_material(const Material* mat);
 void imm_reset_material(void);  /* resets to PBR defaults */
+Material imm_load_pbr_material(const char* albedoPath, const char* normalPath, const char* roughnessPath);
+Material imm_load_pbr_material_dir(const char* dirPath);
 int  imm_alloc_slot(mat4 model); /* internal — allocates SSBO slot, returns index */
 /* Emit a draw using an already-allocated slot (avoids one slot per glyph) */
 void imm_emit_with_slot(uint32_t firstVertex, uint32_t count, int slot);

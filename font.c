@@ -449,7 +449,7 @@ void text3D(Font* font, const char* text_str, vec3 position, float size, Color c
     }
 
     /* ── set material once for the whole string ──────────────────────── */
-    ImmMaterial mat = {
+    Material mat = {
         .baseColorFactor    = {color.r, color.g, color.b, color.a},
         .metallicFactor     = 0.0f,
         .roughnessFactor    = 1.0f,

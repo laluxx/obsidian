@@ -339,7 +339,11 @@ void createLogicalDevice(VulkanContext* ctx)
     };
     static const uint32_t extCount = sizeof(exts) / sizeof(exts[0]);
 
-    VkPhysicalDeviceFeatures features = { .wideLines = VK_TRUE, .multiDrawIndirect = VK_TRUE };
+    VkPhysicalDeviceFeatures features = {
+        .wideLines = VK_TRUE,
+        .multiDrawIndirect = VK_TRUE,
+        .samplerAnisotropy = VK_TRUE
+    };
 
     VkPhysicalDeviceVulkan11Features features11 = {
         .sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
@@ -2053,7 +2057,8 @@ void createBindlessDescriptorLayout(VulkanContext* ctx)
         .binding            = 0,
         .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount    = MAX_TEXTURES,
-        .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
+        // AAA FIX: Allow the Vertex Shader to sample the bindless array for displacement!
+        .stageFlags         = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .pImmutableSamplers = NULL
     };
 
