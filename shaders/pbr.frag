@@ -64,12 +64,18 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Me
     MeshData meshes[];
 };
 
+// We define a dummy buffer reference here so the Push Constant size matches the Vertex Shader
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer {
+    float data[];
+};
+
 layout(push_constant) uniform PC {
     int  ambientOcclusionEnabled;
     int  iblEnabled;
     int  meshIndex;
     int  cascadeIndex;
     MeshBuffer meshData;
+    VertexBuffer vertexData;
 } pc;
 
 // ── Inputs from vertex shader ─────────────────────────────────────────────────

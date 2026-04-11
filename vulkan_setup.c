@@ -26,6 +26,7 @@
 
 /// Globals
 static uint64_t meshSSBOAddr[MAX_FRAMES_IN_FLIGHT];
+static uint64_t megaVertexBufferAddr = 0;
 VkPipeline shadowPipeline = VK_NULL_HANDLE;
 bool skyboxEnabled = true;
 bool iblLightingEnabled = true;
@@ -81,43 +82,10 @@ static VkShaderModule createShaderModule(VkDevice device,
     return mod;
 }
 
-/* Shared vertex-input / input-assembly structs for 3D geometry. */
-static void fill3DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
-                               VkPipelineInputAssemblyStateCreateInfo* ia,
-                               VkVertexInputBindingDescription*        bind,
-                               VkVertexInputAttributeDescription       attrs[5],
-                               VkPrimitiveTopology                     topology)
-{
-    *bind = (VkVertexInputBindingDescription){
-        .binding   = 0,
-        .stride    = sizeof(Vertex),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
-    };
-    attrs[0] = (VkVertexInputAttributeDescription){.location=0, .binding=0, .format=VK_FORMAT_R32G32B32_SFLOAT,    .offset=offsetof(Vertex, pos)};
-    attrs[1] = (VkVertexInputAttributeDescription){.location=1, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex, color)};
-    attrs[2] = (VkVertexInputAttributeDescription){.location=2, .binding=0, .format=VK_FORMAT_R32G32B32_SFLOAT,    .offset=offsetof(Vertex, normal)};
-    attrs[3] = (VkVertexInputAttributeDescription){.location=3, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,       .offset=offsetof(Vertex, texCoord)};
-    attrs[4] = (VkVertexInputAttributeDescription){.location=4, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex, tangent)};
-
-    *vi = (VkPipelineVertexInputStateCreateInfo){
-        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount   = 1,
-        .pVertexBindingDescriptions      = bind,
-        .vertexAttributeDescriptionCount = 5,
-        .pVertexAttributeDescriptions    = attrs
-    };
-    *ia = (VkPipelineInputAssemblyStateCreateInfo){
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology               = topology,
-        .primitiveRestartEnable = VK_FALSE
-    };
-}
-
-
 /* Shared vertex-input / input-assembly structs for 2D geometry. */
-static void fill2DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
+static void fill2DVertexInput(VkPipelineVertexInputStateCreateInfo* vi,
                                VkPipelineInputAssemblyStateCreateInfo* ia,
-                               VkVertexInputBindingDescription*        bind,
+                               VkVertexInputBindingDescription* bind,
                                VkVertexInputAttributeDescription       attrs[4])
 {
     *bind = (VkVertexInputBindingDescription){
@@ -140,6 +108,15 @@ static void fill2DVertexInput(VkPipelineVertexInputStateCreateInfo*    vi,
     *ia = (VkPipelineInputAssemblyStateCreateInfo){
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
+}
+
+/* Programmable Vertex Pulling - Input Assembler (IA) generator */
+static VkPipelineInputAssemblyStateCreateInfo makeIA(VkPrimitiveTopology topology) {
+    return (VkPipelineInputAssemblyStateCreateInfo){
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology               = topology,
         .primitiveRestartEnable = VK_FALSE
     };
 }
@@ -674,18 +651,12 @@ void createGraphicsPipelines(VulkanContext* ctx)
     VkPipelineDepthStencilStateCreateInfo  depth3D = makeDepth(true,  true);
     VkPipelineDepthStencilStateCreateInfo  depth2D = makeDepth(false, false);
 
-    /* 3D vertex input */
-    VkVertexInputBindingDescription        bind3D;
-    VkVertexInputAttributeDescription      attr3D[5];
-    VkPipelineVertexInputStateCreateInfo   vi3D;
-    VkPipelineInputAssemblyStateCreateInfo ia3D, iaLine;
-    fill3DVertexInput(&vi3D, &ia3D, &bind3D, attr3D, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-    iaLine = (VkPipelineInputAssemblyStateCreateInfo){
-        .sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+    VkPipelineVertexInputStateCreateInfo viEmpty = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
     };
+    VkPipelineInputAssemblyStateCreateInfo ia3D   = makeIA(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    VkPipelineInputAssemblyStateCreateInfo iaLine = makeIA(VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
 
-    /* 2D vertex input */
     VkVertexInputBindingDescription        bind2D;
     VkVertexInputAttributeDescription      attr2D[4];
     VkPipelineVertexInputStateCreateInfo   vi2D;
@@ -748,8 +719,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages             = ssPBR,
-            .pVertexInputState   = &vi3D, .pInputAssemblyState = &ia3D,
+            .stageCount          = 2, .pStages               = ssPBR,
+            .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
@@ -760,8 +731,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages             = ssPBR,
-            .pVertexInputState   = &vi3D, .pInputAssemblyState = &iaLine,
+            .stageCount          = 2, .pStages               = ssPBR,
+            .pVertexInputState   = &viEmpty, .pInputAssemblyState = &iaLine,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastLW, .pMultisampleState = &kMultisampling,
             .pColorBlendState    = &blend,  .pDepthStencilState= &depth3D,
@@ -772,7 +743,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages             = ss2DColor,
+            .stageCount          = 2, .pStages               = ss2DColor,
             .pVertexInputState   = &vi2D, .pInputAssemblyState = &ia2D,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
@@ -784,8 +755,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages             = ssSkybox,
-            .pVertexInputState   = &(VkPipelineVertexInputStateCreateInfo){ .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO },
+            .stageCount          = 2, .pStages               = ssSkybox,
+            .pVertexInputState   = &viEmpty,
             .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
@@ -797,8 +768,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &shadowRenderingCI,
-            .stageCount          = 1, .pStages             = ssShadow,
-            .pVertexInputState   = &vi3D, .pInputAssemblyState = &ia3D,
+            .stageCount          = 1, .pStages               = ssShadow,
+            .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastShadow, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = NULL, .pDepthStencilState = &depth3D,
@@ -1162,8 +1133,6 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
     };
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
 
-    VkDeviceSize zero = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
     vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
     for (int i = 0; i < 4; i++) {
@@ -1176,6 +1145,7 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
         pushConstants.cascadeIndex = i;
         pushConstants.meshIndex = -1;
         pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
+        pushConstants.vertexBufferAddr = megaVertexBufferAddr;
         vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
         // Frustum index: cascade i → frustum (i+1). Count lives in drawCountBuffer.
@@ -1222,11 +1192,10 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
 
     pushConstants.meshIndex = -1;
     pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
+    pushConstants.vertexBufferAddr = megaVertexBufferAddr;
     vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
     if (ctx->indirectDrawCount > 0) {
-        VkDeviceSize zero = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &ctx->megaVertexBuffer, &zero);
         vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, 0,
                                       ctx->drawCountBuffer, 0,
@@ -1806,52 +1775,49 @@ void cleanup(VulkanContext* ctx)
     }
     if (pipelineCache != VK_NULL_HANDLE) { vkDestroyPipelineCache(ctx->device, pipelineCache, NULL); pipelineCache = VK_NULL_HANDLE; }
 
-    /* 2D vertex buffer — one per frame */
+#define CLEANUP_BUFFER(b, m) \
+    if(ctx->b) { vkDestroyBuffer(ctx->device, ctx->b, NULL); ctx->b = VK_NULL_HANDLE; } \
+    if(ctx->m) { vkFreeMemory(ctx->device, ctx->m, NULL);    ctx->m = VK_NULL_HANDLE; }
+
+    /* 2D vertex buffer - one per frame */
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (ctx->vertexBuffer2D[i])       { vkDestroyBuffer(ctx->device, ctx->vertexBuffer2D[i],       NULL); ctx->vertexBuffer2D[i]       = VK_NULL_HANDLE; }
-        if (ctx->vertexBufferMemory2D[i]) { vkFreeMemory   (ctx->device, ctx->vertexBufferMemory2D[i], NULL); ctx->vertexBufferMemory2D[i] = VK_NULL_HANDLE; }
+        CLEANUP_BUFFER(vertexBuffer2D[i], vertexBufferMemory2D[i]);
     }
 
-    /* per-frame uniform buffers — unmap then destroy */
+    /* per-frame uniform buffers - unmap then destroy */
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (ctx->uboMapped[i])            { vkUnmapMemory  (ctx->device, ctx->uniformBuffersMemory[i]);          ctx->uboMapped[i]            = NULL;           }
-        if (ctx->uniformBuffers[i])       { vkDestroyBuffer(ctx->device, ctx->uniformBuffers[i],          NULL); ctx->uniformBuffers[i]       = VK_NULL_HANDLE; }
-        if (ctx->uniformBuffersMemory[i]) { vkFreeMemory   (ctx->device, ctx->uniformBuffersMemory[i],    NULL); ctx->uniformBuffersMemory[i] = VK_NULL_HANDLE; }
+        if (ctx->uboMapped[i]) { vkUnmapMemory(ctx->device, ctx->uniformBuffersMemory[i]); ctx->uboMapped[i] = NULL; }
+        CLEANUP_BUFFER(uniformBuffers[i], uniformBuffersMemory[i]);
     }
     if (ctx->descriptorPool)       { vkDestroyDescriptorPool     (ctx->device, ctx->descriptorPool,       NULL); ctx->descriptorPool          = VK_NULL_HANDLE; }
     if (ctx->descriptorSetLayout)  { vkDestroyDescriptorSetLayout(ctx->device, ctx->descriptorSetLayout,  NULL); ctx->descriptorSetLayout     = VK_NULL_HANDLE; }
 
     /* mega vertex buffer */
-    if (ctx->megaVertexBuffer)       { vkDestroyBuffer(ctx->device, ctx->megaVertexBuffer,       NULL); ctx->megaVertexBuffer       = VK_NULL_HANDLE; }
-    if (ctx->megaVertexBufferMemory) { vkFreeMemory   (ctx->device, ctx->megaVertexBufferMemory, NULL); ctx->megaVertexBufferMemory = VK_NULL_HANDLE; }
+    CLEANUP_BUFFER(megaVertexBuffer, megaVertexBufferMemory);
+
     /* mega index buffer */
-    if (ctx->megaIndexBuffer)        { vkDestroyBuffer(ctx->device, ctx->megaIndexBuffer,        NULL); ctx->megaIndexBuffer        = VK_NULL_HANDLE; }
-    if (ctx->megaIndexBufferMemory)  { vkFreeMemory   (ctx->device, ctx->megaIndexBufferMemory,  NULL); ctx->megaIndexBufferMemory  = VK_NULL_HANDLE; }
+    CLEANUP_BUFFER(megaIndexBuffer, megaIndexBufferMemory);
 
     /* dynamic buffers */
-    if (ctx->dynamicStagingMapped)   { vkUnmapMemory  (ctx->device, ctx->dynamicStagingMemory);         ctx->dynamicStagingMapped   = NULL;           }
-    if (ctx->dynamicStagingBuffer)   { vkDestroyBuffer(ctx->device, ctx->dynamicStagingBuffer,   NULL); ctx->dynamicStagingBuffer   = VK_NULL_HANDLE; }
-    if (ctx->dynamicStagingMemory)   { vkFreeMemory   (ctx->device, ctx->dynamicStagingMemory,   NULL); ctx->dynamicStagingMemory   = VK_NULL_HANDLE; }
-    if (ctx->dynamicDeviceBuffer)    { vkDestroyBuffer(ctx->device, ctx->dynamicDeviceBuffer,    NULL); ctx->dynamicDeviceBuffer    = VK_NULL_HANDLE; }
-    if (ctx->dynamicDeviceMemory)    { vkFreeMemory   (ctx->device, ctx->dynamicDeviceMemory,    NULL); ctx->dynamicDeviceMemory    = VK_NULL_HANDLE; }
+    if (ctx->dynamicStagingMapped) { vkUnmapMemory(ctx->device, ctx->dynamicStagingMemory); ctx->dynamicStagingMapped = NULL; }
+    CLEANUP_BUFFER(dynamicStagingBuffer, dynamicStagingMemory);
+    CLEANUP_BUFFER(dynamicDeviceBuffer, dynamicDeviceMemory);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (ctx->meshSSBOMapped[i])   { vkUnmapMemory(ctx->device, ctx->meshSSBOMemory[i]);                        ctx->meshSSBOMapped[i]   = NULL;           }
-        if (ctx->meshSSBO[i])         { vkDestroyBuffer(ctx->device, ctx->meshSSBO[i],         NULL);              ctx->meshSSBO[i]         = VK_NULL_HANDLE; }
-        if (ctx->meshSSBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->meshSSBOMemory[i],   NULL);              ctx->meshSSBOMemory[i]   = VK_NULL_HANDLE; }
+        if (ctx->meshSSBOMapped[i]) { vkUnmapMemory(ctx->device, ctx->meshSSBOMemory[i]); ctx->meshSSBOMapped[i] = NULL; }
+        CLEANUP_BUFFER(meshSSBO[i], meshSSBOMemory[i]);
     }
-    if (ctx->meshDirtyBits)        { free(ctx->meshDirtyBits); ctx->meshDirtyBits = NULL; }
-    if (ctx->ssboSetLayout)        { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout,        NULL); ctx->ssboSetLayout        = VK_NULL_HANDLE; }
-    if (ctx->ssboPool)                { vkDestroyDescriptorPool     (ctx->device, ctx->ssboPool,             NULL); ctx->ssboPool             = VK_NULL_HANDLE; }
-    if (ctx->srcIndirectBufferMapped) { vkUnmapMemory  (ctx->device, ctx->srcIndirectBufferMemory);        ctx->srcIndirectBufferMapped = NULL;           }
-    if (ctx->srcIndirectBuffer)       { vkDestroyBuffer(ctx->device, ctx->srcIndirectBuffer,   NULL);       ctx->srcIndirectBuffer       = VK_NULL_HANDLE; }
-    if (ctx->srcIndirectBufferMemory) { vkFreeMemory   (ctx->device, ctx->srcIndirectBufferMemory, NULL);   ctx->srcIndirectBufferMemory = VK_NULL_HANDLE; }
-    if (ctx->indirectBuffer)          { vkDestroyBuffer(ctx->device, ctx->indirectBuffer,      NULL);       ctx->indirectBuffer          = VK_NULL_HANDLE; }
-    if (ctx->indirectBufferMemory)    { vkFreeMemory   (ctx->device, ctx->indirectBufferMemory,NULL);       ctx->indirectBufferMemory    = VK_NULL_HANDLE; }
-    if (ctx->visibilityBuffer)        { vkDestroyBuffer(ctx->device, ctx->visibilityBuffer,    NULL);       ctx->visibilityBuffer        = VK_NULL_HANDLE; }
-    if (ctx->visibilityBufferMemory)  { vkFreeMemory   (ctx->device, ctx->visibilityBufferMemory, NULL);   ctx->visibilityBufferMemory  = VK_NULL_HANDLE; }
-    if (ctx->drawCountBuffer)         { vkDestroyBuffer(ctx->device, ctx->drawCountBuffer,     NULL);       ctx->drawCountBuffer         = VK_NULL_HANDLE; }
-    if (ctx->drawCountBufferMemory)   { vkFreeMemory   (ctx->device, ctx->drawCountBufferMemory,  NULL);   ctx->drawCountBufferMemory   = VK_NULL_HANDLE; }
+    if (ctx->meshDirtyBits) { free(ctx->meshDirtyBits); ctx->meshDirtyBits = NULL; }
+    if (ctx->ssboSetLayout) { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout, NULL); ctx->ssboSetLayout = VK_NULL_HANDLE; }
+    if (ctx->ssboPool)      { vkDestroyDescriptorPool     (ctx->device, ctx->ssboPool,      NULL); ctx->ssboPool      = VK_NULL_HANDLE; }
+
+    if (ctx->srcIndirectBufferMapped) { vkUnmapMemory(ctx->device, ctx->srcIndirectBufferMemory); ctx->srcIndirectBufferMapped = NULL; }
+    CLEANUP_BUFFER(srcIndirectBuffer, srcIndirectBufferMemory);
+    CLEANUP_BUFFER(indirectBuffer, indirectBufferMemory);
+    CLEANUP_BUFFER(visibilityBuffer, visibilityBufferMemory);
+    CLEANUP_BUFFER(drawCountBuffer, drawCountBufferMemory);
+
+#undef CLEANUP_BUFFER
 
     if (ctx->renderGraph)          { rg_destroy(ctx->renderGraph); ctx->renderGraph = NULL; }
 
@@ -1881,8 +1847,12 @@ void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size)
 {
     ctx->megaVertexBufferSize   = size;
     ctx->megaVertexBufferOffset = 0;
-    createBuffer(ctx, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->megaVertexBuffer, &ctx->megaVertexBufferMemory);
-    fprintf(stdout, "Mega vertex buffer: %.1f MB (DEVICE_LOCAL)\n", (double)size / (1024.0 * 1024.0));
+    createBuffer(ctx, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->megaVertexBuffer, &ctx->megaVertexBufferMemory);
+
+    VkBufferDeviceAddressInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ctx->megaVertexBuffer };
+    megaVertexBufferAddr = vkGetBufferDeviceAddress(ctx->device, &info);
+
+    fprintf(stdout, "Mega vertex buffer: %.1f MB (DEVICE_LOCAL, Address: %llx)\n", (double)size / (1024.0 * 1024.0), (unsigned long long)megaVertexBufferAddr);
 }
 
 /* Upload vertices into the mega buffer, return the BASE VERTEX INDEX for DrawIndexed/Draw offset.
@@ -2055,15 +2025,20 @@ uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t
     return baseIndex;
 }
 
+uint64_t dynamicVertexBufferAddr = 0;
+
 void createDynamicBuffers(VulkanContext* ctx, VkDeviceSize size)
 {
     ctx->dynamicBufferSize = size;
     createBuffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->dynamicStagingBuffer, &ctx->dynamicStagingMemory);
     vkMapMemory(ctx->device, ctx->dynamicStagingMemory, 0, size, 0, &ctx->dynamicStagingMapped);
 
-    createBuffer(ctx, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->dynamicDeviceBuffer, &ctx->dynamicDeviceMemory);
+    createBuffer(ctx, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->dynamicDeviceBuffer, &ctx->dynamicDeviceMemory);
 
-    fprintf(stdout, "Dynamic buffers: %.1f MB staging + %.1f MB device-local\n", (double)size/(1024*1024), (double)size/(1024*1024));
+    VkBufferDeviceAddressInfo dynInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ctx->dynamicDeviceBuffer };
+    dynamicVertexBufferAddr = vkGetBufferDeviceAddress(ctx->device, &dynInfo);
+
+    fprintf(stdout, "Dynamic buffers: %.1f MB staging + %.1f MB device-local (Address: %llx)\n", (double)size/(1024*1024), (double)size/(1024*1024), (unsigned long long)dynamicVertexBufferAddr);
 }
 
 /// Bindless texture array
@@ -2358,62 +2333,69 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
     markMeshesSSBODirty(ctx);
 }
 
-/* Call once per frame from beginFrame — uploads SSBO only to currentFrame if dirty */
+/* Call once per frame from beginFrame - uploads SSBO only to currentFrame if dirty */
 void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
 {
     if (ctx->ssboFramesDirty == 0) return;
 
     uint32_t count = (uint32_t)meshes->count;
     uint32_t f     = ctx->currentFrame;
+    uint32_t words = (count + 63) / 64;
 
     MeshGPUData* dst = (MeshGPUData*)ctx->meshSSBOMapped[f];
 
-    for (uint32_t i = 0; i < count; i++) {
-        /* skip meshes that are clean for this frame */
-        uint32_t word = i / 64;
-        uint64_t bit  = 1ULL << (i % 64);
-        bool dirty = (ctx->meshDirtyBits == NULL) ||
-                     (word < ctx->meshDirtyCapacity / 64 &&
-                      (ctx->meshDirtyBits[word * MAX_FRAMES_IN_FLIGHT + f] & bit));
-        if (!dirty) continue;
+    for (uint32_t w = 0; w < words; w++) {
+        uint64_t mask = (ctx->meshDirtyBits == NULL) ? ~0ULL : ctx->meshDirtyBits[w * MAX_FRAMES_IN_FLIGHT + f];
 
-        Mesh* m = &meshes->items[i];
-        if (m->megaBaseVertex == UINT32_MAX) {
-            memset(&dst[i], 0, sizeof(MeshGPUData));
-            continue;
+        /* HARDWARE INTRINSIC MANIA:
+           Skip up to 64 clean meshes in a single CPU cycle.
+           Zero branching on empty space. */
+        while (mask) {
+            int bitIdx = __builtin_ctzll(mask); /* Count trailing zeros = index of lowest set bit */
+            mask &= mask - 1;                   /* Clear the lowest set bit */
+
+            uint32_t i = w * 64 + bitIdx;
+            if (i >= count) break;
+
+            Mesh* m = &meshes->items[i];
+            if (m->megaBaseVertex == UINT32_MAX) {
+                memset(&dst[i], 0, sizeof(MeshGPUData));
+                continue;
+            }
+            glm_mat4_copy(m->model, dst[i].model);
+            mat4 inv;
+            glm_mat4_inv(m->model, inv);
+            glm_mat4_transpose(inv);
+            glm_mat4_copy(inv, dst[i].normalMatrix);
+
+            /* PBR texture slots */
+            dst[i].albedoIndex        = (m->texture && m->texture->loaded)
+                                        ? (int)m->texture->bindlessSlot : -1;
+            dst[i].normalMapIndex     = m->normalMapIndex;
+            dst[i].metallicRoughIndex = m->metallicRoughIndex;
+            dst[i].aoIndex            = m->aoIndex;
+            dst[i].emissiveIndex      = m->emissiveIndex;
+
+            /* Material constant factors */
+            glm_vec4_copy(m->baseColorFactor,  dst[i].baseColorFactor);
+            dst[i].metallicFactor    = m->metallicFactor;
+            dst[i].roughnessFactor   = m->roughnessFactor;
+            dst[i].emissiveStrength  = m->emissiveStrength;
+            glm_vec3_copy(m->emissiveFactor,   dst[i].emissiveFactor);
+
+            dst[i].isUnlit      = m->is_unlit ? 1 : 0;
+            dst[i].alphaMode    = m->alpha_mode;
+            dst[i].alphaCutoff  = m->alpha_cutoff;
+            glm_vec3_copy(m->aabbMin, dst[i].aabbMin);
+            glm_vec3_copy(m->aabbMax, dst[i].aabbMax);
+            dst[i].aabbMin[3]   = 0.0f;
+            dst[i].aabbMax[3]   = 0.0f;
         }
-        glm_mat4_copy(m->model, dst[i].model);
-        mat4 inv;
-        glm_mat4_inv(m->model, inv);
-        glm_mat4_transpose(inv);
-        glm_mat4_copy(inv, dst[i].normalMatrix);
 
-        /* PBR texture slots */
-        dst[i].albedoIndex        = (m->texture && m->texture->loaded)
-                                    ? (int)m->texture->bindlessSlot : -1;
-        dst[i].normalMapIndex     = m->normalMapIndex;
-        dst[i].metallicRoughIndex = m->metallicRoughIndex;
-        dst[i].aoIndex            = m->aoIndex;
-        dst[i].emissiveIndex      = m->emissiveIndex;
-
-        /* Material constant factors */
-        glm_vec4_copy(m->baseColorFactor,  dst[i].baseColorFactor);
-        dst[i].metallicFactor    = m->metallicFactor;
-        dst[i].roughnessFactor   = m->roughnessFactor;
-        dst[i].emissiveStrength  = m->emissiveStrength;
-        glm_vec3_copy(m->emissiveFactor,   dst[i].emissiveFactor);
-
-        dst[i].isUnlit      = m->is_unlit ? 1 : 0;
-        dst[i].alphaMode    = m->alpha_mode;
-        dst[i].alphaCutoff  = m->alpha_cutoff;
-        glm_vec3_copy(m->aabbMin, dst[i].aabbMin);
-        glm_vec3_copy(m->aabbMax, dst[i].aabbMax);
-        dst[i].aabbMin[3]   = 0.0f;
-        dst[i].aabbMax[3]   = 0.0f;
-
-        /* clear dirty bit for this frame */
-        if (ctx->meshDirtyBits && word < ctx->meshDirtyCapacity / 64)
-            ctx->meshDirtyBits[word * MAX_FRAMES_IN_FLIGHT + f] &= ~bit;
+        /* Clear the entire 64-bit block for this frame instantly */
+        if (ctx->meshDirtyBits && w < ctx->meshDirtyCapacity / 64) {
+            ctx->meshDirtyBits[w * MAX_FRAMES_IN_FLIGHT + f] = 0;
+        }
     }
 
     ctx->ssboFramesDirty--;

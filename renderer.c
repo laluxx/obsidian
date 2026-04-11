@@ -73,10 +73,11 @@ static VkPhysicalDevice physicalDevice;
 static VkCommandPool commandPool;
 static VkQueue graphicsQueue;
 
-static VkBuffer       vertexBuffer[MAX_FRAMES_IN_FLIGHT];
-static VkDeviceMemory vertexBufferMemory[MAX_FRAMES_IN_FLIGHT];
-static void*          vertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
-static uint32_t       imm_frame_index = 0;
+static VkBuffer         vertexBuffer[MAX_FRAMES_IN_FLIGHT];
+static VkDeviceMemory   vertexBufferMemory[MAX_FRAMES_IN_FLIGHT];
+static void* vertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
+static uint64_t         vertexBufferAddr[MAX_FRAMES_IN_FLIGHT];
+static uint32_t         imm_frame_index = 0;
 
 PushConstants pushConstants;
 
@@ -241,6 +242,8 @@ void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool
         create_mapped_buffer(device, physicalDevice, sizeof(vertices),
                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                              &vertexBuffer[i], &vertexBufferMemory[i], &vertexBufferMapped[i]);
+        VkBufferDeviceAddressInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = vertexBuffer[i] };
+        vertexBufferAddr[i] = vkGetBufferDeviceAddress(device, &info);
     }
 }
 
@@ -453,10 +456,9 @@ void renderer_upload() {
 void renderer_draw(VkCommandBuffer cmd) {
     if (immDrawCount == 0) return;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline);
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer[imm_frame_index], offsets);
     for (uint32_t i = 0; i < immDrawCount; i++) {
         pushConstants.meshBufferAddr = immSSBOAddr[imm_frame_index];
+        pushConstants.vertexBufferAddr = vertexBufferAddr[imm_frame_index];
         pushConstants.meshIndex = immDrawList[i].slot;
         vkCmdPushConstants(cmd, context.pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -469,6 +471,7 @@ void renderer_draw(VkCommandBuffer cmd) {
 void renderer_draw_single(VkCommandBuffer cmd, uint32_t firstVertex,
                           uint32_t count, int slot) {
     pushConstants.meshBufferAddr = immSSBOAddr[imm_frame_index];
+    pushConstants.vertexBufferAddr = vertexBufferAddr[imm_frame_index];
     pushConstants.meshIndex = slot;
     vkCmdPushConstants(cmd, context.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -526,11 +529,10 @@ void mesh(VkCommandBuffer cmd, Mesh* mesh) {
     /* legacy direct-draw path — model/material data comes from SSBO for
        indirect meshes; this path is only used for dynamic/morph meshes  */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured3D);
+    pushConstants.vertexBufferAddr = mesh->vertexBufferAddr;
     vkCmdPushConstants(cmd, context.pipelineLayoutTextured3D,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vertexBuffer, offsets);
     vkCmdDraw(cmd, mesh->vertexCount, 1, 0, 0);
 }
 
@@ -689,21 +691,14 @@ void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
     if (meshes->count == 0) return;
 
     VkPipeline   bound_pipeline = VK_NULL_HANDLE;
-    VkBuffer     bound_vbuf     = VK_NULL_HANDLE;
-    VkDeviceSize zero_offset    = 0;
 
     /* sets 0/1/2 already bound in recordCommandBuffer before meshes_draw is called */
-
-    if (context.megaVertexBuffer != VK_NULL_HANDLE) {
-        vkCmdBindVertexBuffers(cmd, 0, 1, &context.megaVertexBuffer, &zero_offset);
-        bound_vbuf = context.megaVertexBuffer;
-    }
 
     for (size_t i = 0; i < meshes->count; ++i) {
         Mesh* m = &meshes->items[i];
 
         /* Static meshes (in mega buffer) are drawn by the indirect pass —
-           only draw dynamic meshes (morph targets) here.                  */
+           only draw dynamic meshes (morph targets) here.                 */
         if (m->megaBaseVertex != UINT32_MAX) continue;
 
         VkPipeline       want_pipe   = context.graphicsPipeline;
@@ -714,23 +709,12 @@ void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
             bound_pipeline = want_pipe;
         }
 
+        pushConstants.vertexBufferAddr = m->vertexBufferAddr;
         vkCmdPushConstants(cmd, want_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pushConstants);
 
-        if (m->megaBaseVertex == UINT32_MAX) {
-            if (bound_vbuf != m->vertexBuffer) {
-                vkCmdBindVertexBuffers(cmd, 0, 1, &m->vertexBuffer, &zero_offset);
-                bound_vbuf = m->vertexBuffer;
-            }
-            vkCmdDraw(cmd, m->vertexCount, 1, 0, 0);
-        } else {
-            if (bound_vbuf != context.megaVertexBuffer) {
-                vkCmdBindVertexBuffers(cmd, 0, 1, &context.megaVertexBuffer, &zero_offset);
-                bound_vbuf = context.megaVertexBuffer;
-            }
-            vkCmdDraw(cmd, m->vertexCount, 1, m->megaBaseVertex, 0);
-        }
+        vkCmdDraw(cmd, m->vertexCount, 1, 0, 0);
     }
 }
 
@@ -1099,7 +1083,8 @@ static Vertex         lineVertices[MAX_VERTICES];
 uint32_t              lineVertexCount = 0;
 static VkBuffer       lineVertexBuffer[MAX_FRAMES_IN_FLIGHT];
 static VkDeviceMemory lineVertexBufferMemory[MAX_FRAMES_IN_FLIGHT];
-static void*          lineVertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
+static void* lineVertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
+static uint64_t       lineVertexBufferAddr[MAX_FRAMES_IN_FLIGHT];
 
 void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool, VkQueue queue) {
     device = dev;
@@ -1110,6 +1095,8 @@ void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cm
         create_mapped_buffer(device, physicalDevice, sizeof(lineVertices),
                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                              &lineVertexBuffer[i], &lineVertexBufferMemory[i], &lineVertexBufferMapped[i]);
+        VkBufferDeviceAddressInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = lineVertexBuffer[i] };
+        lineVertexBufferAddr[i] = vkGetBufferDeviceAddress(device, &info);
     }
 }
 
@@ -1144,12 +1131,11 @@ void line_renderer_draw(VkCommandBuffer cmd) {
     /* Lines use the PBR layout. We don't read SSBOs for lines, so no need
        to set a specific pointer. Push meshIndex=-2 as a sentinel. */
     pushConstants.meshIndex = -2; /* sentinel: line draw, ignore SSBO material */
+    pushConstants.vertexBufferAddr = lineVertexBufferAddr[imm_frame_index];
     vkCmdPushConstants(cmd, context.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
 
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &lineVertexBuffer[imm_frame_index], offsets);
     vkCmdDraw(cmd, lineVertexCount, 1, 0, 0);
 }
 

@@ -80,6 +80,7 @@ typedef struct {
 
 extern Vertex2D vertices2D[MAX_VERTICES];
 extern uint32_t vertexCount2D;
+extern uint64_t dynamicVertexBufferAddr;
 
 // Texture management
 bool load_texture_from_rgba_with_format(VulkanContext* context, unsigned char* rgba_data, uint32_t width, uint32_t height, Texture2D* texture, VkFormat format);
@@ -104,6 +105,7 @@ typedef struct {
     int meshIndex;           // -1 = indirect (gl_BaseInstanceARB), >=0 = direct
     int cascadeIndex;
     uint64_t meshBufferAddr; // THE MAGIC GPU POINTER
+    uint64_t vertexBufferAddr; // BDA POINTER FOR VERTEX PULLING
 } PushConstants;
 
 #define IMM_SSBO_MAX_ENTRIES 16384
@@ -162,6 +164,7 @@ typedef struct {
     uint32_t         megaBaseIndex;       /* base index offset in mega index buffer; UINT32_MAX = no indices */
     VkBuffer         vertexBuffer;        /* VK_NULL_HANDLE for mega-buffer meshes */
     VkDeviceMemory   vertexBufferMemory;  /* VK_NULL_HANDLE for mega-buffer meshes */
+    uint64_t         vertexBufferAddr;    /* PHYSICAL POINTER for standalone meshes */
     VkBuffer         indexBuffer;         /* VK_NULL_HANDLE for mega-buffer meshes */
     VkDeviceMemory   indexBufferMemory;   /* VK_NULL_HANDLE for mega-buffer meshes */
     uint32_t         vertexCount;

@@ -489,25 +489,35 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     mesh.indexBufferMemory  = VK_NULL_HANDLE;
     mesh.megaBaseVertex     = UINT32_MAX;
     mesh.megaBaseIndex      = UINT32_MAX;
+    mesh.vertexBufferAddr   = 0;
 
     if (mesh.morph_data) {
         VkBufferCreateInfo bufferInfo = {
             .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .size        = final_vertex_count * sizeof(Vertex),
-            .usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE
         };
         vkCreateBuffer(context.device, &bufferInfo, NULL, &mesh.vertexBuffer);
         VkMemoryRequirements mr;
         vkGetBufferMemoryRequirements(context.device, mesh.vertexBuffer, &mr);
+
+        VkMemoryAllocateFlagsInfo flagsInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+            .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+        };
         VkMemoryAllocateInfo ai = {
-            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize  = mr.size,
+            .sType            = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext            = &flagsInfo,
+            .allocationSize   = mr.size,
             .memoryTypeIndex = findMemoryType(context.physicalDevice, mr.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
         };
         vkAllocateMemory(context.device, &ai, NULL, &mesh.vertexBufferMemory);
         vkBindBufferMemory(context.device, mesh.vertexBuffer, mesh.vertexBufferMemory, 0);
+
+        VkBufferDeviceAddressInfo addrInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = mesh.vertexBuffer };
+        mesh.vertexBufferAddr = vkGetBufferDeviceAddress(context.device, &addrInfo);
         void* ptr;
         vkMapMemory(context.device, mesh.vertexBufferMemory, 0, bufferInfo.size, 0, &ptr);
         memcpy(ptr, final_vertices, final_vertex_count * sizeof(Vertex));
