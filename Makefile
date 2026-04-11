@@ -1,12 +1,12 @@
 CC = gcc
 CFLAGS = -std=c23 -Wall -Wextra -g -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
-LDFLAGS = -lvulkan -lglfw -lX11 -lcglm -lm $(shell pkg-config --libs freetype2 guile-3.0)
+LDFLAGS = -fuse-ld=mold -lvulkan -lglfw -lX11 -lcglm -lm $(shell pkg-config --libs freetype2 guile-3.0)
 
 GLSLANG = glslangValidator
 XXD = xxd
 
 # Paths
-INCLUDES = -I/usr/include -I.
+INCLUDES = -I/usr/include -I. -I$(SHADER_DIR)
 LIBRARIES = -L/usr/lib/x86_64-linux-gnu
 INSTALL_DIR = /usr
 
@@ -23,26 +23,29 @@ ALL_OBJECTS = $(LIB_OBJECTS) $(MAIN_OBJECT)
 HEADERS = $(wildcard *.h)
 
 # Shaders
-SHADER_VERTS = $(wildcard *.vert)
-SHADER_FRAGS = $(wildcard *.frag)
-SHADER_COMPS = $(wildcard *.comp)
+SHADER_DIR = shaders
+SHADER_VERTS = $(wildcard $(SHADER_DIR)/*.vert)
+SHADER_FRAGS = $(wildcard $(SHADER_DIR)/*.frag)
+SHADER_COMPS = $(wildcard $(SHADER_DIR)/*.comp)
 SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv) $(SHADER_COMPS:.comp=.comp.spv)
 SPV_HEADERS = $(SHADER_SPVS:.spv=.spv.h)
 
 # Default target - build executable directly
-all: $(SPV_HEADERS) $(EXECUTABLE)
+all:
+	@$(MAKE) -j$$(nproc) internal_build
+
+internal_build: $(SPV_HEADERS) $(EXECUTABLE)
 
 # Compile shaders to SPIR-V
-%.vert.spv: %.vert
+$(SHADER_DIR)/%.vert.spv: $(SHADER_DIR)/%.vert
 	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
-%.frag.spv: %.frag
+$(SHADER_DIR)/%.frag.spv: $(SHADER_DIR)/%.frag
 	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
-%.comp.spv: %.comp
+$(SHADER_DIR)/%.comp.spv: $(SHADER_DIR)/%.comp
 	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
-
 # Convert SPIR-V to C header
-%.spv.h: %.spv
-	$(XXD) -i $< > $@
+$(SHADER_DIR)/%.spv.h: $(SHADER_DIR)/%.spv
+	$(XXD) -i -n $(subst /,_,$(subst .,_,$(notdir $<))) $< > $@
 
 # Compile C sources to object files
 %.o: %.c $(HEADERS) $(SPV_HEADERS)
@@ -82,14 +85,12 @@ uninstall:
 	rm -rf $(INSTALL_DIR)/include/obsidian
 	ldconfig
 
-# Clean build artifacts
 clean:
 	rm -f $(ALL_OBJECTS) $(SHADER_SPVS) $(SPV_HEADERS)
 	rm -f $(LIB_NAME).a $(LIB_NAME).so $(EXECUTABLE)
-
 # Clean everything including shaders
 distclean: clean
-	rm -f *.spv *.spv.h
+	rm -f $(SHADER_DIR)/*.spv $(SHADER_DIR)/*.spv.h
 
 # Rebuild everything from scratch
 rebuild: clean all
