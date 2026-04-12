@@ -11,7 +11,6 @@ layout(set = 3, binding = 0) uniform LightingUBO {
 
 struct MeshData {
     mat4  model;
-    mat4  normalMatrix;
     int   albedoIndex;
     int   normalMapIndex;
     int   metallicRoughIndex;
@@ -32,9 +31,9 @@ struct MeshData {
 
     // AAA: Must perfectly mirror renderer.h MeshGPUData layout
     int   jointOffset;
-    int   _pad0;
-    int   _pad1;
-    int   _pad2;
+    int   morphDeltaOffset;
+    int   morphWeightOffset;
+    int   morphCount;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
@@ -55,6 +54,19 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Jo
     PackedJoint joints[];
 };
 
+struct MorphDelta {
+    vec4 pos_delta;
+    vec4 normal_delta;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MorphBuffer {
+    MorphDelta deltas[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer WeightBuffer {
+    float weights[];
+};
+
 mat4 unpackJoint(PackedJoint j) {
     return mat4(
         vec4(j.row0.x, j.row1.x, j.row2.x, 0.0),
@@ -72,16 +84,28 @@ layout(push_constant) uniform PC {
     MeshBuffer meshData;
     VertexBuffer vertexData;
     JointBuffer jointData;
+    MorphBuffer morphData;
+    WeightBuffer weightData;
 } pc;
 
 void main() {
     uint idx = (pc.meshIndex >= 0) ? uint(pc.meshIndex) : uint(gl_BaseInstanceARB);
-    mat4 model = pc.meshData.meshes[idx].model;
-    int jointOffset = pc.meshData.meshes[idx].jointOffset;
+    MeshData m = pc.meshData.meshes[idx];
+    mat4 model = m.model;
+    int jointOffset = m.jointOffset;
 
     // ── PERFECT 128-BYTE (32 FLOAT) CGLM STRIDE ──
     uint base = gl_VertexIndex * 32;
     vec3 inPos = vec3(pc.vertexData.data[base+0], pc.vertexData.data[base+1], pc.vertexData.data[base+2]);
+
+    // ── HARDWARE MORPH TARGETS FOR SHADOWS ──
+    if (m.morphCount > 0) {
+        uint vertBase = uint(m.morphDeltaOffset) + gl_VertexIndex * uint(m.morphCount);
+        for (int i = 0; i < m.morphCount; i++) {
+            float w = pc.weightData.weights[m.morphWeightOffset + i];
+            inPos += pc.morphData.deltas[vertBase + uint(i)].pos_delta.xyz * w;
+        }
+    }
 
     // ── HARDWARE SKELETAL SKINNING FOR SHADOWS ──
     mat4 skinMat = mat4(1.0);

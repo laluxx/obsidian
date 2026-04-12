@@ -992,7 +992,10 @@ void animate_scene(Scene* scene, float time) {
                     size_t node_idx = (cgltf_node*)mesh->node - instance->gltf_data->nodes;
                     if (node_idx < MAX_NODES) {
                         memcpy(mesh->model, node_transform_scratch[node_idx], sizeof(mat4));
+                        markMeshDirty(&context, (uint32_t)m);
                     }
+                } else if (mesh->morph_data) {
+                    markMeshDirty(&context, (uint32_t)m);
                 }
             }
 
@@ -1039,17 +1042,6 @@ void animate_scene(Scene* scene, float time) {
                     }
                 }
             }
-        }
-    }
-
-    /* Only dirty meshes whose transforms or morph weights actually changed.
-       This avoids a full SSBO re-upload for static meshes every frame.    */
-    for (size_t inst2 = 0; inst2 < scene->gltf_instance_count; inst2++) {
-        GLTFInstance* gi = &scene->gltf_instances[inst2];
-        if (!gi->animations) continue;
-        size_t end = gi->mesh_start_index + gi->mesh_count;
-        for (size_t m = gi->mesh_start_index; m < end; m++) {
-            markMeshDirty(&context, (uint32_t)m);
         }
     }
 }

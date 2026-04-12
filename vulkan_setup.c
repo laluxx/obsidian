@@ -2532,10 +2532,6 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
                 continue;
             }
             glm_mat4_copy(m->model, dst[i].model);
-            mat4 inv;
-            glm_mat4_inv(m->model, inv);
-            glm_mat4_transpose(inv);
-            glm_mat4_copy(inv, dst[i].normalMatrix);
 
             /* PBR texture slots */
             dst[i].albedoIndex        = (m->texture && m->texture->loaded)
@@ -2560,7 +2556,7 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].aabbMin[3]   = 0.0f;
             dst[i].aabbMax[3]   = 0.0f;
             dst[i].jointOffset  = m->jointOffset;
-            dst[i].morphDeltaOffset = m->morphDeltaOffset;
+            dst[i].morphDeltaOffset = m->morphDeltaOffset - (int)(m->megaBaseVertex * m->morphCount);
             dst[i].morphWeightOffset = m->morphWeightOffset;
             dst[i].morphCount   = m->morphCount;
         }

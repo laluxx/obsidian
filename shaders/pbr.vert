@@ -16,7 +16,6 @@ layout(set = 1, binding = 0) uniform sampler2D textures[];
 
 struct MeshData {
     mat4  model;
-    mat4  normalMatrix;
     int   albedoIndex;
     int   normalMapIndex;
     int   metallicRoughIndex;
@@ -167,8 +166,9 @@ void main() {
     outTexCoord = inTexCoord;
     outColor    = inColor;
 
-    vec3 N = normalize(mat3(m.normalMatrix) * localNormal);
-    vec3 T = normalize(mat3(m.normalMatrix) * localTangent);
+    mat3 normalMatrix = transpose(inverse(mat3(m.model)));
+    vec3 N = normalize(normalMatrix * localNormal);
+    vec3 T = normalize(normalMatrix * localTangent);
 
     T = normalize(T - dot(T, N) * N);
     vec3 B = cross(N, T) * inTangent.w;

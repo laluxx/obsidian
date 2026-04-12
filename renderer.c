@@ -389,8 +389,6 @@ int alloc_slot(mat4 model) {
 
     MeshGPUData* d = &((MeshGPUData*)context.meshSSBOMapped[frame_index])[slot];
     glm_mat4_copy(model, d->model);
-    mat4 inv; glm_mat4_inv(model, inv); glm_mat4_transpose(inv);
-    glm_mat4_copy(inv, d->normalMatrix);
     glm_vec4_copy(currentMaterial.baseColorFactor, d->baseColorFactor);
     d->metallicFactor     = currentMaterial.metallicFactor;
     d->roughnessFactor    = currentMaterial.roughnessFactor;

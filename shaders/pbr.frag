@@ -37,7 +37,6 @@ layout(set = 3, binding = 5) uniform sampler2DShadow shadowMap;
 
 struct MeshData {
     mat4  model;
-    mat4  normalMatrix;
     int   albedoIndex;
     int   normalMapIndex;
     int   metallicRoughIndex;
@@ -58,9 +57,9 @@ struct MeshData {
 
     // AAA: Must perfectly mirror renderer.h MeshGPUData layout
     int   jointOffset;
-    int   _pad0;
-    int   _pad1;
-    int   _pad2;
+    int   morphDeltaOffset;
+    int   morphWeightOffset;
+    int   morphCount;
 };
 
 #extension GL_EXT_buffer_reference : require

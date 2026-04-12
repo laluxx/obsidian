@@ -118,7 +118,6 @@ typedef struct {
 /* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */
 typedef struct {
     mat4  model;
-    mat4  normalMatrix;
 
     // Bindless texture slots (-1 = not present)
     int   albedoIndex;        // base color / albedo map

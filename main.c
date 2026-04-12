@@ -472,13 +472,13 @@ int main() {
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                     // PASS */
     /* load_gltf("./assets/gltf/Box.glb", &scene);                             // PASS */
     /* load_gltf("./assets/gltf/Corset.glb", &scene);                          // PASS (but it's really small)*/
-    load_gltf("./assets/gltf/CesiumMan.glb", &scene);                       // PASS
+    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene);                       // PASS */
+    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene);             // PASS */
+    /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene);                     // PASS */
+    load_gltf("./assets/gltf/MorphStressTest.glb", &scene);                 // PASS
 
     /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO glass maeterial */
-    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS
-    /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */
-    /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene); // PASS FIXME FLICKER ? */
     /* load_gltf("./assets/gltf/Fox.glb", &scene); // FIXME ANIMATIONS */
     /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/TextureCoordinateTest.glb", &scene); // PASS */
