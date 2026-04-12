@@ -1,5 +1,8 @@
 #+TITLE: Obsidian Engine TODO
 
+# TODO
+One thing to keep an eye on: the magic constant (16384 + 4096) appears four times across three files now with no named constant. That's going to bite you when you change maxMeshes. Should be a #define MAX_INDIRECT_COMMANDS or pulled from the context struct.
+
 * TODO Correctness [1/2]
 - [X] The lines should not use PBR (Fixed via dedicated unlit SSBO slot and 0-instance indirect command).
 - [ ] SimpleMorph lighting is broken (Investigate normal recalculation or missing normal deltas in the glTF).

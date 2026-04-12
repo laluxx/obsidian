@@ -790,39 +790,121 @@ static size_t find_keyframe(float* times, size_t count, float time) {
     return count - 2;
 }
 
+#define MAX_NODES 16384
+static mat4 node_transform_scratch[MAX_NODES];
+
+// AAA O(N) Single-Pass Top-Down Hierarchy Evaluator
+static void compute_node_hierarchy(cgltf_node* node, Animation* anim, float anim_time, mat4 parent_mat, cgltf_data* data) {
+    mat4 local;
+    bool is_animated = false;
+
+    // Standard stack variables (compiler aligns these naturally)
+    vec3 T = {0.0f, 0.0f, 0.0f};
+    versor R = {0.0f, 0.0f, 0.0f, 1.0f};
+    vec3 S = {1.0f, 1.0f, 1.0f};
+
+    // Shielding cglm from unaligned heap memory via scalar assignment
+    if (node->has_translation) { T[0] = node->translation[0]; T[1] = node->translation[1]; T[2] = node->translation[2]; }
+    if (node->has_rotation) { R[0] = node->rotation[0]; R[1] = node->rotation[1]; R[2] = node->rotation[2]; R[3] = node->rotation[3]; }
+    if (node->has_scale) { S[0] = node->scale[0]; S[1] = node->scale[1]; S[2] = node->scale[2]; }
+
+    if (anim) {
+        for (size_t c = 0; c < anim->channel_count; c++) {
+            AnimationChannel* chan = &anim->channels[c];
+            if (chan->target_node == node && chan->path != cgltf_animation_path_type_weights) {
+                is_animated = true;
+                size_t k0 = find_keyframe(chan->times, chan->keyframe_count, anim_time);
+                size_t k1 = chan->keyframe_count > 1 ? k0 + 1 : k0;
+
+                // CRITICAL: Clamp factor to prevent infinite extrapolation!
+                float factor = 0.0f;
+                if (chan->keyframe_count > 1) {
+                    float t_diff = chan->times[k1] - chan->times[k0];
+                    if (t_diff > 0.00001f) {
+                        factor = (anim_time - chan->times[k0]) / t_diff;
+                        if (factor < 0.0f) factor = 0.0f;
+                        if (factor > 1.0f) factor = 1.0f;
+                    }
+                }
+
+                // Shielding cglm again by pulling heap arrays into stack variables first
+                if (chan->path == cgltf_animation_path_type_translation && chan->translations) {
+                    vec3 t0 = {chan->translations[k0][0], chan->translations[k0][1], chan->translations[k0][2]};
+                    vec3 t1 = {chan->translations[k1][0], chan->translations[k1][1], chan->translations[k1][2]};
+                    glm_vec3_lerp(t0, t1, factor, T);
+                } else if (chan->path == cgltf_animation_path_type_rotation && chan->rotations) {
+                    versor r0 = {chan->rotations[k0][0], chan->rotations[k0][1], chan->rotations[k0][2], chan->rotations[k0][3]};
+                    versor r1 = {chan->rotations[k1][0], chan->rotations[k1][1], chan->rotations[k1][2], chan->rotations[k1][3]};
+                    glm_quat_slerp(r0, r1, factor, R);
+                } else if (chan->path == cgltf_animation_path_type_scale && chan->scales) {
+                    vec3 s0 = {chan->scales[k0][0], chan->scales[k0][1], chan->scales[k0][2]};
+                    vec3 s1 = {chan->scales[k1][0], chan->scales[k1][1], chan->scales[k1][2]};
+                    glm_vec3_lerp(s0, s1, factor, S);
+                }
+            }
+        }
+    }
+
+    if (is_animated) {
+        mat4 rot_mat;
+        glm_quat_mat4(R, rot_mat);
+        glm_mat4_identity(local);
+        glm_translate(local, T);
+        glm_mat4_mul(local, rot_mat, local);
+        glm_scale(local, S);
+    } else {
+        cgltf_node_transform_local(node, (float*)local);
+    }
+
+    // Resolve hierarchy against parent
+    mat4 world;
+    glm_mat4_mul(parent_mat, local, world);
+
+    // Cache the resolved world matrix
+    size_t node_idx = node - data->nodes;
+    if (node_idx < MAX_NODES) {
+        memcpy(node_transform_scratch[node_idx], world, sizeof(mat4));
+    }
+
+    // Recurse children exactly once
+    for (size_t i = 0; i < node->children_count; i++) {
+        compute_node_hierarchy(node->children[i], anim, anim_time, world, data);
+    }
+}
+
 void animate_scene(Scene* scene, float time) {
     // Animate each glTF instance independently
     for (size_t inst = 0; inst < scene->gltf_instance_count; inst++) {
         GLTFInstance* instance = &scene->gltf_instances[inst];
-
         if (!instance->animations) continue;
 
         for (size_t a = 0; a < instance->animation_count; a++) {
             Animation* anim = &instance->animations[a];
-
             float anim_time = fmodf(time, anim->duration);
 
+            // Phase 1: Evaluate morph weights (with clamping)
             for (size_t c = 0; c < anim->channel_count; c++) {
                 AnimationChannel* channel = &anim->channels[c];
-                cgltf_node* target_node = channel->target_node;
-
-                size_t k0 = find_keyframe(channel->times, channel->keyframe_count, anim_time);
-                size_t k1 = k0 + 1;
-
-                float t0 = channel->times[k0];
-                float t1 = channel->times[k1];
-                float factor = (anim_time - t0) / (t1 - t0);
-
-                // Handle morph weight animations
                 if (channel->path == cgltf_animation_path_type_weights && channel->weights) {
-                    // Only search meshes belonging to THIS instance
+                    cgltf_node* target_node = channel->target_node;
+                    size_t k0 = find_keyframe(channel->times, channel->keyframe_count, anim_time);
+                    size_t k1 = channel->keyframe_count > 1 ? k0 + 1 : k0;
+
+                    float factor = 0.0f;
+                    if (channel->keyframe_count > 1) {
+                        float t_diff = channel->times[k1] - channel->times[k0];
+                        if (t_diff > 0.00001f) {
+                            factor = (anim_time - channel->times[k0]) / t_diff;
+                            if (factor < 0.0f) factor = 0.0f;
+                            if (factor > 1.0f) factor = 1.0f;
+                        }
+                    }
+
                     size_t mesh_end = instance->mesh_start_index + instance->mesh_count;
                     for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
                         Mesh* mesh = &scene->meshes.items[m];
                         if (mesh->node == target_node && mesh->morph_data) {
                             size_t num_targets = mesh->morph_data->target_count;
-
-                            // Interpolate weights for each morph target
                             for (size_t t = 0; t < num_targets; t++) {
                                 float w0 = channel->weights[k0 * num_targets + t];
                                 float w1 = channel->weights[k1 * num_targets + t];
@@ -830,44 +912,32 @@ void animate_scene(Scene* scene, float time) {
                             }
                         }
                     }
-                    continue; // CRITICAL: Skip the transform overwrite block!
                 }
+            }
 
-                // Handle transformation animations
-                size_t mesh_end = instance->mesh_start_index + instance->mesh_count;
-                for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
-                    Mesh* mesh = &scene->meshes.items[m];
-                    if (mesh->node == target_node) {
-                        mat4 animated_transform;
-                        glm_mat4_identity(animated_transform);
+            // Phase 2: Top-Down Single Pass Hierarchy Evaluation
+            cgltf_scene* active_scene = instance->gltf_data->scene ? instance->gltf_data->scene : &instance->gltf_data->scenes[0];
+            mat4 identity;
+            glm_mat4_identity(identity);
 
-                        if (channel->path == cgltf_animation_path_type_translation && channel->translations) {
-                            vec3 pos;
-                            glm_vec3_lerp(channel->translations[k0], channel->translations[k1], factor, pos);
-                            glm_translate(animated_transform, pos);
-                        }
+            for (size_t i = 0; i < active_scene->nodes_count; i++) {
+                compute_node_hierarchy(active_scene->nodes[i], anim, anim_time, identity, instance->gltf_data);
+            }
 
-                        if (channel->path == cgltf_animation_path_type_rotation && channel->rotations) {
-                            versor rot;
-                            glm_quat_slerp(channel->rotations[k0], channel->rotations[k1], factor, rot);
-                            mat4 rot_mat;
-                            glm_quat_mat4(rot, rot_mat);
-                            glm_mat4_mul(animated_transform, rot_mat, animated_transform);
-                        }
-
-                        if (channel->path == cgltf_animation_path_type_scale && channel->scales) {
-                            vec3 scale;
-                            glm_vec3_lerp(channel->scales[k0], channel->scales[k1], factor, scale);
-                            glm_scale(animated_transform, scale);
-                        }
-
-                        glm_mat4_copy(animated_transform, mesh->model);
+            // Phase 3: Fast linear sweep to apply cached transforms to meshes
+            size_t mesh_end = instance->mesh_start_index + instance->mesh_count;
+            for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
+                Mesh* mesh = &scene->meshes.items[m];
+                if (mesh->node) {
+                    // CRITICAL: Cast the opaque void* back to cgltf_node* so C can do pointer math!
+                    size_t node_idx = (cgltf_node*)mesh->node - instance->gltf_data->nodes;
+                    if (node_idx < MAX_NODES) {
+                        memcpy(mesh->model, node_transform_scratch[node_idx], sizeof(mat4));
                     }
                 }
             }
         }
-        markMeshesSSBODirty(&context);
-        }
+    }
 
     // Guarantee that ALL dynamic meshes (even un-animated ones) get their
     // geometry appended to the current frame's dynamic staging buffer.
@@ -889,7 +959,8 @@ void animate_scene(Scene* scene, float time) {
         }
     }
 
-    // CRITICAL: We dynamically recalculated the AABBs for the morph targets on the CPU.
-    // We MUST flag the SSBO as dirty every frame so the GPU Compute Culler gets the new bounds!
+    // CRITICAL: We dynamically recalculated the AABBs for the morph targets on the CPU,
+    // and updated the hierarchical matrices.
+    // We MUST flag the SSBO as dirty every frame so the GPU gets the new data!
     markMeshesSSBODirty(&context);
 }

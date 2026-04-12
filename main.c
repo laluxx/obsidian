@@ -467,12 +467,11 @@ int main() {
     /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene);              // PASS */
     /* load_gltf("./assets/gltf/UnlitTest.glb", &scene);                       // PASS */
     /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene);                  // PASS */
-    load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene);   // PASS
+    /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene);   // PASS */
+    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene);           // TODO */
+    load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                     // PASS
 
-
-    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME
-    /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene); // FIXME ANIMATION CHANNELS */
-    /* load_gltf("./assets/gltf/Box.glb", &scene); // PASS */
+    /* load_gltf("./assets/gltf/Box.glb", &scene); // PASS
     /* load_gltf("./assets/gltf/Corset.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/CesiumMan.glb", &scene); // FIXME RIG */
     /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO Materials */
