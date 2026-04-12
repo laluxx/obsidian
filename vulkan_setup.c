@@ -27,6 +27,10 @@
 /// Globals
 static uint64_t meshSSBOAddr[MAX_FRAMES_IN_FLIGHT];
 uint64_t megaVertexBufferAddr = 0;
+uint64_t jointSSBOAddr[MAX_FRAMES_IN_FLIGHT] = {0};
+VkBuffer jointSSBO[MAX_FRAMES_IN_FLIGHT] = {0};
+VkDeviceMemory jointSSBOMemory[MAX_FRAMES_IN_FLIGHT] = {0};
+mat4* jointSSBOMapped[MAX_FRAMES_IN_FLIGHT] = {0};
 VkPipeline shadowPipeline = VK_NULL_HANDLE;
 bool skyboxEnabled = true;
 bool iblLightingEnabled = true;
@@ -1150,6 +1154,7 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
         pushConstants.meshIndex = -1;
         pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
         pushConstants.vertexBufferAddr = megaVertexBufferAddr;
+        pushConstants.jointBufferAddr = jointSSBOAddr[ctx->currentFrame];
         vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
         // Frustum index: cascade i → frustum (i+1). Count lives in drawCountBuffer.
@@ -1197,6 +1202,7 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
     pushConstants.meshIndex = -1;
     pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
     pushConstants.vertexBufferAddr = megaVertexBufferAddr;
+    pushConstants.jointBufferAddr = jointSSBOAddr[ctx->currentFrame];
     vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
     if (ctx->indirectDrawCount > 0) {
@@ -2278,6 +2284,18 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
     /* start fully dirty so first frames upload everything */
     memset(ctx->meshDirtyBits, 0xFF,
            words * MAX_FRAMES_IN_FLIGHT * sizeof(uint64_t));
+
+    // ── CREATE GLOBAL JOINT SSBO ──
+    VkDeviceSize jointSize = 16384 * sizeof(mat4); // Support 16,384 total bones globally
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        createBuffer(ctx, jointSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &jointSSBO[i], &jointSSBOMemory[i]);
+        vkMapMemory(ctx->device, jointSSBOMemory[i], 0, jointSize, 0, (void**)&jointSSBOMapped[i]);
+
+        VkBufferDeviceAddressInfo jInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = jointSSBO[i] };
+        jointSSBOAddr[i] = vkGetBufferDeviceAddress(ctx->device, &jInfo);
+    }
+    fprintf(stdout, "Global Joint SSBO (Physical Pointers): %.1f MB x%d frames\n",
+            (double)jointSize/(1024*1024), MAX_FRAMES_IN_FLIGHT);
 }
 
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
@@ -2435,6 +2453,7 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             glm_vec3_copy(m->aabbMax, dst[i].aabbMax);
             dst[i].aabbMin[3]   = 0.0f;
             dst[i].aabbMax[3]   = 0.0f;
+            dst[i].jointOffset  = m->jointOffset;
         }
 
         /* Clear the entire 64-bit block for this frame instantly */

@@ -16,6 +16,8 @@ typedef struct {
 static NodeMeshMapping node_mappings[256];
 static size_t node_mapping_count = 0;
 
+static int global_joint_counter = 0;
+extern mat4* jointSSBOMapped[MAX_FRAMES_IN_FLIGHT];
 
 void get_directory(const char* filepath, char* dir, size_t dir_size) {
     const char* last_slash = strrchr(filepath, '/');
@@ -157,12 +159,13 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     Mesh mesh = {0};
     mesh.name = strdup(name);
     mesh.textureIndex = -1;
-    mesh.texture = NULL;
     mesh.node = NULL;
     mesh.morph_data = NULL;
     mesh.is_unlit = false;
     mesh.alpha_mode = 0; // OPAQUE by default
     mesh.alpha_cutoff = 0.5f; // Default cutoff
+    mesh.jointOffset = -1; // CRITICAL FIX: Disable skinning by default to prevent GPU page faults!
+    mesh.jointCount = 0;
     glm_mat4_identity(mesh.model);
     glm_mat4_identity(mesh.local_transform);
 
@@ -171,8 +174,9 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     cgltf_accessor* normal_accessor = NULL;
     cgltf_accessor* texcoord_accessor = NULL;
     cgltf_accessor* color_accessor = NULL;
-
     cgltf_accessor* tangent_accessor = NULL;
+    cgltf_accessor* joints_accessor = NULL;
+    cgltf_accessor* weights_accessor = NULL;
 
     for (size_t j = 0; j < prim->attributes_count; ++j) {
         cgltf_attribute* attr = &prim->attributes[j];
@@ -191,6 +195,12 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
                 break;
             case cgltf_attribute_type_tangent:
                 tangent_accessor = attr->data;
+                break;
+            case cgltf_attribute_type_joints:
+                joints_accessor = attr->data;
+                break;
+            case cgltf_attribute_type_weights:
+                weights_accessor = attr->data;
                 break;
             default:
                 break;
@@ -390,6 +400,28 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
 
         vertices[v].textureIndex = 0;
+
+        // AAA: Parse Joints (cgltf handles the 8/16/32-bit type conversions automatically)
+        if (joints_accessor) {
+            uint32_t j[4] = {0,0,0,0};
+            cgltf_accessor_read_uint(joints_accessor, v, j, 4);
+            vertices[v].joints[0] = j[0]; vertices[v].joints[1] = j[1];
+            vertices[v].joints[2] = j[2]; vertices[v].joints[3] = j[3];
+        } else {
+            vertices[v].joints[0] = 0; vertices[v].joints[1] = 0;
+            vertices[v].joints[2] = 0; vertices[v].joints[3] = 0;
+        }
+
+        // AAA: Parse Bone Weights
+        if (weights_accessor) {
+            float w[4] = {0,0,0,0};
+            cgltf_accessor_read_float(weights_accessor, v, w, 4);
+            vertices[v].weights[0] = w[0]; vertices[v].weights[1] = w[1];
+            vertices[v].weights[2] = w[2]; vertices[v].weights[3] = w[3];
+        } else {
+            vertices[v].weights[0] = 0.0f; vertices[v].weights[1] = 0.0f;
+            vertices[v].weights[2] = 0.0f; vertices[v].weights[3] = 0.0f;
+        }
     }
 
     // Load morph targets BEFORE expanding indices
@@ -748,6 +780,26 @@ bool load_gltf(const char* filepath, Scene* scene) {
 
     instance->mesh_count = scene->meshes.count - instance->mesh_start_index;
 
+    // AAA: Map glTF skins to our Global Joint SSBO
+    if (data->skins_count > 0) {
+        int* skin_offsets = malloc(data->skins_count * sizeof(int));
+        for (size_t s = 0; s < data->skins_count; s++) {
+            skin_offsets[s] = global_joint_counter;
+            global_joint_counter += data->skins[s].joints_count;
+        }
+
+        for (size_t i = instance->mesh_start_index; i < instance->mesh_start_index + instance->mesh_count; i++) {
+            Mesh* m = &scene->meshes.items[i];
+            cgltf_node* cnode = (cgltf_node*)m->node;
+            if (cnode && cnode->skin) {
+                size_t skin_idx = cnode->skin - data->skins;
+                m->jointOffset = skin_offsets[skin_idx];
+                m->jointCount = cnode->skin->joints_count;
+            }
+        }
+        free(skin_offsets);
+    }
+
     load_gltf_animations(data, instance);
 
     scene->gltf_instance_count++;
@@ -933,6 +985,46 @@ void animate_scene(Scene* scene, float time) {
                     size_t node_idx = (cgltf_node*)mesh->node - instance->gltf_data->nodes;
                     if (node_idx < MAX_NODES) {
                         memcpy(mesh->model, node_transform_scratch[node_idx], sizeof(mat4));
+                    }
+                }
+            }
+
+            // Phase 4: Hardware Skinning (Evaluate and upload joint matrices to the SSBO)
+            mat4* joint_buffer = jointSSBOMapped[context.currentFrame];
+            if (joint_buffer && instance->gltf_data->skins_count > 0) {
+                for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
+                    Mesh* mesh = &scene->meshes.items[m];
+                    cgltf_node* cnode = (cgltf_node*)mesh->node;
+
+                    if (cnode && cnode->skin && mesh->jointOffset >= 0) {
+                        cgltf_skin* skin = cnode->skin;
+                        mat4 inverse_mesh_world;
+                        glm_mat4_inv(mesh->model, inverse_mesh_world);
+
+                        for (size_t j = 0; j < skin->joints_count; j++) {
+                            cgltf_node* joint_node = skin->joints[j];
+
+                            mat4 inverse_bind;
+                            glm_mat4_identity(inverse_bind);
+                            if (skin->inverse_bind_matrices) {
+                                cgltf_accessor_read_float(skin->inverse_bind_matrices, j, (float*)inverse_bind, 16);
+                            }
+
+                            size_t joint_idx = joint_node - instance->gltf_data->nodes;
+                            mat4 joint_world;
+                            if (joint_idx < MAX_NODES) {
+                                memcpy(joint_world, node_transform_scratch[joint_idx], sizeof(mat4));
+                            } else {
+                                glm_mat4_identity(joint_world);
+                            }
+
+                            // The glTF 2.0 Spec Formula: Final = Inverse(MeshWorld) * JointWorld * InverseBind
+                            mat4 final_joint;
+                            glm_mat4_mul(inverse_mesh_world, joint_world, final_joint);
+                            glm_mat4_mul(final_joint, inverse_bind, final_joint);
+
+                            memcpy(&joint_buffer[mesh->jointOffset + j], final_joint, sizeof(mat4));
+                        }
                     }
                 }
             }

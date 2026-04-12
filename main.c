@@ -469,12 +469,12 @@ int main() {
     /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene);                  // PASS */
     /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene);   // PASS */
     /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene);           // TODO */
-    load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                     // PASS
+    /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                     // PASS */
+    /* load_gltf("./assets/gltf/Box.glb", &scene);                             // PASS */
+    /* load_gltf("./assets/gltf/Corset.glb", &scene);                          // PASS (but it's really small)*/
+    load_gltf("./assets/gltf/CesiumMan.glb", &scene);                       // PASS
 
-    /* load_gltf("./assets/gltf/Box.glb", &scene); // PASS
-    /* load_gltf("./assets/gltf/Corset.glb", &scene); // PASS */
-    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene); // FIXME RIG */
-    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO Materials */
+    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO Materials
     /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS */
     /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */

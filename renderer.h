@@ -39,14 +39,18 @@ typedef struct {
 } LightingData;
 
 typedef struct {
-    vec3     pos;
-    vec4     color;
-    vec3     normal;
-    vec2     texCoord;
-    vec4     tangent;    // xyz=tangent, w=bitangent sign (+1 or -1)
-    uint32_t textureIndex;
-    uint32_t _pad[3];    // align to 16 bytes
-} Vertex;
+    vec3     pos;           // +0
+    float    _pad0;         // +12
+    vec4     color;         // +16
+    vec3     normal;        // +32
+    vec2     texCoord;      // +44
+    float    _pad1[3];      // +52
+    vec4     tangent;       // +64  (xyz=tangent, w=bitangent sign)
+    uint32_t textureIndex;  // +80
+    uint32_t _pad2[3];      // +84
+    vec4     weights;       // +96  (Bone weights)
+    uint32_t joints[4];     // +112 (Bone indices)
+} Vertex; // Total: 128 bytes (Exactly 32 floats for perfect shader alignment)
 
 #define MAX_DYNAMIC_MESHES 4096
 #define MAX_DYNAMIC_VERTICES (1024 * 1024)
@@ -104,8 +108,9 @@ typedef struct {
     int iblEnabled;
     int meshIndex;           // -1 = indirect (gl_BaseInstanceARB), >=0 = direct
     int cascadeIndex;
-    uint64_t meshBufferAddr; // THE MAGIC GPU POINTER
+    uint64_t meshBufferAddr;   // THE MAGIC GPU POINTER
     uint64_t vertexBufferAddr; // BDA POINTER FOR VERTEX PULLING
+    uint64_t jointBufferAddr;  // AAA BDA POINTER FOR HARDWARE SKELETAL SKINNING
 } PushConstants;
 
 /* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */
@@ -136,6 +141,9 @@ typedef struct {
 
     vec4  aabbMin;
     vec4  aabbMax;
+
+    int   jointOffset;        // -1 = no skinning, >=0 = offset into Global Joint SSBO
+    int   _pad[3];            // Padding to ensure MeshGPUData is exactly 256 bytes
 } MeshGPUData;
 
 extern PushConstants pushConstants;
@@ -176,6 +184,9 @@ typedef struct {
     bool is_unlit;
     int  alpha_mode;
     float alpha_cutoff;
+
+    int  jointOffset;   // Offset into the global joint matrix array
+    int  jointCount;    // Number of bones affecting this mesh
 
     /* PBR material texture slots (bindless indices, -1 = not present) */
     int32_t  normalMapIndex;      // tangent-space normal map

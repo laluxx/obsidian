@@ -55,6 +55,12 @@ struct MeshData {
     float displacementScale;
     vec4  aabbMin;
     vec4  aabbMax;
+
+    // AAA: Must perfectly mirror renderer.h MeshGPUData layout
+    int   jointOffset;
+    int   _pad0;
+    int   _pad1;
+    int   _pad2;
 };
 
 #extension GL_EXT_buffer_reference : require
@@ -69,6 +75,10 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Ver
     float data[];
 };
 
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer JointBuffer {
+    mat4 matrices[];
+};
+
 layout(push_constant) uniform PC {
     int  ambientOcclusionEnabled;
     int  iblEnabled;
@@ -76,6 +86,7 @@ layout(push_constant) uniform PC {
     int  cascadeIndex;
     MeshBuffer meshData;
     VertexBuffer vertexData;
+    JointBuffer jointData; // Matches pbr.vert exactly
 } pc;
 
 // ── Inputs from vertex shader ─────────────────────────────────────────────────

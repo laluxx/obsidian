@@ -411,6 +411,7 @@ int alloc_slot(mat4 model) {
     d->displacementScale  = currentMaterial.displacementScale;
     glm_vec3_copy((vec3){-1e10f,-1e10f,-1e10f}, d->aabbMin);
     glm_vec3_copy((vec3){ 1e10f, 1e10f, 1e10f}, d->aabbMax);
+    d->jointOffset        = -1;
     return slot;
 }
 
@@ -466,6 +467,13 @@ static inline void emit_vertex(vec3 pos, vec4 color, vec3 normal, vec2 uv, vec4 
     glm_vec3_copy(normal, dynVerts[offset].normal);
     glm_vec2_copy(uv, dynVerts[offset].texCoord);
     glm_vec4_copy(tangent, dynVerts[offset].tangent);
+
+    // Explicitly zero weights/joints so unskinned dynamic primitives don't NaN out
+    dynVerts[offset].weights[0] = 0.0f; dynVerts[offset].weights[1] = 0.0f;
+    dynVerts[offset].weights[2] = 0.0f; dynVerts[offset].weights[3] = 0.0f;
+    dynVerts[offset].joints[0] = 0; dynVerts[offset].joints[1] = 0;
+    dynVerts[offset].joints[2] = 0; dynVerts[offset].joints[3] = 0;
+
     vertex_count++;
 }
 
@@ -1379,8 +1387,10 @@ void line_renderer_draw(VkCommandBuffer cmd) {
 
     set_material(&oldMat);
 
+    extern uint64_t jointSSBOAddr[MAX_FRAMES_IN_FLIGHT];
     pushConstants.meshIndex = slot;
     pushConstants.vertexBufferAddr = lineVertexBufferAddr[frame_index];
+    pushConstants.jointBufferAddr = jointSSBOAddr[frame_index];
     vkCmdPushConstants(cmd, context.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
