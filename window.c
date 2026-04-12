@@ -180,7 +180,11 @@ void beginFrame() {
     if (moved > 0.01f) {
         sort_meshes_by_alpha(&scene.meshes, camera.position);
         glm_vec3_copy(camera.position, last_sort_pos);
-        markMeshesSSBODirty(&context);
+
+        // CRITICAL: We shuffled the CPU array. We must rebuild the GPU indirect buffer
+        // so that the Geometry pointers (cmds[i]) match the Material/Transform slots (SSBO[i]).
+        // updateMeshSSBOAndIndirect calls markMeshesSSBODirty internally!
+        updateMeshSSBOAndIndirect(&context, &scene.meshes);
     }
 
     flushMeshSSBO(&context, &scene.meshes);

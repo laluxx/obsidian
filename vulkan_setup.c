@@ -922,8 +922,9 @@ void createComputeCompactPipeline(VulkanContext* ctx)
     vkAllocateDescriptorSets(ctx->device, &dai, ctx->computeCompactSets);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
         VkDescriptorBufferInfo visInfo   = { .buffer = ctx->visibilityBuffer,   .range = VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo srcInfo   = { .buffer = ctx->srcIndirectBuffer,  .range = VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo srcInfo   = { .buffer = ctx->srcIndirectBuffer,  .offset = i * drawSize, .range = drawSize };
         VkDescriptorBufferInfo dstInfo   = { .buffer = ctx->indirectBuffer,     .range = VK_WHOLE_SIZE };
         VkDescriptorBufferInfo cntInfo   = { .buffer = ctx->drawCountBuffer,    .range = VK_WHOLE_SIZE };
         VkWriteDescriptorSet writes[4] = {
@@ -2286,12 +2287,13 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
     VkDeviceSize visSize   = maxMeshes * 5 * sizeof(uint32_t);
     VkDeviceSize countSize = 5 * sizeof(uint32_t);
 
-    /* Source: CPU writes per-mesh draw commands, compact.comp reads */
-    createBuffer(ctx, drawSize,
+    /* Source: CPU writes per-mesh draw commands, compact.comp reads.
+       CRITICAL: Multiplied by MAX_FRAMES_IN_FLIGHT to prevent CPU/GPU tearing! */
+    createBuffer(ctx, drawSize * MAX_FRAMES_IN_FLIGHT,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &ctx->srcIndirectBuffer, &ctx->srcIndirectBufferMemory);
-    vkMapMemory(ctx->device, ctx->srcIndirectBufferMemory, 0, drawSize, 0,
+    vkMapMemory(ctx->device, ctx->srcIndirectBufferMemory, 0, drawSize * MAX_FRAMES_IN_FLIGHT, 0,
                 &ctx->srcIndirectBufferMapped);
 
     /* Compacted output: compact.comp writes, GPU draws from — 5 frustums */
@@ -2343,7 +2345,9 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
 {
     uint32_t count = (uint32_t)meshes->count;
 
-    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)ctx->srcIndirectBufferMapped;
+    // CRITICAL: Shift pointer to the current frame to prevent GPU tearing!
+    VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)((uint8_t*)ctx->srcIndirectBufferMapped + (ctx->currentFrame * drawSize));
 
     for (uint32_t i = 0; i < count; i++) {
         Mesh* m = &meshes->items[i];
@@ -2357,7 +2361,9 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
             continue;
         }
 
-        cmds[i].indexCount    = m->indexCount;
+        // CRITICAL: Morph targets drop their indices (indexCount=0).
+        // We MUST use vertexCount for the draw call so they don't vanish when sorted!
+        cmds[i].indexCount    = (m->indexCount == 0 && m->dynamicBaseVertex != UINT32_MAX) ? m->vertexCount : m->indexCount;
         cmds[i].instanceCount = 1;
         cmds[i].firstIndex    = (m->megaBaseIndex == UINT32_MAX) ? 0 : m->megaBaseIndex;
 

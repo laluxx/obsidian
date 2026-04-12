@@ -271,8 +271,8 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
 
     /* PBR material defaults */
     glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mesh.baseColorFactor);
-    mesh.metallicFactor    = 1.0f;
-    mesh.roughnessFactor   = 1.0f;
+    mesh.metallicFactor    = 0.0f; // Fix: Default to dielectric (plastic), not metal!
+    mesh.roughnessFactor   = 0.5f; // Fix: Default to matte, not a perfect mirror!
     mesh.emissiveStrength  = 1.0f;
     glm_vec3_copy((vec3){0.0f, 0.0f, 0.0f}, mesh.emissiveFactor);
     mesh.normalMapIndex      = -1;
@@ -871,7 +871,8 @@ void animate_scene(Scene* scene, float time) {
 
     // Guarantee that ALL dynamic meshes (even un-animated ones) get their
     // geometry appended to the current frame's dynamic staging buffer.
-    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)context.srcIndirectBufferMapped;
+    VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)((uint8_t*)context.srcIndirectBufferMapped + (context.currentFrame * drawSize));
 
     for (size_t i = 0; i < scene->meshes.count; i++) {
         Mesh* mesh = &scene->meshes.items[i];
@@ -887,4 +888,8 @@ void animate_scene(Scene* scene, float time) {
             cmds[i].firstInstance = i; // CRITICAL: Ensures SSBO material matches!
         }
     }
+
+    // CRITICAL: We dynamically recalculated the AABBs for the morph targets on the CPU.
+    // We MUST flag the SSBO as dirty every frame so the GPU Compute Culler gets the new bounds!
+    markMeshesSSBODirty(&context);
 }

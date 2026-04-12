@@ -659,7 +659,8 @@ void emit_draw(uint32_t firstVertex, uint32_t count, mat4 model) {
 void emit_draw_with_slot(uint32_t firstVertex, uint32_t count, int slot) {
     if (dynamic_draw_count >= MAX_DYNAMIC_MESHES) return;
 
-    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)context.srcIndirectBufferMapped;
+    VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)((uint8_t*)context.srcIndirectBufferMapped + (frame_index * drawSize));
     cmds[slot].indexCount = count;
     cmds[slot].instanceCount = 1;
     cmds[slot].firstIndex = 0;

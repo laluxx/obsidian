@@ -375,5 +375,17 @@ void main() {
     // Doing pow(..., 1/2.2) here would double-gamma correct and wash out colors!
     color = clamp(color, 0.0, 1.0);
 
-    outColor = vec4(color, baseColor.a);
+    float finalAlpha = baseColor.a;
+
+    // Force alpha behavior based on glTF alphaMode to override the hardware blender
+    if (m.alphaMode == 0) {
+        // OPAQUE: Completely ignore texture alpha
+        finalAlpha = 1.0;
+    } else if (m.alphaMode == 1) {
+        // MASK: Discard already happened above, surviving pixels must be solid
+        finalAlpha = 1.0;
+    }
+    // BLEND (mode 2) leaves finalAlpha as baseColor.a
+
+    outColor = vec4(color, finalAlpha);
 }

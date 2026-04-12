@@ -461,15 +461,16 @@ int main() {
     Texture2D* texture5 = texture_pool_get(tex5);
 
     /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
-    /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // PASS */
-    load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene); // FIXME
+    /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene);               // PASS */
+    /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene);               // PASS */
+    /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene);             // PASS */
+    /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene);              // PASS */
+    /* load_gltf("./assets/gltf/UnlitTest.glb", &scene);                       // PASS */
+    /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene);                  // PASS */
+    load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene);   // FIXME Shadow acne
 
-    /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene); // FIXME ? */
-    /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
-    /* load_gltf("./assets/gltf/UnlitTest.glb", &scene); // PASS */
-    /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT */
-    /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS */
-    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME */
+
+    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene); // FIXME ANIMATION CHANNELS */
     /* load_gltf("./assets/gltf/Box.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/Corset.glb", &scene); // PASS */
