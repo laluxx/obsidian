@@ -6,8 +6,8 @@
 * TODO Features [0/1]
 - [ ] Parallax Occlusion Mapping - Togglable per material
 
-* TODO Performance [0/2]
-- [ ] Unify immediate renderer into mega buffer - Kill the split, one draw call for everything. Dynamic geometry (moves/changes every frame) uses a dynamic region at the front of the mega buffer that resets each frame via a simple offset reset, no alloc/free. Static meshes sit permanently behind it and are never re-uploaded.
+* TODO Performance [1/2]
+- [X] Unify immediate renderer into mega buffer - Kill the split, one draw call for everything. Dynamic geometry (moves/changes every frame) uses a dynamic region at the front of the mega buffer that resets each frame via a simple offset reset, no alloc/free. Static meshes sit permanently behind it and are never re-uploaded.
 - [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they ever hit the rasterizer
 
 * TODO Editor [0/1]
@@ -35,7 +35,7 @@
 
 
 
-as you can see i heavily optimized everything and this is renderer.h and renderer.c What do you think are the next big wins in perfomance, i want to optimize EVERYTHING LIKE A MANIAC i really want to go in the rabbithole and squeeze every possible frame out of this engine it has to spend 0 time in the CPU it has to be AAA level it has to be super fast i want to focus on optimizations, NOTE that i also value ALOT refactors and removing lines count from a file what do you think we should do next ?
+as you can see i heavily optimized everything What do you think are the next big wins in perfomance, i want to optimize EVERYTHING LIKE A MANIAC i really want to go in the rabbithole and squeeze every possible frame out of this engine it has to spend 0 time in the CPU it has to be AAA level it has to be super fast i want to focus on optimizations, NOTE that i also value ALOT refactors and removing lines count from a file what do you think we should do next ?
 
 
 When you want me to modify code say EXACTLY find this in this file: and replace with EXACTLY this: with EXACT indentation i want you tlaways behave like this when you want me to modify code, let's begin and let's do the RIGHT things that will make the architecture better and improve massivly performance let's begin!

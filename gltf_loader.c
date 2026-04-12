@@ -884,5 +884,6 @@ void animate_scene(Scene* scene, float time) {
                 }
             }
         }
-    }
+        markMeshesSSBODirty(&context);
+        }
 }

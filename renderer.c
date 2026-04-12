@@ -593,8 +593,8 @@ void cube(vec3 origin, float size, Color color) {
 void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
     uint32_t first = vertex_count;
 
-    float* sin_lon = malloc((longDiv + 1) * sizeof(float));
-    float* cos_lon = malloc((longDiv + 1) * sizeof(float));
+    float sin_lon[longDiv + 1];
+    float cos_lon[longDiv + 1];
     for (int lon = 0; lon <= longDiv; ++lon) {
         float phi = (float)lon / longDiv * 2.0f * GLM_PI;
         sin_lon[lon] = sinf(phi);
@@ -639,8 +639,6 @@ void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
             vertex_full(p3, color, n3, (vec2){u2, v1}, t3);
         }
     }
-    free(sin_lon);
-    free(cos_lon);
     mat4 identity; glm_mat4_identity(identity);
     emit_draw(first, vertex_count - first, identity);
 }
@@ -1337,9 +1335,41 @@ void line_renderer_upload() {
 void line_renderer_draw(VkCommandBuffer cmd) {
     if (lineVertexCount == 0) return;
 
-    /* Lines use the PBR layout. We don't read SSBOs for lines, so no need
-       to set a specific pointer. Push meshIndex=-2 as a sentinel. */
-    pushConstants.meshIndex = -2; /* sentinel: line draw, ignore SSBO material */
+    // Lines must allocate a dedicated unlit slot so they don't inherit transforms/materials
+    // from gl_DrawID 0 (which would be the first mesh in the scene)
+    Material oldMat = currentMaterial;
+    Material lineMat;
+    memset(&lineMat, 0, sizeof(Material));
+    lineMat.baseColorFactor[0] = 1.0f;
+    lineMat.baseColorFactor[1] = 1.0f;
+    lineMat.baseColorFactor[2] = 1.0f;
+    lineMat.baseColorFactor[3] = 1.0f;
+    lineMat.isUnlit = 1;
+    lineMat.albedoIndex = -1;
+    lineMat.normalMapIndex = -1;
+    lineMat.metallicRoughIndex = -1;
+    lineMat.aoIndex = -1;
+    lineMat.emissiveIndex = -1;
+    set_material(&lineMat);
+
+    mat4 identity;
+    glm_mat4_identity(identity);
+    int slot = alloc_slot(identity);
+
+    // Write a dummy indirect command with 0 instances so the compute culler safely ignores it
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)context.srcIndirectBufferMapped;
+    cmds[slot].indexCount = 0;
+    cmds[slot].instanceCount = 0;
+    cmds[slot].firstIndex = 0;
+    cmds[slot].vertexOffset = 0;
+    cmds[slot].firstInstance = 0;
+
+    dynamic_draw_count++;
+    context.indirectDrawCount = (uint32_t)scene.meshes.count + dynamic_draw_count;
+
+    set_material(&oldMat);
+
+    pushConstants.meshIndex = slot;
     pushConstants.vertexBufferAddr = lineVertexBufferAddr[frame_index];
     vkCmdPushConstants(cmd, context.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

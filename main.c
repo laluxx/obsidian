@@ -460,8 +460,8 @@ int main() {
     Texture2D* texture4 = texture_pool_get(tex4);
     Texture2D* texture5 = texture_pool_get(tex5);
 
-    /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
-    load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // FIXME
+    load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS
+    /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // FIXME */
 
     /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene); // FIXME ? */
     /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
@@ -529,36 +529,15 @@ int main() {
 
 
         // 64x64 is smooth and highly detailed, generating 24,576 dynamic vertices per frame!
-        set_material(&rockMat);
-        sphere((vec3){0.0f, 0.0f, 30.0f}, 5.0f, 64, 64, WHITE);
-        reset_material();
+        /* set_material(&rockMat); */
+        /* sphere((vec3){0.0f, 0.0f, 30.0f}, 5.0f, 64, 64, WHITE); */
+        /* reset_material(); */
 
         // TODO
         /* set_material(&rockMat); */
         /* cube((vec3){0.0f, 0.0f, 10.0f}, 3.0f, WHITE); */
         /* reset_material(); */
 
-
-
-        // Rotate the cow
-        /* static float cow_rotation = 0.0f; */
-        /* cow_rotation += delta_time; */
-
-        /* glm_mat4_identity(scene.meshes.items[0].model); */
-        /* glm_rotate(scene.meshes.items[0].model, cow_rotation, (vec3){2.0f, 1.0f, 0.2f}); */
-
-
-        // For the first cube, we need to: translate THEN rotate
-        // So we need to rebuild the transform with translation first
-        mat4 offset_transform;
-        glm_mat4_identity(offset_transform);
-        glm_translate(offset_transform, (vec3){5.0f, 0.0f, 0.0f});
-
-        // Multiply: offset * animation = translate then rotate
-        mat4 temp;
-        glm_mat4_copy(scene.meshes.items[0].model, temp);
-        glm_mat4_mul(offset_transform, temp, scene.meshes.items[0].model);
-        markMeshesSSBODirty(&context);
 
         text(jetbrains, "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", 150, 50, WHITE);
 
