@@ -27,6 +27,11 @@
 /// Globals
 static uint64_t meshSSBOAddr[MAX_FRAMES_IN_FLIGHT];
 uint64_t megaVertexBufferAddr = 0;
+uint64_t megaMorphBufferAddr = 0;
+
+// Forward declaration for internal use by gltf_loader
+uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_t deltaCount);
+uint64_t morphWeightAddr[MAX_FRAMES_IN_FLIGHT] = {0};
 uint64_t jointSSBOAddr[MAX_FRAMES_IN_FLIGHT] = {0};
 VkBuffer jointSSBO[MAX_FRAMES_IN_FLIGHT] = {0};
 VkDeviceMemory jointSSBOMemory[MAX_FRAMES_IN_FLIGHT] = {0};
@@ -942,16 +947,15 @@ void createComputeCompactPipeline(VulkanContext* ctx)
     fprintf(stdout, "Compact pipeline: visibility → compacted indirect + count\n");
 }
 
-static void extractPlanes(mat4 m, vec4* planes) {
+static void extractPlanes(const mat4 m, vec4* planes) {
     for (int j = 0; j < 4; j++) {
         planes[0][j] = m[j][3] + m[j][0]; // Left
         planes[1][j] = m[j][3] - m[j][0]; // Right
         planes[2][j] = m[j][3] - m[j][1]; // Top
         planes[3][j] = m[j][3] + m[j][1]; // Bottom
-        planes[4][j] = m[j][2];           // Near
+        planes[4][j] = m[j][2];            // Near
         planes[5][j] = m[j][3] - m[j][2]; // Far
     }
-    // 1 division + 1 sqrt per plane instead of 4 divisions!
     for (int i = 0; i < 6; i++) {
         float lenSq = planes[i][0]*planes[i][0] + planes[i][1]*planes[i][1] + planes[i][2]*planes[i][2];
         if (lenSq > 0.0f) {
@@ -969,7 +973,7 @@ static void updateFrustumUBO(VulkanContext* ctx)
 
     uint32_t f = ctx->currentFrame;
     FrustumUBO ubo;
-    ubo.meshCount = ctx->indirectDrawCount;
+    ubo.meshCount    = ctx->indirectDrawCount;
     ubo.frustumCount = shadowsEnabled ? 5 : 1;
 
     // 1. Main Camera Frustum -> Index 0
@@ -1150,11 +1154,13 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
         VkRect2D sc = { { (int32_t)vp.x, (int32_t)vp.y }, { 1024, 1024 } };
         vkCmdSetScissor(cmd, 0, 1, &sc);
 
-        pushConstants.cascadeIndex = i;
-        pushConstants.meshIndex = -1;
-        pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
+        pushConstants.cascadeIndex     = i;
+        pushConstants.meshIndex        = -1;
+        pushConstants.meshBufferAddr   = meshSSBOAddr[ctx->currentFrame];
         pushConstants.vertexBufferAddr = megaVertexBufferAddr;
-        pushConstants.jointBufferAddr = jointSSBOAddr[ctx->currentFrame];
+        pushConstants.jointBufferAddr  = jointSSBOAddr[ctx->currentFrame];
+        pushConstants.morphBufferAddr  = megaMorphBufferAddr;
+        pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
         vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
         // Frustum index: cascade i → frustum (i+1). Count lives in drawCountBuffer.
@@ -1199,10 +1205,12 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
     };
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
 
-    pushConstants.meshIndex = -1;
-    pushConstants.meshBufferAddr = meshSSBOAddr[ctx->currentFrame];
+    pushConstants.meshIndex        = -1;
+    pushConstants.meshBufferAddr   = meshSSBOAddr[ctx->currentFrame];
     pushConstants.vertexBufferAddr = megaVertexBufferAddr;
-    pushConstants.jointBufferAddr = jointSSBOAddr[ctx->currentFrame];
+    pushConstants.jointBufferAddr  = jointSSBOAddr[ctx->currentFrame];
+    pushConstants.morphBufferAddr  = megaMorphBufferAddr;
+    pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
     vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
     if (ctx->indirectDrawCount > 0) {
@@ -1834,6 +1842,13 @@ void cleanup(VulkanContext* ctx)
     /* mega index buffer */
     CLEANUP_BUFFER(megaIndexBuffer, megaIndexBufferMemory);
 
+    /* morph buffers */
+    CLEANUP_BUFFER(megaMorphBuffer, megaMorphBufferMemory);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (ctx->morphWeightMapped[i]) { vkUnmapMemory(ctx->device, ctx->morphWeightMemory[i]); ctx->morphWeightMapped[i] = NULL; }
+        CLEANUP_BUFFER(morphWeightBuffer[i], morphWeightMemory[i]);
+    }
+
     /* dynamic buffers */
     if (ctx->dynamicStagingMapped) { vkUnmapMemory(ctx->device, ctx->dynamicStagingMemory); ctx->dynamicStagingMapped = NULL; }
     CLEANUP_BUFFER(dynamicStagingBuffer, dynamicStagingMemory);
@@ -1889,6 +1904,23 @@ void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size)
     megaVertexBufferAddr = vkGetBufferDeviceAddress(ctx->device, &info);
 
     fprintf(stdout, "Mega vertex buffer: %.1f MB (DEVICE_LOCAL, Address: %llx)\n", (double)size / (1024.0 * 1024.0), (unsigned long long)megaVertexBufferAddr);
+
+    // ── CREATE MEGA MORPH BUFFER ──
+    VkDeviceSize morphSize = 64 * 1024 * 1024; // 64 MB for Morph Deltas
+    ctx->megaMorphBufferSize = morphSize;
+    ctx->megaMorphBufferOffset = 0;
+    createBuffer(ctx, morphSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->megaMorphBuffer, &ctx->megaMorphBufferMemory);
+    VkBufferDeviceAddressInfo morphInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ctx->megaMorphBuffer };
+    megaMorphBufferAddr = vkGetBufferDeviceAddress(ctx->device, &morphInfo);
+
+    // ── CREATE MORPH WEIGHT BUFFER ──
+    VkDeviceSize weightSize = 1024 * 1024; // 1 MB for dynamic weights per frame
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        createBuffer(ctx, weightSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ctx->morphWeightBuffer[i], &ctx->morphWeightMemory[i]);
+        vkMapMemory(ctx->device, ctx->morphWeightMemory[i], 0, weightSize, 0, &ctx->morphWeightMapped[i]);
+        VkBufferDeviceAddressInfo weightInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ctx->morphWeightBuffer[i] };
+        morphWeightAddr[i] = vkGetBufferDeviceAddress(ctx->device, &weightInfo);
+    }
 }
 
 /* Upload vertices into the mega buffer, return the BASE VERTEX INDEX for DrawIndexed/Draw offset.
@@ -2001,6 +2033,53 @@ uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t verte
     uint32_t baseVertex = ctx->megaVertexBufferOffset;
     ctx->megaVertexBufferOffset += vertexCount;
     return baseVertex;
+}
+
+uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_t deltaCount)
+{
+    VkDeviceSize uploadSize = (VkDeviceSize)deltaCount * sizeof(MorphDelta);
+    VkDeviceSize dstOffset  = (VkDeviceSize)ctx->megaMorphBufferOffset * sizeof(MorphDelta);
+
+    if (dstOffset + uploadSize > ctx->megaMorphBufferSize) {
+        fprintf(stderr, "megaMorphBuffer overflow! Need %.1f MB, have %.1f MB remaining\n",
+                (double)uploadSize / (1024*1024),
+                (double)(ctx->megaMorphBufferSize - dstOffset) / (1024*1024));
+        return UINT32_MAX;
+    }
+
+    // Piggyback on the upload staging buffer if available
+    if (ctx->uploadStagingBuffer &&
+        ctx->uploadStagingOffset + uploadSize <= ctx->uploadStagingSize) {
+        memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, deltas, uploadSize);
+        // Direct copy to megaMorphBuffer (separate destination from vertex/index)
+        VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+        VkBufferCopy region = {
+            .srcOffset = ctx->uploadStagingOffset,
+            .dstOffset = dstOffset,
+            .size      = uploadSize
+        };
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaMorphBuffer, 1, &region);
+        endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+        ctx->uploadStagingOffset += uploadSize;
+    } else {
+        // Fallback: dedicated staging buffer
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        createBuffer(ctx, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     &stagingBuf, &stagingMem);
+        void* mapped;
+        vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+        memcpy(mapped, deltas, uploadSize);
+        vkUnmapMemory(ctx->device, stagingMem);
+        copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue,
+                   stagingBuf, ctx->megaMorphBuffer, uploadSize, 0, dstOffset);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+        vkFreeMemory(ctx->device, stagingMem, NULL);
+    }
+
+    uint32_t baseOffset = ctx->megaMorphBufferOffset;
+    ctx->megaMorphBufferOffset += deltaCount;
+    return baseOffset;
 }
 
 void createMegaIndexBuffer(VulkanContext* ctx, VkDeviceSize size)
@@ -2400,6 +2479,32 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
 /* Call once per frame from beginFrame - uploads SSBO only to currentFrame if dirty */
 void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
 {
+    /* Batch upload ALL morph weights in one contiguous memcpy.
+       The morphWeightBuffer is laid out as a flat float array where
+       each mesh's weights sit at mesh->morphWeightOffset.
+       We find the total float count from the highest offset+count. */
+    if (ctx->morphWeightMapped[ctx->currentFrame]) {
+        uint32_t totalWeightFloats = 0;
+        for (size_t i = 0; i < meshes->count; i++) {
+            Mesh* m = &meshes->items[i];
+            if (m->morph_data && m->morphCount > 0) {
+                uint32_t end = (uint32_t)m->morphWeightOffset + (uint32_t)m->morphCount;
+                if (end > totalWeightFloats) totalWeightFloats = end;
+            }
+        }
+        if (totalWeightFloats > 0) {
+            /* Single contiguous upload — one memcpy for ALL morph meshes */
+            float* dst = (float*)ctx->morphWeightMapped[ctx->currentFrame];
+            for (size_t i = 0; i < meshes->count; i++) {
+                Mesh* m = &meshes->items[i];
+                if (m->morph_data && m->morphCount > 0) {
+                    memcpy(dst + m->morphWeightOffset,
+                           m->morph_data->weights,
+                           (size_t)m->morphCount * sizeof(float));
+                }
+            }
+        }
+    }
     if (ctx->ssboFramesDirty == 0) return;
 
     uint32_t count = (uint32_t)meshes->count;
@@ -2455,6 +2560,9 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].aabbMin[3]   = 0.0f;
             dst[i].aabbMax[3]   = 0.0f;
             dst[i].jointOffset  = m->jointOffset;
+            dst[i].morphDeltaOffset = m->morphDeltaOffset;
+            dst[i].morphWeightOffset = m->morphWeightOffset;
+            dst[i].morphCount   = m->morphCount;
         }
 
         /* Clear the entire 64-bit block for this frame instantly */

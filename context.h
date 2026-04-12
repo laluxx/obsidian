@@ -110,6 +110,18 @@ typedef struct {
     VkDeviceSize     megaIndexBufferSize;
     uint32_t         megaIndexBufferOffset;
 
+    // ── mega morph buffer (static morph deltas, DEVICE_LOCAL) ──
+    VkBuffer         megaMorphBuffer;
+    VkDeviceMemory   megaMorphBufferMemory;
+    VkDeviceSize     megaMorphBufferSize;
+    uint32_t         megaMorphBufferOffset;
+
+    // ── morph weight buffer (dynamic per-frame, HOST_VISIBLE) ──
+    VkBuffer         morphWeightBuffer[MAX_FRAMES_IN_FLIGHT];
+    VkDeviceMemory   morphWeightMemory[MAX_FRAMES_IN_FLIGHT];
+    void* morphWeightMapped[MAX_FRAMES_IN_FLIGHT];
+    uint32_t         morphWeightOffset;
+
     // ── persistent upload staging buffer ─────────────────────────────
     // One large HOST_VISIBLE buffer used for all mesh uploads.
     // Batched regions are flushed in a single vkCmdCopyBuffer call.
@@ -181,7 +193,7 @@ typedef struct {
     void* lightingUBOMapped[MAX_FRAMES_IN_FLIGHT];
     /* LightingData is defined in renderer.h — use a raw byte buffer here
        to break the circular dependency. Cast to LightingData* at use sites. */
-    uint8_t               lightingDataRaw[1024];  // expanded for shadow matrices
+    _Alignas(16) uint8_t  lightingDataRaw[1024];  // expanded for shadow matrices
 
     // ── SSBO: per-mesh data (model matrix, texture index, flags) ─────
     VkBuffer              meshSSBO[MAX_FRAMES_IN_FLIGHT];

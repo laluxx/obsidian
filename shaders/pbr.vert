@@ -37,9 +37,9 @@ struct MeshData {
 
     // AAA: Must perfectly mirror renderer.h MeshGPUData layout
     int   jointOffset;
-    int   _pad0;
-    int   _pad1;
-    int   _pad2;
+    int   morphDeltaOffset;
+    int   morphWeightOffset;
+    int   morphCount;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
@@ -62,6 +62,19 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Jo
     PackedJoint joints[];
 };
 
+struct MorphDelta {
+    vec4 pos_delta;
+    vec4 normal_delta;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MorphBuffer {
+    MorphDelta deltas[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer WeightBuffer {
+    float weights[];
+};
+
 mat4 unpackJoint(PackedJoint j) {
     return mat4(
         vec4(j.row0.x, j.row1.x, j.row2.x, 0.0),
@@ -72,13 +85,15 @@ mat4 unpackJoint(PackedJoint j) {
 }
 
 layout(push_constant) uniform PC {
-    int  ambientOcclusionEnabled;
-    int  iblEnabled;
-    int  meshIndex;
-    int  cascadeIndex;
-    MeshBuffer meshData;
+    int          ambientOcclusionEnabled;
+    int          iblEnabled;
+    int          meshIndex;
+    int          cascadeIndex;
+    MeshBuffer   meshData;
     VertexBuffer vertexData;
-    JointBuffer jointData;
+    JointBuffer  jointData;
+    MorphBuffer  morphData;
+    WeightBuffer weightData;
 } pc;
 
 layout(location = 0) out vec3 outWorldPos;
@@ -111,6 +126,19 @@ void main() {
         floatBitsToUint(pc.vertexData.data[base+30]),
         floatBitsToUint(pc.vertexData.data[base+31])
     );
+
+    // ── HARDWARE MORPH TARGETS ──
+    // No branch per target — multiply-accumulate with zero weight costs
+    // 2 FMAs and is faster than a warp-divergent branch on modern GPUs.
+    if (m.morphCount > 0) {
+        uint vertBase = uint(m.morphDeltaOffset) + gl_VertexIndex * uint(m.morphCount);
+        for (int i = 0; i < m.morphCount; i++) {
+            float w = pc.weightData.weights[m.morphWeightOffset + i];
+            uint deltaIdx = vertBase + uint(i);
+            inPos    += pc.morphData.deltas[deltaIdx].pos_delta.xyz    * w;
+            inNormal += pc.morphData.deltas[deltaIdx].normal_delta.xyz * w;
+        }
+    }
 
     // ── HARDWARE SKELETAL SKINNING ──
     mat4 skinMat = mat4(1.0);

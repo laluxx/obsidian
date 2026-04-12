@@ -104,13 +104,15 @@ int32_t texture_pool_add(VulkanContext* context, const char* filename);
 Texture2D* texture_pool_get(int32_t index);
 
 typedef struct {
-    int ambientOcclusionEnabled;
-    int iblEnabled;
-    int meshIndex;           // -1 = indirect (gl_BaseInstanceARB), >=0 = direct
-    int cascadeIndex;
-    uint64_t meshBufferAddr;   // THE MAGIC GPU POINTER
-    uint64_t vertexBufferAddr; // BDA POINTER FOR VERTEX PULLING
-    uint64_t jointBufferAddr;  // AAA BDA POINTER FOR HARDWARE SKELETAL SKINNING
+    int      ambientOcclusionEnabled;
+    int      iblEnabled;
+    int      meshIndex;           // -1 = indirect (gl_BaseInstanceARB), >=0 = direct
+    int      cascadeIndex;
+    uint64_t meshBufferAddr;      // BDA: MeshGPUData array
+    uint64_t vertexBufferAddr;    // BDA: mega vertex buffer
+    uint64_t jointBufferAddr;     // BDA: global joint SSBO
+    uint64_t morphBufferAddr;     // BDA: megaMorphBuffer (permanent deltas)
+    uint64_t morphWeightAddr;     // BDA: per-frame morph weights
 } PushConstants;
 
 /* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */
@@ -143,24 +145,26 @@ typedef struct {
     vec4  aabbMax;
 
     int   jointOffset;        // -1 = no skinning, >=0 = offset into Global Joint SSBO
-    int   _pad[3];            // Padding to ensure MeshGPUData is exactly 256 bytes
+    int   morphDeltaOffset;   // Offset into Mega Morph Buffer
+    int   morphWeightOffset;  // Offset into dynamic Morph Weight Buffer
+    int   morphCount;         // Number of active morph targets
 } MeshGPUData;
 
 extern PushConstants pushConstants;
 
 typedef struct {
-    vec3* positions;     // Morph target position deltas
-    vec3* normals;       // Morph target normal deltas (optional)
-    size_t vertex_count;
-} MorphTarget;
+    vec4 pos_delta;    // xyz = delta, w = unused (alignment)
+    vec4 normal_delta; // xyz = delta, w = unused (alignment)
+} MorphDelta;
 
+// Upload morph deltas permanently to megaMorphBuffer.
+// Returns the base delta index (mesh.morphDeltaOffset). UINT32_MAX = overflow.
+uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_t deltaCount);
+
+// We no longer need CPU-side morph targets, they will live permanently on the GPU!
 typedef struct {
-    MorphTarget* targets;
+    float* weights;           // Current weights for each target (uploaded dynamically)
     size_t target_count;
-    float* weights;           // Current weights for each target
-    Vertex* base_vertices;    // Original vertices before morphing
-    size_t base_vertex_count;
-    uint32_t* index_map;      // Maps expanded vertex index to original vertex
 } MorphData;
 
 typedef struct {
@@ -187,6 +191,10 @@ typedef struct {
 
     int  jointOffset;   // Offset into the global joint matrix array
     int  jointCount;    // Number of bones affecting this mesh
+
+    int  morphDeltaOffset;  // Base offset in megaMorphBuffer
+    int  morphWeightOffset; // Base offset in morphWeightBuffer
+    int  morphCount;        // Number of morph targets
 
     /* PBR material texture slots (bindless indices, -1 = not present) */
     int32_t  normalMapIndex;      // tangent-space normal map

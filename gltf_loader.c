@@ -102,56 +102,78 @@ bool load_gltf_textures(cgltf_data* data, const char* base_path) {
     return true;
 }
 
-// Load morph target data from a primitive
-static MorphData* load_morph_targets(cgltf_primitive* prim) {
+// GPU Morph Upload: pack all target deltas into megaMorphBuffer.
+// Layout: for each vertex V, for each target T: delta[V * target_count + T]
+// This is the transposed (vertex-major) layout the vertex shader expects.
+static MorphData* load_morph_targets_gpu(cgltf_primitive* prim, uint32_t vertex_count, uint32_t* out_delta_offset) {
     if (prim->targets_count == 0) {
+        *out_delta_offset = 0;
         return NULL;
     }
 
-    printf("  Loading %zu morph targets\n", prim->targets_count);
+    size_t target_count = prim->targets_count;
+    printf("  Uploading %zu morph targets to megaMorphBuffer (vertex-major layout)\n", target_count);
 
-    MorphData* morph_data = malloc(sizeof(MorphData));
-    morph_data->target_count = prim->targets_count;
-    morph_data->targets = malloc(prim->targets_count * sizeof(MorphTarget));
-    morph_data->weights = calloc(prim->targets_count, sizeof(float));
+    // Collect position and normal delta accessors for each target
+    cgltf_accessor** pos_accessors = calloc(target_count, sizeof(cgltf_accessor*));
+    cgltf_accessor** nrm_accessors = calloc(target_count, sizeof(cgltf_accessor*));
 
-    for (size_t t = 0; t < prim->targets_count; t++) {
+    for (size_t t = 0; t < target_count; t++) {
         cgltf_morph_target* target = &prim->targets[t];
-        MorphTarget* morph_target = &morph_data->targets[t];
-
-        morph_target->positions = NULL;
-        morph_target->normals = NULL;
-        morph_target->vertex_count = 0;
-
-        // Find position and normal delta attributes
         for (size_t a = 0; a < target->attributes_count; a++) {
             cgltf_attribute* attr = &target->attributes[a];
-
-            if (attr->type == cgltf_attribute_type_position) {
-                size_t count = attr->data->count;
-                morph_target->vertex_count = count;
-                morph_target->positions = malloc(count * sizeof(vec3));
-
-                for (size_t v = 0; v < count; v++) {
-                    cgltf_accessor_read_float(attr->data, v, morph_target->positions[v], 3);
-                }
-                printf("    Target %zu: %zu position deltas\n", t, count);
-            } else if (attr->type == cgltf_attribute_type_normal) {
-                size_t count = attr->data->count;
-                morph_target->normals = malloc(count * sizeof(vec3));
-
-                for (size_t v = 0; v < count; v++) {
-                    cgltf_accessor_read_float(attr->data, v, morph_target->normals[v], 3);
-                }
-                printf("    Target %zu: %zu normal deltas\n", t, count);
-            }
+            if (attr->type == cgltf_attribute_type_position) pos_accessors[t] = attr->data;
+            else if (attr->type == cgltf_attribute_type_normal) nrm_accessors[t] = attr->data;
         }
+        if (!nrm_accessors[t])
+            printf("    Target %zu: WARNING - No normal deltas, will use zero\n", t);
+    }
 
-        if (!morph_target->normals) {
-            printf("    Target %zu: WARNING - No normal deltas provided!\n", t);
+    // Allocate CPU staging: vertex-major interleaved MorphDelta[vertex_count * target_count]
+    size_t total_deltas = (size_t)vertex_count * target_count;
+    MorphDelta* staging = calloc(total_deltas, sizeof(MorphDelta));
+
+    for (uint32_t v = 0; v < vertex_count; v++) {
+        for (size_t t = 0; t < target_count; t++) {
+            uint32_t idx = v * (uint32_t)target_count + (uint32_t)t;
+            if (pos_accessors[t] && v < pos_accessors[t]->count) {
+                float p[3];
+                cgltf_accessor_read_float(pos_accessors[t], v, p, 3);
+                staging[idx].pos_delta[0] = p[0];
+                staging[idx].pos_delta[1] = p[1];
+                staging[idx].pos_delta[2] = p[2];
+                staging[idx].pos_delta[3] = 0.0f;
+            }
+            if (nrm_accessors[t] && v < nrm_accessors[t]->count) {
+                float n[3];
+                cgltf_accessor_read_float(nrm_accessors[t], v, n, 3);
+                staging[idx].normal_delta[0] = n[0];
+                staging[idx].normal_delta[1] = n[1];
+                staging[idx].normal_delta[2] = n[2];
+                staging[idx].normal_delta[3] = 0.0f;
+            }
         }
     }
 
+    free(pos_accessors);
+    free(nrm_accessors);
+
+    // Upload to megaMorphBuffer via staging
+    uint32_t base_delta = megaMorphBufferAllocate(&context, staging, (uint32_t)total_deltas);
+    free(staging);
+
+    if (base_delta == UINT32_MAX) {
+        fprintf(stderr, "  ERROR: megaMorphBuffer overflow during morph upload!\n");
+        *out_delta_offset = 0;
+        return NULL;
+    }
+
+    *out_delta_offset = base_delta;
+    printf("  -> Packed %zu deltas at megaMorphBuffer offset %u\n", total_deltas, base_delta);
+
+    MorphData* morph_data = malloc(sizeof(MorphData));
+    morph_data->target_count = target_count;
+    morph_data->weights = calloc(target_count, sizeof(float));
     return morph_data;
 }
 
@@ -424,52 +446,24 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
     }
 
-    // Load morph targets BEFORE expanding indices
-    mesh.morph_data = load_morph_targets(prim);
+    /* For ALL meshes: vertices and indices stay separate — no CPU expansion ever.
+       Morph targets are uploaded directly to megaMorphBuffer in vertex-major layout.
+       The vertex shader handles all blending on GPU with zero CPU work per frame.   */
+    Vertex*   final_vertices    = vertices;
+    uint32_t* final_indices     = indices;
+    size_t    final_vertex_count = vertex_count;
+    size_t    final_index_count  = index_count;
+    indices = NULL; // ownership transferred
 
-    /* For static meshes: keep vertices and indices separate — no expansion.
-       For morph-target meshes: expansion is still required so the CPU can
-       remap per-frame without an index fetch.                               */
-    Vertex*   final_vertices    = NULL;
-    uint32_t* final_indices     = NULL;
-    size_t    final_vertex_count = 0;
-    size_t    final_index_count  = 0;
-
+    // Upload morph deltas to GPU — must happen BEFORE megaBufferAllocate
+    // so morphDeltaOffset is set correctly before SSBO is written.
+    uint32_t delta_offset = 0;
+    mesh.morph_data = load_morph_targets_gpu(prim, (uint32_t)vertex_count, &delta_offset);
     if (mesh.morph_data) {
-        /* morph path: expand as before so mesh_update_morph works */
-        if (indices) {
-            final_vertex_count = index_count;
-            final_vertices = malloc(final_vertex_count * sizeof(Vertex));
-            mesh.morph_data->index_map = malloc(index_count * sizeof(uint32_t));
-
-            for (size_t i = 0; i < index_count; i++) {
-                final_vertices[i] = vertices[indices[i]];
-                mesh.morph_data->index_map[i] = indices[i];
-            }
-            mesh.morph_data->base_vertices = malloc(vertex_count * sizeof(Vertex));
-            memcpy(mesh.morph_data->base_vertices, vertices, vertex_count * sizeof(Vertex));
-            mesh.morph_data->base_vertex_count = vertex_count;
-
-            free(vertices);
-            free(indices);
-            indices = NULL;
-        } else {
-            final_vertices     = vertices;
-            final_vertex_count = vertex_count;
-            mesh.morph_data->base_vertices = malloc(vertex_count * sizeof(Vertex));
-            memcpy(mesh.morph_data->base_vertices, vertices, vertex_count * sizeof(Vertex));
-            mesh.morph_data->base_vertex_count = vertex_count;
-            mesh.morph_data->index_map = NULL;
-        }
-        final_index_count = 0; /* morph meshes are non-indexed draws */
-        final_indices     = NULL;
-    } else {
-        /* static path: keep raw arrays, no expansion */
-        final_vertices     = vertices;
-        final_vertex_count = vertex_count;
-        final_indices      = indices;   /* may be NULL for non-indexed primitives */
-        final_index_count  = index_count;
-        indices = NULL; /* ownership transferred */
+        mesh.morphDeltaOffset  = (int)delta_offset;
+        mesh.morphCount        = (int)mesh.morph_data->target_count;
+        // morphWeightOffset is assigned globally after all meshes are loaded
+        // (done in load_gltf via the morph weight offset packer below)
     }
 
     mesh.vertexCount = (uint32_t)(mesh.morph_data ? final_vertex_count : final_vertex_count);
@@ -520,24 +514,21 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     mesh.megaBaseIndex      = UINT32_MAX;
     mesh.dynamicBaseVertex  = UINT32_MAX;
 
-    if (mesh.morph_data) {
-        /* dynamic mesh: uses linear indices and gets appended to dynamic staging buffer every frame */
-        mesh.megaBaseVertex = UINT32_MAX;
-        mesh.megaBaseIndex  = 0;
-        final_index_count   = final_vertex_count;
-        mesh.dynamicBaseVertex = append_vertices(final_vertices, final_vertex_count);
-    } else {
-        /* static mesh: vertices into mega vertex buffer, indices into mega index buffer */
-        mesh.megaBaseVertex = megaBufferAllocate(&context,
-                                                 final_vertices,
-                                                 (uint32_t)final_vertex_count);
-        if (final_indices && final_index_count > 0) {
-            mesh.megaBaseIndex = megaIndexBufferAllocate(&context,
-                                                         final_indices,
-                                                         (uint32_t)final_index_count);
-        }
-        free(final_indices);
+    // AAA: ALL meshes (even morphed ones) are now 100% STATIC in the mega vertex buffer!
+    mesh.megaBaseVertex = megaBufferAllocate(&context,
+                                             final_vertices,
+                                             (uint32_t)final_vertex_count);
+    if (final_indices && final_index_count > 0) {
+        mesh.megaBaseIndex = megaIndexBufferAllocate(&context,
+                                                     final_indices,
+                                                     (uint32_t)final_index_count);
     }
+
+    // We keep the morph_data pointer alive strictly to extract target counts later in renderer.c
+    if (mesh.morph_data) {
+        mesh.dynamicBaseVertex = UINT32_MAX; // No more dynamic CPU uploads!
+    }
+    free(final_indices);
 
     free(final_vertices);
 
@@ -779,6 +770,22 @@ bool load_gltf(const char* filepath, Scene* scene) {
     destroyUploadStagingBuffer(&context);
 
     instance->mesh_count = scene->meshes.count - instance->mesh_start_index;
+
+    // Assign morphWeightOffset: pack each morph mesh into a unique slice of morphWeightBuffer.
+    // The buffer is 1MB = 262144 floats, more than enough for all meshes combined.
+    {
+        static int global_morph_weight_counter = 0;
+        size_t end = instance->mesh_start_index + instance->mesh_count;
+        for (size_t i = instance->mesh_start_index; i < end; i++) {
+            Mesh* m = &scene->meshes.items[i];
+            if (m->morph_data && m->morphCount > 0) {
+                m->morphWeightOffset = global_morph_weight_counter;
+                global_morph_weight_counter += m->morphCount;
+                printf("  Mesh '%s': morphWeightOffset=%d, morphCount=%d\n",
+                       m->name ? m->name : "?", m->morphWeightOffset, m->morphCount);
+            }
+        }
+    }
 
     // AAA: Map glTF skins to our Global Joint SSBO
     if (data->skins_count > 0) {
@@ -1035,28 +1042,14 @@ void animate_scene(Scene* scene, float time) {
         }
     }
 
-    // Guarantee that ALL dynamic meshes (even un-animated ones) get their
-    // geometry appended to the current frame's dynamic staging buffer.
-    VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
-    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)((uint8_t*)context.srcIndirectBufferMapped + (context.currentFrame * drawSize));
-
-    for (size_t i = 0; i < scene->meshes.count; i++) {
-        Mesh* mesh = &scene->meshes.items[i];
-        if (mesh->morph_data) {
-            mesh_update_morph(mesh);
-
-            // Sync the indirect draw command for this dynamic mesh so it actually renders!
-            // Morph targets have indexCount = 0, so we use our linear index buffer starting from 0.
-            cmds[i].indexCount = mesh->vertexCount;
-            cmds[i].instanceCount = 1;
-            cmds[i].firstIndex = 0;
-            cmds[i].vertexOffset = context.megaVertexBufferOffset + (context.currentFrame * MAX_DYNAMIC_VERTICES) + mesh->dynamicBaseVertex;
-            cmds[i].firstInstance = i; // CRITICAL: Ensures SSBO material matches!
+    /* Only dirty meshes whose transforms or morph weights actually changed.
+       This avoids a full SSBO re-upload for static meshes every frame.    */
+    for (size_t inst2 = 0; inst2 < scene->gltf_instance_count; inst2++) {
+        GLTFInstance* gi = &scene->gltf_instances[inst2];
+        if (!gi->animations) continue;
+        size_t end = gi->mesh_start_index + gi->mesh_count;
+        for (size_t m = gi->mesh_start_index; m < end; m++) {
+            markMeshDirty(&context, (uint32_t)m);
         }
     }
-
-    // CRITICAL: We dynamically recalculated the AABBs for the morph targets on the CPU,
-    // and updated the hierarchical matrices.
-    // We MUST flag the SSBO as dirty every frame so the GPU gets the new data!
-    markMeshesSSBODirty(&context);
 }

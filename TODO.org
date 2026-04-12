@@ -5,18 +5,17 @@ One thing to keep an eye on: the magic constant (16384 + 4096) appears four time
 
 * TODO Correctness [1/2]
 - [X] The lines should not use PBR (Fixed via dedicated unlit SSBO slot and 0-instance indirect command).
-- [ ] SimpleMorph lighting is broken (Investigate normal recalculation or missing normal deltas in the glTF).
 
 * TODO Features [0/1]
 - [ ] Parallax Occlusion Mapping - Togglable per material.
 
-* TODO Performance [1/7]
+* TODO Performance [2/7]
 - [ ] Serialize pipelines so it opens istantly
 - [ ] As I get closer to a texture the FPS drops drastically (Investigate mipmap generation, texture cache thrashing, or lack of anisotropic filtering limits).
 - [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they hit the rasterizer.
 - [ ] GPU Compute Animator - Move rigid node hierarchy and keyframe interpolation entirely to a Compute Shader to eliminate CPU bottlenecks.
 - [ ] Split MeshGPUData SSBO - Separate static material data (textures, PBR factors) from dynamic transform data (`model`, `normalMatrix`) to save PCIe bandwidth during animations.
-- [ ] Hardware Skinning - Compute bone matrices and deform vertices in the vertex shader for skeletal meshes.
+- [X] Hardware Skinning - Compute bone matrices and deform vertices in the vertex shader for skeletal meshes.
 - [X] Unify immediate renderer into mega buffer - Dynamic geometry uses a resetting region; static meshes sit permanently behind it.
 
 * TODO Editor [0/2]
