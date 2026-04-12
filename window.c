@@ -86,14 +86,16 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
         context.graphicsQueue
     );
 
-    imm_ssbo_init(&context);
-
-    // 128 MB for static mesh geometry (Sponza + typical scenes fit in ~30–60 MB)
-    createMegaVertexBuffer(&context, 128ULL * 1024 * 1024);
-    // 64 MB for indices — much smaller than vertices (4 bytes vs 32 bytes per entry)
-    createMegaIndexBuffer(&context, 64ULL * 1024 * 1024);
-    // 32 MB dynamic budget: 2D UI + lines + morph-target meshes
-    createDynamicBuffers(&context, 32ULL * 1024 * 1024);
+    // 256 MB to comfortably fit static meshes PLUS 2 frames of 1M dynamic vertices
+    createMegaVertexBuffer(&context, 256ULL * 1024 * 1024);
+    // 128 MB for indices
+    createMegaIndexBuffer(&context, 128ULL * 1024 * 1024);
+    // 256 MB dynamic staging budget:
+    // 2 frames * 1M vertices * 80 bytes = ~160 MB.
+    // The remaining ~96 MB headroom safely absorbs massive UI spikes,
+    // dense morph-target animations, and prevents OOM fragmentation
+    // before we implement f16/u8 vertex compression.
+    createDynamicBuffers(&context, 256ULL * 1024 * 1024);
 
     createMeshSSBO(&context, 4096);
     createIndirectBuffer(&context, 4096);
@@ -160,10 +162,8 @@ void beginFrame() {
     delta_time = current_frame - last_frame;
     last_frame = current_frame;
 
-    /* Reset ALL per-frame CPU render state first — before any user draw calls.
-       imm_ssbo_begin_frame resets immSlotCount, immDrawCount, vertex_count,
-       lineVertexCount, and sets the correct frame index.                      */
-    imm_ssbo_begin_frame(&context, context.currentFrame);
+    /* Reset ALL per-frame CPU render state first — before any user draw calls. */
+    begin_frame();
     renderer2D_clear();
 
     animate_scene(&scene, current_frame);
@@ -196,7 +196,6 @@ void endFrame() {
     }
 
     // Upload all geometry to GPU (slots/counts were set in beginFrame)
-    renderer_upload();
     line_renderer_upload();
     renderer2D_upload();
 

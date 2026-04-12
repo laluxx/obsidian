@@ -48,11 +48,11 @@ typedef struct {
     uint32_t _pad[3];    // align to 16 bytes
 } Vertex;
 
-void imm_emit(uint32_t firstVertex, uint32_t count, mat4 model);
+#define MAX_DYNAMIC_MESHES 4096
+#define MAX_DYNAMIC_VERTICES (1024 * 1024)
 
-/* Append vertices directly into the immediate vertex buffer.
-   Returns the firstVertex index, or UINT32_MAX on overflow.  */
-uint32_t imm_append_vertices(const Vertex* verts, uint32_t count);
+void emit_draw(uint32_t firstVertex, uint32_t count, mat4 model);
+uint32_t append_vertices(const Vertex* verts, uint32_t count);
 
 typedef struct {
     vec2 pos;
@@ -107,8 +107,6 @@ typedef struct {
     uint64_t meshBufferAddr; // THE MAGIC GPU POINTER
     uint64_t vertexBufferAddr; // BDA POINTER FOR VERTEX PULLING
 } PushConstants;
-
-#define IMM_SSBO_MAX_ENTRIES 16384
 
 /* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */
 typedef struct {
@@ -208,11 +206,9 @@ void renderer_init(VkDevice device,
                    VkCommandPool commandPool,
                    VkQueue graphicsQueue);
 void renderer_shutdown(void);
-void renderer_upload(void);
-void renderer_draw(VkCommandBuffer cmd);
 void renderer_clear(void);
-uint32_t imm_get_vertex_count(void);
-Vertex* imm_get_vertices(void);
+uint32_t get_dynamic_vertex_count(void);
+Vertex* get_dynamic_vertices(void);
 
 /* ── Immediate-mode material API ─────────────────────────────────────
    Call imm_set_material() before any draw call to set PBR properties.
@@ -233,22 +229,14 @@ typedef struct {
     float displacementScale;
 } Material;
 
-void imm_set_material(const Material* mat);
-void imm_reset_material(void);  /* resets to PBR defaults */
-Material imm_load_pbr_material(const char* albedoPath, const char* normalPath, const char* roughnessPath);
-Material imm_load_pbr_material_dir(const char* dirPath);
-int  imm_alloc_slot(mat4 model); /* internal — allocates SSBO slot, returns index */
-/* Emit a draw using an already-allocated slot (avoids one slot per glyph) */
-void imm_emit_with_slot(uint32_t firstVertex, uint32_t count, int slot);
+void set_material(const Material* mat);
+void reset_material(void);
+Material load_pbr_material(const char* albedoPath, const char* normalPath, const char* roughnessPath);
+Material load_pbr_material_dir(const char* dirPath);
+int alloc_slot(mat4 model);
+void emit_draw_with_slot(uint32_t firstVertex, uint32_t count, int slot);
 
-
-/* Immediate SSBO — one per frame, rebuilt every frame */
-void imm_ssbo_init(VulkanContext* ctx);
-void imm_ssbo_shutdown(VulkanContext* ctx);
-void imm_ssbo_begin_frame(VulkanContext* ctx, uint32_t frameIndex);
-void imm_ssbo_flush(VulkanContext* ctx, uint32_t frameIndex);
-VkDescriptorSet imm_ssbo_get_set(uint32_t frameIndex);
-VkDescriptorSetLayout imm_ssbo_get_layout(void);
+void begin_frame(void);
 
 // Primitives
 void vertex_with_normal(vec3 pos, Color color, vec3 normal);

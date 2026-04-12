@@ -462,12 +462,12 @@ void text3D(Font* font, const char* text_str, vec3 position, float size, Color c
         .aoIndex            = -1,
         .emissiveIndex      = -1,
     };
-    imm_set_material(&mat);
+    set_material(&mat);
 
     /* ── allocate ONE SSBO slot for the entire string ────────────────── */
     mat4 identity;
     glm_mat4_identity(identity);
-    int shared_slot = imm_alloc_slot(identity);
+    int shared_slot = alloc_slot(identity);
 
     /* ── pass 2: build all glyph quads into a contiguous vertex range ── */
     float x = -totalWidth * 0.5f;
@@ -509,7 +509,7 @@ void text3D(Font* font, const char* text_str, vec3 position, float size, Color c
                 {.pos={xpos+cw,   ypos+ch_h, zpos}, .color={color.r,color.g,color.b,color.a}, .normal={0,0,1}, .texCoord={u2,v1}, .tangent={1,0,0,1}},
             };
 
-            uint32_t first = imm_append_vertices(verts, 6);
+            uint32_t first = append_vertices(verts, 6);
             if (first != UINT32_MAX) {
                 if (string_first == UINT32_MAX) string_first = first;
                 string_count += 6;
@@ -521,9 +521,9 @@ void text3D(Font* font, const char* text_str, vec3 position, float size, Color c
 
     /* ── one draw call for the whole string ─────────────────────────── */
     if (string_first != UINT32_MAX && string_count > 0)
-        imm_emit_with_slot(string_first, string_count, shared_slot);
+        emit_draw_with_slot(string_first, string_count, shared_slot);
 
-    imm_reset_material();
+    reset_material();
 }
 
 static double last_fps_time = 0.0;

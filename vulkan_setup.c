@@ -618,10 +618,10 @@ void createAllPipelineLayouts(VulkanContext* ctx)
     ctx->pipelineLayout2D    = ctx->pipelineLayoutTextured2D;
 
     VkDescriptorSetLayout pbr3DSets[4] = {
-        ctx->descriptorSetLayout,   /* set=0 UBO     */
-        ctx->bindlessSetLayout,     /* set=1 bindless*/
-        ctx->bindlessSetLayout,     /* set=2 alias   (never bound, satisfies layout) */
-        ctx->lightingSetLayout,     /* set=3 lighting*/
+        ctx->descriptorSetLayout,   // set=0 UBO
+        ctx->bindlessSetLayout,     // set=1 bindless
+        ctx->bindlessSetLayout,     // set=2 alias   (never bound, satisfies layout)
+        ctx->lightingSetLayout,     // set=3 lighting
     };
     vkCreatePipelineLayout(ctx->device,
         &(VkPipelineLayoutCreateInfo){
@@ -691,7 +691,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
 
     VkPipelineRasterizationStateCreateInfo rastShadow = makeRasterizer(1.0f);
     rastShadow.depthBiasEnable = VK_TRUE;
-    // AAA Standard: Cull front faces for shadows. Halves geometry load,
+    // Cull front faces for shadows. Halves geometry load,
     // natively eliminates Peter Panning, and skyrockets FPS.
     rastShadow.cullMode = VK_CULL_MODE_FRONT_BIT;
 
@@ -946,7 +946,7 @@ static void extractPlanes(mat4 m, vec4* planes) {
         planes[4][j] = m[j][2];           // Near
         planes[5][j] = m[j][3] - m[j][2]; // Far
     }
-    // MANIACAL SPEED: 1 division + 1 sqrt per plane instead of 4 divisions!
+    // 1 division + 1 sqrt per plane instead of 4 divisions!
     for (int i = 0; i < 6; i++) {
         float lenSq = planes[i][0]*planes[i][0] + planes[i][1]*planes[i][1] + planes[i][2]*planes[i][2];
         if (lenSq > 0.0f) {
@@ -1050,7 +1050,7 @@ static void update_cascade_matrices(VulkanContext* ctx) {
     CTX_LIGHTING(ctx)->sun.direction[1] = lightDir[1];
     CTX_LIGHTING(ctx)->sun.direction[2] = lightDir[2];
 
-    // AAA Tight Cascades: Cascade 0 is now extremely dense for objects close to the camera!
+    // Tight Cascades: Cascade 0 is now extremely dense for objects close to the camera!
     float cascadeSplits[5] = { 0.1f, 5.0f, 15.0f, 50.0f, 200.0f };
     for(int i=0; i<4; i++) CTX_LIGHTING(ctx)->cascadeSplits[i] = cascadeSplits[i+1];
 
@@ -1094,7 +1094,6 @@ static void update_cascade_matrices(VulkanContext* ctx) {
         float zFar = radius * 10.0f;
         glm_ortho(-radius, radius, -radius, radius, zNear, zFar, lightProj);
 
-        // PERFECT VULKAN Z-CLIPPING FIX
         // Converts OpenGL [-1, 1] Z to Vulkan [0, 1] Z.
         // This stops shadows from randomly disappearing when objects are behind you!
         lightProj[1][1] *= -1.0f;
@@ -1206,8 +1205,6 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
                                       ctx->indirectDrawCount,
                                       sizeof(VkDrawIndexedIndirectCommand));
     }
-
-    renderer_draw(cmd);
 
     if (lineVertexCount > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
@@ -1444,6 +1441,24 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
         fprintf(stderr, "Failed to begin command buffer\n"); exit(EXIT_FAILURE);
     }
 
+    // --- UPLOAD DYNAMIC GEOMETRY TO MEGABUFFER ---
+    uint32_t dynVertCount = get_dynamic_vertex_count();
+    if (dynVertCount > 0) {
+        VkBufferCopy copyRegion = {
+            .srcOffset = (ctx->currentFrame * MAX_DYNAMIC_VERTICES) * sizeof(Vertex),
+            .dstOffset = (ctx->megaVertexBufferOffset + (ctx->currentFrame * MAX_DYNAMIC_VERTICES)) * sizeof(Vertex),
+            .size = dynVertCount * sizeof(Vertex)
+        };
+        vkCmdCopyBuffer(cmd, ctx->dynamicStagingBuffer, ctx->megaVertexBuffer, 1, &copyRegion);
+
+        VkMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+        };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
+    }
+
     if (!ctx->renderGraph) {
         ctx->renderGraph = rg_create();
     }
@@ -1529,7 +1544,7 @@ void drawFrame(VulkanContext* ctx)
     ctx->imagesInFlight[imageIndex] = fence;
 
     updateUniformBuffer(ctx);
-    imm_ssbo_begin_frame(ctx, ctx->currentFrame);
+    begin_frame();
     recordCommandBuffer(ctx, imageIndex);
 
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
@@ -1682,7 +1697,6 @@ void cleanup(VulkanContext* ctx)
     vkDeviceWaitIdle(ctx->device);
 
     renderer_shutdown();
-    imm_ssbo_shutdown(&context);
     line_renderer_shutdown();
     meshes_destroy(ctx->device, &scene.meshes);
     texture_pool_cleanup(ctx);
@@ -1976,6 +1990,13 @@ void createMegaIndexBuffer(VulkanContext* ctx, VkDeviceSize size)
     ctx->megaIndexBufferSize   = size;
     ctx->megaIndexBufferOffset = 0;
     createBuffer(ctx, size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ctx->megaIndexBuffer, &ctx->megaIndexBufferMemory);
+
+    uint32_t* linearIndices = malloc(1048576 * sizeof(uint32_t));
+    for (uint32_t i = 0; i < 1048576; i++) linearIndices[i] = i;
+    megaIndexBufferAllocate(ctx, linearIndices, 1048576);
+    free(linearIndices);
+    flushUploadStagingBuffer(ctx);
+
     fprintf(stdout, "Mega index buffer: %.1f MB (DEVICE_LOCAL)\n", (double)size / (1024.0 * 1024.0));
 }
 
@@ -2057,7 +2078,6 @@ void createBindlessDescriptorLayout(VulkanContext* ctx)
         .binding            = 0,
         .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount    = MAX_TEXTURES,
-        // AAA FIX: Allow the Vertex Shader to sample the bindless array for displacement!
         .stageFlags         = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .pImmutableSamplers = NULL
     };
@@ -2250,6 +2270,7 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
 
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
 {
+    maxMeshes = 16384 + 4096;
     VkDeviceSize drawSize  = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize visSize   = maxMeshes * 5 * sizeof(uint32_t);
     VkDeviceSize countSize = 5 * sizeof(uint32_t);
@@ -2310,9 +2331,7 @@ void markMeshDirty(VulkanContext* ctx, uint32_t meshIndex)
 void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
 {
     uint32_t count = (uint32_t)meshes->count;
-    ctx->indirectDrawCount = count;
 
-    /* Rebuild indirect buffer every time (it's HOST_VISIBLE, cheap to write) */
     VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)ctx->srcIndirectBufferMapped;
 
     for (uint32_t i = 0; i < count; i++) {
@@ -2334,7 +2353,6 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
         cmds[i].firstInstance = i;
     }
 
-    /* Mark all in-flight frames as needing SSBO upload */
     markMeshesSSBODirty(ctx);
 }
 
@@ -2352,12 +2370,12 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
     for (uint32_t w = 0; w < words; w++) {
         uint64_t mask = (ctx->meshDirtyBits == NULL) ? ~0ULL : ctx->meshDirtyBits[w * MAX_FRAMES_IN_FLIGHT + f];
 
-        /* HARDWARE INTRINSIC MANIA:
+        /* HARDWARE INTRINSIC:
            Skip up to 64 clean meshes in a single CPU cycle.
            Zero branching on empty space. */
         while (mask) {
-            int bitIdx = __builtin_ctzll(mask); /* Count trailing zeros = index of lowest set bit */
-            mask &= mask - 1;                   /* Clear the lowest set bit */
+            int bitIdx = __builtin_ctzll(mask); // Count trailing zeros = index of lowest set bit
+            mask &= mask - 1;                   // Clear the lowest set bit
 
             uint32_t i = w * 64 + bitIdx;
             if (i >= count) break;
@@ -2632,9 +2650,9 @@ bool loadIBL(VulkanContext* ctx, const char* hdr_path) {
 
 void destroyIBL(VulkanContext* ctx)
 {
-    if (iblSkyboxView)   { vkDestroyImageView(ctx->device, iblSkyboxView,   NULL); iblSkyboxView   = VK_NULL_HANDLE; }
-    if (iblSkyboxImage)  { vkDestroyImage    (ctx->device, iblSkyboxImage,  NULL); iblSkyboxImage  = VK_NULL_HANDLE; }
-    if (iblSkyboxMemory) { vkFreeMemory      (ctx->device, iblSkyboxMemory, NULL); iblSkyboxMemory = VK_NULL_HANDLE; }
+    if (iblSkyboxView)            { vkDestroyImageView(ctx->device, iblSkyboxView,            NULL); iblSkyboxView            = VK_NULL_HANDLE; }
+    if (iblSkyboxImage)           { vkDestroyImage    (ctx->device, iblSkyboxImage,           NULL); iblSkyboxImage           = VK_NULL_HANDLE; }
+    if (iblSkyboxMemory)          { vkFreeMemory      (ctx->device, iblSkyboxMemory,          NULL); iblSkyboxMemory          = VK_NULL_HANDLE; }
     if (ctx->iblIrradianceView)   { vkDestroyImageView(ctx->device, ctx->iblIrradianceView,   NULL); ctx->iblIrradianceView   = VK_NULL_HANDLE; }
     if (ctx->iblIrradianceImage)  { vkDestroyImage    (ctx->device, ctx->iblIrradianceImage,  NULL); ctx->iblIrradianceImage  = VK_NULL_HANDLE; }
     if (ctx->iblIrradianceMemory) { vkFreeMemory      (ctx->device, ctx->iblIrradianceMemory, NULL); ctx->iblIrradianceMemory = VK_NULL_HANDLE; }

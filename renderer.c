@@ -55,17 +55,16 @@ Texture2D* texture_pool_get(int32_t index) {
 }
 
 // --- 3D Renderer ---
-static Vertex vertices[MAX_VERTICES];
 static uint32_t vertex_count = 0;
+static uint32_t dynamic_draw_count = 0;
+static uint32_t frame_index = 0;
 
-typedef struct { uint32_t firstVertex; uint32_t count; int slot; } ImmDrawCall;
-static ImmDrawCall immDrawList[IMM_SSBO_MAX_ENTRIES];
-static uint32_t   immDrawCount = 0;
-
-uint32_t imm_append_vertices(const Vertex* verts, uint32_t count) {
-    if (vertex_count + count > MAX_VERTICES) return UINT32_MAX;
+uint32_t append_vertices(const Vertex* verts, uint32_t count) {
+    if (vertex_count + count > MAX_DYNAMIC_VERTICES) return UINT32_MAX;
     uint32_t first = vertex_count;
-    memcpy(&vertices[first], verts, count * sizeof(Vertex));
+    Vertex* dynVerts = (Vertex*)context.dynamicStagingMapped;
+    uint32_t offset = (frame_index * MAX_DYNAMIC_VERTICES) + first;
+    memcpy(&dynVerts[offset], verts, count * sizeof(Vertex));
     vertex_count += count;
     return first;
 }
@@ -75,23 +74,9 @@ static VkPhysicalDevice physicalDevice;
 static VkCommandPool commandPool;
 static VkQueue graphicsQueue;
 
-static VkBuffer         vertexBuffer[MAX_FRAMES_IN_FLIGHT];
-static VkDeviceMemory   vertexBufferMemory[MAX_FRAMES_IN_FLIGHT];
-static void* vertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
-static uint64_t         vertexBufferAddr[MAX_FRAMES_IN_FLIGHT];
-static uint32_t         imm_frame_index = 0;
-
 PushConstants pushConstants;
 
-/* ── Immediate-mode SSBO ─────────────────────────────────────────────────── */
-static VkBuffer             immSSBOBuffer[MAX_FRAMES_IN_FLIGHT];
-static VkDeviceMemory       immSSBOMemory[MAX_FRAMES_IN_FLIGHT];
-static MeshGPUData* immSSBOMapped[MAX_FRAMES_IN_FLIGHT];
-static uint64_t             immSSBOAddr[MAX_FRAMES_IN_FLIGHT]; // Physical pointers!
-static uint32_t             immSlotCount;   /* slots used this frame        */
-static uint32_t             immFrameIndex;  /* set at begin_frame           */
-
-static Material immCurrentMaterial = {
+static Material currentMaterial = {
     .baseColorFactor    = {1.0f, 1.0f, 1.0f, 1.0f},
     .metallicFactor     = 0.0f,
     .roughnessFactor    = 0.5f,
@@ -105,10 +90,10 @@ static Material immCurrentMaterial = {
     .emissiveIndex      = -1,
 };
 
-void imm_set_material(const Material* mat) { immCurrentMaterial = *mat; }
+void set_material(const Material* mat) { currentMaterial = *mat; }
 
-void imm_reset_material(void) {
-    immCurrentMaterial = (Material){
+void reset_material(void) {
+    currentMaterial = (Material){
         .baseColorFactor    = {1.0f, 1.0f, 1.0f, 1.0f},
         .metallicFactor     = 0.0f,
         .roughnessFactor    = 0.5f,
@@ -290,10 +275,10 @@ static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const cha
     return -1;
 }
 
-Material imm_load_pbr_material(const char* albedoPath, const char* normalPath, const char* roughnessPath) {
+Material load_pbr_material(const char* albedoPath, const char* normalPath, const char* roughnessPath) {
     Material mat;
-    imm_reset_material();
-    mat = immCurrentMaterial;
+    reset_material();
+    mat = currentMaterial;
 
     int32_t pIdx;
     if (albedoPath) {
@@ -320,7 +305,7 @@ Material imm_load_pbr_material(const char* albedoPath, const char* normalPath, c
     return mat;
 }
 
-Material imm_load_pbr_material_dir(const char* dirPath) {
+Material load_pbr_material_dir(const char* dirPath) {
     DIR *dir;
     struct dirent *ent;
     char albedoPath[512] = {0};
@@ -353,8 +338,8 @@ Material imm_load_pbr_material_dir(const char* dirPath) {
     }
 
     Material mat;
-    imm_reset_material();
-    mat = immCurrentMaterial;
+    reset_material();
+    mat = currentMaterial;
 
     int32_t pIdx;
     if (albedoPath[0]) {
@@ -394,90 +379,41 @@ Material imm_load_pbr_material_dir(const char* dirPath) {
     return mat;
 }
 
-int imm_alloc_slot(mat4 model) {
-    if (immSlotCount >= IMM_SSBO_MAX_ENTRIES) {
-        static uint32_t overflow_count = 0;
-        if (overflow_count++ == 0)
-            fprintf(stderr, "imm SSBO overflow: renderer_clear() not called each frame, "
-                            "or more than %d draw calls issued\n", IMM_SSBO_MAX_ENTRIES);
-        return 0;
-    }
-    int slot = (int)immSlotCount++;
-    MeshGPUData* d = &immSSBOMapped[immFrameIndex][slot];
+int alloc_slot(mat4 model) {
+    if (dynamic_draw_count >= MAX_DYNAMIC_MESHES) return 0;
+    uint32_t staticCount = (uint32_t)scene.meshes.count;
+    int slot = staticCount + dynamic_draw_count;
+
+    MeshGPUData* d = &((MeshGPUData*)context.meshSSBOMapped[frame_index])[slot];
     glm_mat4_copy(model, d->model);
     mat4 inv; glm_mat4_inv(model, inv); glm_mat4_transpose(inv);
     glm_mat4_copy(inv, d->normalMatrix);
-    glm_vec4_copy(immCurrentMaterial.baseColorFactor, d->baseColorFactor);
-    d->metallicFactor     = immCurrentMaterial.metallicFactor;
-    d->roughnessFactor    = immCurrentMaterial.roughnessFactor;
-    d->emissiveStrength   = immCurrentMaterial.emissiveStrength;
-    d->isUnlit            = immCurrentMaterial.isUnlit;
+    glm_vec4_copy(currentMaterial.baseColorFactor, d->baseColorFactor);
+    d->metallicFactor     = currentMaterial.metallicFactor;
+    d->roughnessFactor    = currentMaterial.roughnessFactor;
+    d->emissiveStrength   = currentMaterial.emissiveStrength;
+    d->isUnlit            = currentMaterial.isUnlit;
     d->alphaMode          = 0;
     d->alphaCutoff        = 0.5f;
-    glm_vec3_copy(immCurrentMaterial.emissiveFactor, d->emissiveFactor);
-    d->albedoIndex        = immCurrentMaterial.albedoIndex;
-    d->normalMapIndex     = immCurrentMaterial.normalMapIndex;
-    d->metallicRoughIndex = immCurrentMaterial.metallicRoughIndex;
-    d->aoIndex            = immCurrentMaterial.aoIndex;
-    d->emissiveIndex      = immCurrentMaterial.emissiveIndex;
-    d->displacementIndex  = immCurrentMaterial.displacementIndex;
-    d->displacementScale  = immCurrentMaterial.displacementScale;
-    /* AABB not used for culling on imm draws */
+    glm_vec3_copy(currentMaterial.emissiveFactor, d->emissiveFactor);
+    d->albedoIndex        = currentMaterial.albedoIndex;
+    d->normalMapIndex     = currentMaterial.normalMapIndex;
+    d->metallicRoughIndex = currentMaterial.metallicRoughIndex;
+    d->aoIndex            = currentMaterial.aoIndex;
+    d->emissiveIndex      = currentMaterial.emissiveIndex;
+    d->displacementIndex  = currentMaterial.displacementIndex;
+    d->displacementScale  = currentMaterial.displacementScale;
     glm_vec3_copy((vec3){-1e10f,-1e10f,-1e10f}, d->aabbMin);
     glm_vec3_copy((vec3){ 1e10f, 1e10f, 1e10f}, d->aabbMax);
     return slot;
 }
 
-void imm_ssbo_init(VulkanContext* ctx) {
-    VkDeviceSize size = IMM_SSBO_MAX_ENTRIES * sizeof(MeshGPUData);
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkBufferCreateInfo bci = {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(ctx->device, &bci, NULL, &immSSBOBuffer[i]);
-        VkMemoryRequirements mr;
-        vkGetBufferMemoryRequirements(ctx->device, immSSBOBuffer[i], &mr);
-        VkMemoryAllocateFlagsInfo immFlagsInfo = {
-            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
-            .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
-        };
-        VkMemoryAllocateInfo ai = {
-            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .pNext           = &immFlagsInfo,
-            .allocationSize  = mr.size,
-            .memoryTypeIndex = findMemoryType(ctx->physicalDevice, mr.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        vkAllocateMemory(ctx->device, &ai, NULL, &immSSBOMemory[i]);
-        vkBindBufferMemory(ctx->device, immSSBOBuffer[i], immSSBOMemory[i], 0);
-        vkMapMemory(ctx->device, immSSBOMemory[i], 0, size, 0, (void**)&immSSBOMapped[i]);
-
-        VkBufferDeviceAddressInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = immSSBOBuffer[i] };
-        immSSBOAddr[i] = vkGetBufferDeviceAddress(ctx->device, &info);
-    }
-    fprintf(stdout, "Immediate SSBO (Physical Pointers): %.1f MB x%d frames\n",
-            (double)(IMM_SSBO_MAX_ENTRIES * sizeof(MeshGPUData)) / (1024*1024),
-            MAX_FRAMES_IN_FLIGHT);
-}
-
-void imm_ssbo_shutdown(VulkanContext* ctx) {
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (immSSBOMapped[i])   { vkUnmapMemory(ctx->device, immSSBOMemory[i]); immSSBOMapped[i] = NULL; }
-        if (immSSBOBuffer[i])   { vkDestroyBuffer(ctx->device, immSSBOBuffer[i], NULL); immSSBOBuffer[i] = VK_NULL_HANDLE; }
-        if (immSSBOMemory[i])   { vkFreeMemory(ctx->device, immSSBOMemory[i], NULL);    immSSBOMemory[i] = VK_NULL_HANDLE; }
-    }
-}
-
-void imm_ssbo_begin_frame(VulkanContext* ctx, uint32_t frameIndex) {
-    (void)ctx;
-    immFrameIndex   = frameIndex;
-    imm_frame_index = frameIndex;
-    immSlotCount    = 0;
-    immDrawCount    = 0;
-    vertex_count    = 0;
+void begin_frame(void) {
+    frame_index = context.currentFrame;
+    dynamic_draw_count = 0;
+    vertex_count = 0;
     lineVertexCount = 0;
+    context.indirectDrawCount = (uint32_t)scene.meshes.count;
 }
 
 static void create_mapped_buffer(VkDevice dev, VkPhysicalDevice physDev, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer* buffer, VkDeviceMemory* memory, void** mapped) {
@@ -513,52 +449,30 @@ void renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool
     physicalDevice = physDev;
     commandPool = cmdPool;
     graphicsQueue = queue;
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        create_mapped_buffer(device, physicalDevice, sizeof(vertices),
-                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                             &vertexBuffer[i], &vertexBufferMemory[i], &vertexBufferMapped[i]);
-        VkBufferDeviceAddressInfo info = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = vertexBuffer[i] };
-        vertexBufferAddr[i] = vkGetBufferDeviceAddress(device, &info);
-    }
+}
+
+static inline void emit_vertex(vec3 pos, vec4 color, vec3 normal, vec2 uv, vec4 tangent) {
+    if (vertex_count >= MAX_DYNAMIC_VERTICES) return;
+    Vertex* dynVerts = (Vertex*)context.dynamicStagingMapped;
+    uint32_t offset = (frame_index * MAX_DYNAMIC_VERTICES) + vertex_count;
+    glm_vec3_copy(pos, dynVerts[offset].pos);
+    glm_vec4_copy(color, dynVerts[offset].color);
+    glm_vec3_copy(normal, dynVerts[offset].normal);
+    glm_vec2_copy(uv, dynVerts[offset].texCoord);
+    glm_vec4_copy(tangent, dynVerts[offset].tangent);
+    vertex_count++;
 }
 
 void vertex_full(vec3 pos, Color color, vec3 normal, vec2 uv, vec4 tangent) {
-    if (vertex_count >= MAX_VERTICES) return;
-    glm_vec3_copy(pos, vertices[vertex_count].pos);
-    vertices[vertex_count].color[0] = color.r;
-    vertices[vertex_count].color[1] = color.g;
-    vertices[vertex_count].color[2] = color.b;
-    vertices[vertex_count].color[3] = color.a;
-    glm_vec3_copy(normal, vertices[vertex_count].normal);
-    glm_vec2_copy(uv, vertices[vertex_count].texCoord);
-    glm_vec4_copy(tangent, vertices[vertex_count].tangent);
-    vertex_count++;
+    emit_vertex(pos, (vec4){color.r, color.g, color.b, color.a}, normal, uv, tangent);
 }
 
 void vertex_with_normal(vec3 pos, Color color, vec3 normal) {
-    if (vertex_count >= MAX_VERTICES) return;
-    glm_vec3_copy(pos, vertices[vertex_count].pos);
-
-    // Direct assignment instead of glm_vec4_copy
-    vertices[vertex_count].color[0] = color.r;
-    vertices[vertex_count].color[1] = color.g;
-    vertices[vertex_count].color[2] = color.b;
-    vertices[vertex_count].color[3] = color.a;
-
-    glm_vec3_copy(normal, vertices[vertex_count].normal);
-    glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord);
-    glm_vec4_copy((vec4){1.0f, 0.0f, 0.0f, 1.0f}, vertices[vertex_count].tangent);
-    vertex_count++;
+    emit_vertex(pos, (vec4){color.r, color.g, color.b, color.a}, normal, (vec2){0.0f, 0.0f}, (vec4){1.0f, 0.0f, 0.0f, 1.0f});
 }
 
 void vertex(vec3 pos, vec4 color) {
-    if (vertex_count >= MAX_VERTICES) return;
-    glm_vec3_copy(pos, vertices[vertex_count].pos);
-    glm_vec4_copy(color, vertices[vertex_count].color);
-    glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, vertices[vertex_count].normal); // Default normal
-    glm_vec2_copy((vec2){0.0f, 0.0f}, vertices[vertex_count].texCoord); // Default tex coords
-    glm_vec4_copy((vec4){1.0f, 0.0f, 0.0f, 1.0f}, vertices[vertex_count].tangent);
-    vertex_count++;
+    emit_vertex(pos, color, (vec3){0.0f, 1.0f, 0.0f}, (vec2){0.0f, 0.0f}, (vec4){1.0f, 0.0f, 0.0f, 1.0f});
 }
 
 void triangle(vec3 a, vec3 b, vec3 c, Color color) {
@@ -572,7 +486,7 @@ void triangle(vec3 a, vec3 b, vec3 c, Color color) {
     vertex_with_normal(b, color, normal);
     vertex_with_normal(c, color, normal);
     mat4 identity; glm_mat4_identity(identity);
-    imm_emit(first, 3, identity);
+    emit_draw(first, 3, identity);
 }
 
 void plane(vec3 origin, vec2 size, Color color) {
@@ -592,7 +506,7 @@ void plane(vec3 origin, vec2 size, Color color) {
     vertex_with_normal(c, color, normal);
     vertex_with_normal(d, color, normal);
     mat4 identity; glm_mat4_identity(identity);
-    imm_emit(first, 6, identity);
+    emit_draw(first, 6, identity);
 }
 
 //    h-------g
@@ -672,75 +586,9 @@ void cube(vec3 origin, float size, Color color) {
     vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nbo, (vec2){0.0f,0.0f}, tbo);
 
     mat4 identity; glm_mat4_identity(identity);
-    imm_emit(first, 36, identity);
+    emit_draw(first, 36, identity);
 }
 
-/* void cube(vec3 origin, float size, Color color) { */
-/*     uint32_t first = vertex_count; */
-/*     float s = size / 2.0f; */
-/*     vec3 a, b, c, d, e, f, g, h; */
-
-/*     glm_vec3_add(origin, (vec3){-s, -s, -s}, a); */
-/*     glm_vec3_add(origin, (vec3){+s, -s, -s}, b); */
-/*     glm_vec3_add(origin, (vec3){+s, +s, -s}, c); */
-/*     glm_vec3_add(origin, (vec3){-s, +s, -s}, d); */
-/*     glm_vec3_add(origin, (vec3){-s, -s, +s}, e); */
-/*     glm_vec3_add(origin, (vec3){+s, -s, +s}, f); */
-/*     glm_vec3_add(origin, (vec3){+s, +s, +s}, g); */
-/*     glm_vec3_add(origin, (vec3){-s, +s, +s}, h); */
-
-/*     vec3 n_front = {0.0f, 0.0f, -1.0f}; */
-/*     vertex_with_normal(a, color, n_front); */
-/*     vertex_with_normal(b, color, n_front); */
-/*     vertex_with_normal(c, color, n_front); */
-/*     vertex_with_normal(a, color, n_front); */
-/*     vertex_with_normal(c, color, n_front); */
-/*     vertex_with_normal(d, color, n_front); */
-
-/*     vec3 n_back = {0.0f, 0.0f, 1.0f}; */
-/*     vertex_with_normal(e, color, n_back); */
-/*     vertex_with_normal(h, color, n_back); */
-/*     vertex_with_normal(g, color, n_back); */
-/*     vertex_with_normal(e, color, n_back); */
-/*     vertex_with_normal(g, color, n_back); */
-/*     vertex_with_normal(f, color, n_back); */
-
-/*     vec3 n_left = {-1.0f, 0.0f, 0.0f}; */
-/*     vertex_with_normal(a, color, n_left); */
-/*     vertex_with_normal(d, color, n_left); */
-/*     vertex_with_normal(h, color, n_left); */
-/*     vertex_with_normal(a, color, n_left); */
-/*     vertex_with_normal(h, color, n_left); */
-/*     vertex_with_normal(e, color, n_left); */
-
-/*     vec3 n_right = {1.0f, 0.0f, 0.0f}; */
-/*     vertex_with_normal(b, color, n_right); */
-/*     vertex_with_normal(f, color, n_right); */
-/*     vertex_with_normal(g, color, n_right); */
-/*     vertex_with_normal(b, color, n_right); */
-/*     vertex_with_normal(g, color, n_right); */
-/*     vertex_with_normal(c, color, n_right); */
-
-/*     vec3 n_top = {0.0f, 1.0f, 0.0f}; */
-/*     vertex_with_normal(d, color, n_top); */
-/*     vertex_with_normal(c, color, n_top); */
-/*     vertex_with_normal(g, color, n_top); */
-/*     vertex_with_normal(d, color, n_top); */
-/*     vertex_with_normal(g, color, n_top); */
-/*     vertex_with_normal(h, color, n_top); */
-
-/*     vec3 n_bottom = {0.0f, -1.0f, 0.0f}; */
-/*     vertex_with_normal(a, color, n_bottom); */
-/*     vertex_with_normal(e, color, n_bottom); */
-/*     vertex_with_normal(f, color, n_bottom); */
-/*     vertex_with_normal(a, color, n_bottom); */
-/*     vertex_with_normal(f, color, n_bottom); */
-/*     vertex_with_normal(b, color, n_bottom); */
-/*     mat4 identity; glm_mat4_identity(identity); */
-/*     imm_emit(first, 36, identity); */
-/* } */
-
-// TODO It should be shader based so it's cheaper and higher quality
 // High-performance Sphere with UVs, Tangents, and pre-calculated trig
 void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
     uint32_t first = vertex_count;
@@ -794,65 +642,43 @@ void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
     free(sin_lon);
     free(cos_lon);
     mat4 identity; glm_mat4_identity(identity);
-    imm_emit(first, vertex_count - first, identity);
+    emit_draw(first, vertex_count - first, identity);
 }
 
 /* Call after filling vertices for one primitive — records the draw call */
-void imm_emit(uint32_t firstVertex, uint32_t count, mat4 model) {
-    if (immDrawCount >= IMM_SSBO_MAX_ENTRIES) return;
-    int slot = imm_alloc_slot(model);
-    immDrawList[immDrawCount++] = (ImmDrawCall){ firstVertex, count, slot };
+void emit_draw(uint32_t firstVertex, uint32_t count, mat4 model) {
+    if (dynamic_draw_count >= MAX_DYNAMIC_MESHES) return;
+    int slot = alloc_slot(model);
+    emit_draw_with_slot(firstVertex, count, slot);
 }
 
-/* Emit with a pre-allocated slot — use when batching multiple primitives
-   under the same transform/material to save SSBO entries (e.g. text3D).  */
-void imm_emit_with_slot(uint32_t firstVertex, uint32_t count, int slot) {
-    if (immDrawCount >= IMM_SSBO_MAX_ENTRIES) return;
-    immDrawList[immDrawCount++] = (ImmDrawCall){ firstVertex, count, slot };
-}
+void emit_draw_with_slot(uint32_t firstVertex, uint32_t count, int slot) {
+    if (dynamic_draw_count >= MAX_DYNAMIC_MESHES) return;
 
-void renderer_upload() {
-    if (vertex_count == 0) return;
-    memcpy(vertexBufferMapped[imm_frame_index], vertices, vertex_count * sizeof(Vertex));
-}
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)context.srcIndirectBufferMapped;
+    cmds[slot].indexCount = count;
+    cmds[slot].instanceCount = 1;
+    cmds[slot].firstIndex = 0;
+    uint32_t dynamicBase = context.megaVertexBufferOffset + (frame_index * MAX_DYNAMIC_VERTICES);
+    cmds[slot].vertexOffset = dynamicBase + firstVertex;
+    cmds[slot].firstInstance = slot;
 
-void renderer_draw(VkCommandBuffer cmd) {
-    if (immDrawCount == 0) return;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipeline);
-    for (uint32_t i = 0; i < immDrawCount; i++) {
-        pushConstants.meshBufferAddr = immSSBOAddr[imm_frame_index];
-        pushConstants.vertexBufferAddr = vertexBufferAddr[imm_frame_index];
-        pushConstants.meshIndex = immDrawList[i].slot;
-        vkCmdPushConstants(cmd, context.pipelineLayout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pushConstants);
-        vkCmdDraw(cmd, immDrawList[i].count, 1, immDrawList[i].firstVertex, 0);
-    }
-}
-
-/* Draw a range of vertices with a specific imm SSBO slot */
-void renderer_draw_single(VkCommandBuffer cmd, uint32_t firstVertex,
-                          uint32_t count, int slot) {
-    pushConstants.meshBufferAddr = immSSBOAddr[imm_frame_index];
-    pushConstants.vertexBufferAddr = vertexBufferAddr[imm_frame_index];
-    pushConstants.meshIndex = slot;
-    vkCmdPushConstants(cmd, context.pipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(PushConstants), &pushConstants);
-    vkCmdDraw(cmd, count, 1, firstVertex, 0);
+    dynamic_draw_count++;
+    context.indirectDrawCount = (uint32_t)scene.meshes.count + dynamic_draw_count;
 }
 
 void renderer_clear() {
     vertex_count  = 0;
-    immDrawCount  = 0;
+    dynamic_draw_count = 0;
 }
 
-uint32_t imm_get_vertex_count(void) {
+uint32_t get_dynamic_vertex_count(void) {
     return vertex_count;
 }
 
-Vertex* imm_get_vertices(void) {
-    return vertices;
+Vertex* get_dynamic_vertices(void) {
+    Vertex* dynVerts = (Vertex*)context.dynamicStagingMapped;
+    return &dynVerts[frame_index * MAX_DYNAMIC_VERTICES];
 }
 
 void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
@@ -1178,7 +1004,7 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
 
 void renderer2D_upload() {
     if (vertexCount2D == 0) return;
-    memcpy(context.vertexBuffer2DMapped[imm_frame_index], vertices2D, vertexCount2D * sizeof(Vertex2D));
+    memcpy(context.vertexBuffer2DMapped[frame_index], vertices2D, vertexCount2D * sizeof(Vertex2D));
 }
 
 void renderer2D_draw(VkCommandBuffer cmd) {
@@ -1201,7 +1027,7 @@ void renderer2D_draw(VkCommandBuffer cmd) {
                        VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mat4), &projection);
 
     VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D[imm_frame_index], offsets);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D[frame_index], offsets);
     vkCmdDraw(cmd, vertexCount2D, 1, 0, 0);
 }
 
@@ -1457,10 +1283,6 @@ void destroy_texture(VulkanContext* context, Texture2D* texture) {
 /// 3D TEXTURES
 
 void renderer_shutdown() {
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (vertexBuffer[i])       { vkDestroyBuffer(device, vertexBuffer[i],       NULL); vertexBuffer[i]       = VK_NULL_HANDLE; }
-        if (vertexBufferMemory[i]) { vkFreeMemory   (device, vertexBufferMemory[i], NULL); vertexBufferMemory[i] = VK_NULL_HANDLE; }
-    }
 }
 
 /// LINE
@@ -1509,7 +1331,7 @@ void line(vec3 start, vec3 end, Color color) {
 
 void line_renderer_upload() {
     if (lineVertexCount == 0) return;
-    memcpy(lineVertexBufferMapped[imm_frame_index], lineVertices, lineVertexCount * sizeof(Vertex));
+    memcpy(lineVertexBufferMapped[frame_index], lineVertices, lineVertexCount * sizeof(Vertex));
 }
 
 void line_renderer_draw(VkCommandBuffer cmd) {
@@ -1518,7 +1340,7 @@ void line_renderer_draw(VkCommandBuffer cmd) {
     /* Lines use the PBR layout. We don't read SSBOs for lines, so no need
        to set a specific pointer. Push meshIndex=-2 as a sentinel. */
     pushConstants.meshIndex = -2; /* sentinel: line draw, ignore SSBO material */
-    pushConstants.vertexBufferAddr = lineVertexBufferAddr[imm_frame_index];
+    pushConstants.vertexBufferAddr = lineVertexBufferAddr[frame_index];
     vkCmdPushConstants(cmd, context.pipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);

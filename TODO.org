@@ -1,0 +1,66 @@
+#+TITLE: Obsidian Engine TODO
+
+* TODO Correctness [0/1]
+- [ ] The lines should not use PBR
+
+* TODO Features [0/1]
+- [ ] Parallax Occlusion Mapping - Togglable per material
+
+* TODO Performance [0/2]
+- [ ] Unify immediate renderer into mega buffer - Kill the split, one draw call for everything. Dynamic geometry (moves/changes every frame) uses a dynamic region at the front of the mega buffer that resets each frame via a simple offset reset, no alloc/free. Static meshes sit permanently behind it and are never re-uploaded.
+- [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they ever hit the rasterizer
+
+* TODO Editor [0/1]
+- [ ] Mesh picking and highlighting
+- [ ] Inspector (runtime property editor) click mesh, edit PBR properties live with sliders. Ray vs AABB, writes directly into mapped SSBO memory, zero sync needed.
+
+* TODO Gltf 2.0 [7/15]
+- [X] Static meshes
+- [X] PBR materials (albedo, normal, metallic/roughness, AO, emissive)
+- [X] Morph targets
+- [X] Alpha mask / blend
+- [X] Unlit materials
+- [X] Multiple texture coordinates
+- [X] Embedded and external textures
+- [ ] Skeletal animation / rigs (CesiumMan, RiggedFigure, Fox)
+- [ ] Animation channels (BoxAnimated)
+- [ ] Several complex materials (CarbonFibre, MosquitoInAmber)
+- [ ] Material variants (MaterialsVariantsShoe)
+- [ ] Texture transform extension (KHR_texture_transform)
+- [ ] Sparse accessors
+- [ ] Cameras defined in glTF file
+- [ ] Lights extension (KHR_lights_punctual)
+# TODO Make sure those are right and add them all..
+
+
+
+
+as you can see i heavily optimized everything and this is renderer.h and renderer.c What do you think are the next big wins in perfomance, i want to optimize EVERYTHING LIKE A MANIAC i really want to go in the rabbithole and squeeze every possible frame out of this engine it has to spend 0 time in the CPU it has to be AAA level it has to be super fast i want to focus on optimizations, NOTE that i also value ALOT refactors and removing lines count from a file what do you think we should do next ?
+
+
+When you want me to modify code say EXACTLY find this in this file: and replace with EXACTLY this: with EXACT indentation i want you tlaways behave like this when you want me to modify code, let's begin and let's do the RIGHT things that will make the architecture better and improve massivly performance let's begin!
+
+
+
+
+
+Target 2: The Descriptor Set Massacre to fully eliminate UBOs and delete hundreds of lines of C code!
+
+The Benefit for YOU:
+
+    Simplified GPU Culling: In your cull.comp shader, you are currently writing out VkDrawIndexedIndirectCommand. With PVP, you can stop storing vertexOffset entirely. The shader just needs firstIndex and the base address of the vertex buffer (which you already pass as meshSSBOAddr via push constants!).
+
+    Attribute Compression: Your Vertex struct (shown in fill3DVertexInput) uses 64 bytes per vertex (pos=12, color=16, normal=12, uv=8, tangent=16).
+        With PVP, you can switch to f16vec2 for UVs and u8vec4 for Normals/Tangents.
+        Result: You can likely fit a vertex in 32 bytes (down from 64).
+        Impact: That megaVertexBuffer (e.g., 1GB) becomes 500MB. Memory bandwidth (often the main limiter in forward+ PBR) is cut in half.
+
+
+
+
+
+;; TODO
+
+- Meshlet culling in the cull shader
+cull.comp operates per-mesh AABB. Splitting meshes into meshlets (64-triangle clusters) and culling per-meshlet gives you ~4-8x more culling granularity. Combined with VK_EXT_mesh_shader this is the path to truly AAA draw call budgets.
+

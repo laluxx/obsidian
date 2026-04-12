@@ -493,17 +493,9 @@ int main() {
     loadIBL(&context, "./assets/hdr/monochrome_studio_02_4k.hdr");
 
     // Load our beautiful 4K rock material automatically!
-    Material rockMat = imm_load_pbr_material_dir("./assets/textures/rock_wall_10_4k.blend/textures");
+    Material rockMat = load_pbr_material_dir("./assets/textures/rock_wall_10_4k.blend/textures");
 
-    // --- PRE-CALCULATE 256x256 SPHERE GEOMETRY ---
-    // Instead of doing massive sin/cos math 130,000 times a frame, we do it ONCE here!
-    renderer_clear(); // Reset immediate buffer
-    sphere((vec3){0.0f, 0.0f, 0.0f}, 5.0f, 256, 256, WHITE); // Generate at origin
-
-    uint32_t cached_sphere_count = imm_get_vertex_count();
-    Vertex* cached_sphere_verts = malloc(cached_sphere_count * sizeof(Vertex));
-    memcpy(cached_sphere_verts, imm_get_vertices(), cached_sphere_count * sizeof(Vertex));
-    renderer_clear(); // Reset for actual frame rendering
+    renderer_clear(); // Ensure clean state before loop
 
     registerKeyCallback(key_callback);
 
@@ -536,21 +528,17 @@ int main() {
         /* triangle(v3, center, v0, YELLOW); */
 
 
-        /* imm_set_material(&rockMat); */
+        // 64x64 is smooth and highly detailed, generating 24,576 dynamic vertices per frame!
+        set_material(&rockMat);
+        sphere((vec3){0.0f, 0.0f, 30.0f}, 5.0f, 64, 64, WHITE);
+        reset_material();
 
-        /* // Fast Cached Render! 65,000 vertices, physical displacement, 144+ FPS. */
-        /* mat4 sphere_model; */
-        /* glm_mat4_identity(sphere_model); */
-        /* glm_translate(sphere_model, (vec3){0.0f, 0.0f, 30.0f}); */
+        // TODO
+        /* set_material(&rockMat); */
+        /* cube((vec3){0.0f, 0.0f, 10.0f}, 3.0f, WHITE); */
+        /* reset_material(); */
 
-        /* uint32_t first = imm_append_vertices(cached_sphere_verts, cached_sphere_count); */
-        /* imm_emit(first, cached_sphere_count, sphere_model); */
 
-        /* imm_reset_material(); */
-
-        /* imm_set_material(&rockMat); */
-        cube((vec3){0.0f, 0.0f, 10.0f}, 3.0f, WHITE);
-        /* imm_reset_material(); */
 
         // Rotate the cow
         /* static float cow_rotation = 0.0f; */
