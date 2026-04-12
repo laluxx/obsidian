@@ -460,13 +460,13 @@ int main() {
     Texture2D* texture4 = texture_pool_get(tex4);
     Texture2D* texture5 = texture_pool_get(tex5);
 
-    load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS
-    /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // FIXME */
+    /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
+    /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene); // PASS */
+    load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene); // FIXME
 
     /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene); // FIXME ? */
     /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/UnlitTest.glb", &scene); // PASS */
-    /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene); // WHY IS THE LIGHTING LIKE THAT */
     /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene); // FIXME */
@@ -532,6 +532,18 @@ int main() {
         /* set_material(&rockMat); */
         /* sphere((vec3){0.0f, 0.0f, 30.0f}, 5.0f, 64, 64, WHITE); */
         /* reset_material(); */
+
+        // Translate the cube directly in front of the camera so we can actually see it!
+        /* if (scene.meshes.count > 0) { */
+        /*     mat4 offset_transform; */
+        /*     glm_mat4_identity(offset_transform); */
+        /*     glm_translate(offset_transform, (vec3){0.0f, 3.0f, 5.0f}); // X=0, Y=3 (Camera Height), Z=5 (Forward) */
+
+        /*     mat4 temp; */
+        /*     glm_mat4_copy(scene.meshes.items[0].model, temp); */
+        /*     glm_mat4_mul(offset_transform, temp, scene.meshes.items[0].model); */
+        /*     markMeshesSSBODirty(&context); */
+        /* } */
 
         // TODO
         /* set_material(&rockMat); */

@@ -59,6 +59,12 @@ static uint32_t vertex_count = 0;
 static uint32_t dynamic_draw_count = 0;
 static uint32_t frame_index = 0;
 
+extern uint64_t megaVertexBufferAddr;
+extern uint64_t dynamicVertexBufferAddr;
+
+// Persistent scratch memory for morph target blending. Zero allocations.
+Vertex morph_scratch_buffer[MAX_DYNAMIC_VERTICES];
+
 uint32_t append_vertices(const Vertex* verts, uint32_t count) {
     if (vertex_count + count > MAX_DYNAMIC_VERTICES) return UINT32_MAX;
     uint32_t first = vertex_count;
@@ -723,11 +729,13 @@ void mesh(VkCommandBuffer cmd, Mesh* mesh) {
     /* legacy direct-draw path — model/material data comes from SSBO for
        indirect meshes; this path is only used for dynamic/morph meshes  */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured3D);
-    pushConstants.vertexBufferAddr = mesh->vertexBufferAddr;
+    pushConstants.vertexBufferAddr = (mesh->megaBaseVertex != UINT32_MAX) ? megaVertexBufferAddr : dynamicVertexBufferAddr;
     vkCmdPushConstants(cmd, context.pipelineLayoutTextured3D,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
-    vkCmdDraw(cmd, mesh->vertexCount, 1, 0, 0);
+
+    uint32_t first_vertex = (mesh->megaBaseVertex != UINT32_MAX) ? mesh->megaBaseVertex : (context.megaVertexBufferOffset + (frame_index * MAX_DYNAMIC_VERTICES) + mesh->dynamicBaseVertex);
+    vkCmdDraw(cmd, mesh->vertexCount, 1, first_vertex, 0);
 }
 
 void mesh_update_morph(Mesh* mesh) {
@@ -740,103 +748,106 @@ void mesh_update_morph(Mesh* mesh) {
     for (size_t t = 0; t < morph->target_count; t++) {
         if (morph->weights[t] != 0.0f) { any_active = true; break; }
     }
-    if (!any_active) return;
 
-    Vertex* morphed_base = malloc(morph->base_vertex_count * sizeof(Vertex));
-    memcpy(morphed_base, morph->base_vertices, morph->base_vertex_count * sizeof(Vertex));
+    if (!any_active) {
+        // Fast path: ZERO ALLOCATIONS. Write directly into the mapped staging buffer!
+        if (vertex_count + mesh->vertexCount > MAX_DYNAMIC_VERTICES) return;
+        uint32_t first = vertex_count;
+        Vertex* dynVerts = &((Vertex*)context.dynamicStagingMapped)[frame_index * MAX_DYNAMIC_VERTICES + first];
 
-    // Track if any morph target has normal deltas
-    bool has_normal_deltas = false;
-
-    // Apply morph targets to the base vertices
-    for (size_t t = 0; t < morph->target_count; t++) {
-        MorphTarget* target = &morph->targets[t];
-        float weight = morph->weights[t];
-
-        if (weight == 0.0f || !target->positions) {
-            continue;
+        if (morph->index_map) {
+            for (size_t i = 0; i < mesh->vertexCount; i++) {
+                dynVerts[i] = morph->base_vertices[morph->index_map[i]];
+            }
+        } else {
+            memcpy(dynVerts, morph->base_vertices, mesh->vertexCount * sizeof(Vertex));
         }
+        mesh->dynamicBaseVertex = first;
+        vertex_count += mesh->vertexCount;
 
-        if (target->normals) {
-            has_normal_deltas = true;
+        // Recalculate tight AABB for culling (Fast Path)
+        vec3 new_min = { 1e30f,  1e30f,  1e30f};
+        vec3 new_max = {-1e30f, -1e30f, -1e30f};
+        for (size_t v = 0; v < morph->base_vertex_count; v++) {
+            new_min[0] = fminf(new_min[0], morph->base_vertices[v].pos[0]);
+            new_min[1] = fminf(new_min[1], morph->base_vertices[v].pos[1]);
+            new_min[2] = fminf(new_min[2], morph->base_vertices[v].pos[2]);
+            new_max[0] = fmaxf(new_max[0], morph->base_vertices[v].pos[0]);
+            new_max[1] = fmaxf(new_max[1], morph->base_vertices[v].pos[1]);
+            new_max[2] = fmaxf(new_max[2], morph->base_vertices[v].pos[2]);
         }
+        glm_vec3_copy(new_min, mesh->aabbMin);
+        glm_vec3_copy(new_max, mesh->aabbMax);
 
-        // Apply position and normal deltas to base vertices
-        for (size_t v = 0; v < morph->base_vertex_count && v < target->vertex_count; v++) {
-            morphed_base[v].pos[0] += target->positions[v][0] * weight;
-            morphed_base[v].pos[1] += target->positions[v][1] * weight;
-            morphed_base[v].pos[2] += target->positions[v][2] * weight;
+        return;
+    }
 
+    // AAA Zero-Allocation scratch buffer (local extern removed)
+    Vertex* morphed_base = morph_scratch_buffer;
+
+    vec3 new_min = { 1e30f,  1e30f,  1e30f};
+    vec3 new_max = {-1e30f, -1e30f, -1e30f};
+
+    // LOOP INVERSION: 1 Pass to rule them all.
+    // We read the base vertex, apply all active targets, calculate the AABB,
+    // and write to the scratch buffer in a single, perfectly cached linear sweep.
+    for (size_t v = 0; v < morph->base_vertex_count; v++) {
+        Vertex vert = morph->base_vertices[v];
+
+        for (size_t t = 0; t < morph->target_count; t++) {
+            float weight = morph->weights[t];
+            if (weight == 0.0f) continue;
+
+            MorphTarget* target = &morph->targets[t];
+            if (target->positions) {
+                vert.pos[0] += target->positions[v][0] * weight;
+                vert.pos[1] += target->positions[v][1] * weight;
+                vert.pos[2] += target->positions[v][2] * weight;
+            }
             if (target->normals) {
-                morphed_base[v].normal[0] += target->normals[v][0] * weight;
-                morphed_base[v].normal[1] += target->normals[v][1] * weight;
-                morphed_base[v].normal[2] += target->normals[v][2] * weight;
+                vert.normal[0] += target->normals[v][0] * weight;
+                vert.normal[1] += target->normals[v][1] * weight;
+                vert.normal[2] += target->normals[v][2] * weight;
             }
         }
+
+        // AABB calculated dynamically on the deformed vertex before saving
+        new_min[0] = fminf(new_min[0], vert.pos[0]);
+        new_min[1] = fminf(new_min[1], vert.pos[1]);
+        new_min[2] = fminf(new_min[2], vert.pos[2]);
+
+        new_max[0] = fmaxf(new_max[0], vert.pos[0]);
+        new_max[1] = fmaxf(new_max[1], vert.pos[1]);
+        new_max[2] = fmaxf(new_max[2], vert.pos[2]);
+
+        morphed_base[v] = vert;
     }
 
-    // If no normal deltas were provided, recalculate normals for smooth surfaces
-    if (!has_normal_deltas) {
-        // For smooth surfaces like spheres, normals should point from center
-        // Calculate average center of the mesh
-        vec3 center = {0.0f, 0.0f, 0.0f};
-        for (size_t v = 0; v < morph->base_vertex_count; v++) {
-            center[0] += morphed_base[v].pos[0];
-            center[1] += morphed_base[v].pos[1];
-            center[2] += morphed_base[v].pos[2];
-        }
-        center[0] /= morph->base_vertex_count;
-        center[1] /= morph->base_vertex_count;
-        center[2] /= morph->base_vertex_count;
+    glm_vec3_copy(new_min, mesh->aabbMin);
+    glm_vec3_copy(new_max, mesh->aabbMax);
 
-        // Recalculate normals as vectors from center to vertex
-        for (size_t v = 0; v < morph->base_vertex_count; v++) {
-            vec3 normal;
-            glm_vec3_sub(morphed_base[v].pos, center, normal);
-            glm_vec3_normalize(normal);
-            glm_vec3_copy(normal, morphed_base[v].normal);
-        }
-    } else {
-        // Renormalize normals if deltas were provided
-        for (size_t v = 0; v < morph->base_vertex_count; v++) {
-            vec3 normal;
-            glm_vec3_copy(morphed_base[v].normal, normal);
-            glm_vec3_normalize(normal);
-            glm_vec3_copy(normal, morphed_base[v].normal);
-        }
+    // Expand directly into the dynamic staging buffer (ZERO allocations)
+    if (vertex_count + mesh->vertexCount > MAX_DYNAMIC_VERTICES) {
+        return;
     }
 
-    // Now expand to final vertex buffer using index mapping
-    Vertex* final_vertices = malloc(mesh->vertexCount * sizeof(Vertex));
+    uint32_t first = vertex_count;
+    Vertex* dynVerts = &((Vertex*)context.dynamicStagingMapped)[frame_index * MAX_DYNAMIC_VERTICES + first];
 
     if (morph->index_map) {
-        // Indexed mesh - use mapping
         for (size_t i = 0; i < mesh->vertexCount; i++) {
-            uint32_t base_idx = morph->index_map[i];
-            final_vertices[i] = morphed_base[base_idx];
+            dynVerts[i] = morphed_base[morph->index_map[i]];
         }
     } else {
-        // Non-indexed mesh - direct copy
-        memcpy(final_vertices, morphed_base, mesh->vertexCount * sizeof(Vertex));
+        memcpy(dynVerts, morphed_base, mesh->vertexCount * sizeof(Vertex));
     }
 
-    // Upload to GPU
-    void* data;
-    VkDeviceSize size = mesh->vertexCount * sizeof(Vertex);
-    vkMapMemory(context.device, mesh->vertexBufferMemory, 0, size, 0, &data);
-    memcpy(data, final_vertices, size);
-    vkUnmapMemory(context.device, mesh->vertexBufferMemory);
-
-    free(morphed_base);
-    free(final_vertices);
+    mesh->dynamicBaseVertex = first;
+    vertex_count += mesh->vertexCount;
 }
 
 void mesh_destroy(VkDevice device, Mesh* mesh) {
-    if (mesh->vertexBuffer) vkDestroyBuffer(device, mesh->vertexBuffer, NULL);
-    if (mesh->vertexBufferMemory) vkFreeMemory(device, mesh->vertexBufferMemory, NULL);
-    if (mesh->indexBuffer) vkDestroyBuffer(device, mesh->indexBuffer, NULL);
-    if (mesh->indexBufferMemory) vkFreeMemory(device, mesh->indexBufferMemory, NULL);
-
+    (void)device;
     if (mesh->morph_data) {
         for (size_t t = 0; t < mesh->morph_data->target_count; t++) {
             if (mesh->morph_data->targets[t].positions) {
@@ -853,9 +864,6 @@ void mesh_destroy(VkDevice device, Mesh* mesh) {
         free(mesh->morph_data);
         mesh->morph_data = NULL;
     }
-
-    mesh->vertexBuffer = VK_NULL_HANDLE;
-    mesh->vertexBufferMemory = VK_NULL_HANDLE;
     mesh->vertexCount = 0;
 }
 
@@ -903,12 +911,13 @@ void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
             bound_pipeline = want_pipe;
         }
 
-        pushConstants.vertexBufferAddr = m->vertexBufferAddr;
+        pushConstants.vertexBufferAddr = (m->megaBaseVertex != UINT32_MAX) ? megaVertexBufferAddr : dynamicVertexBufferAddr;
         vkCmdPushConstants(cmd, want_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pushConstants);
 
-        vkCmdDraw(cmd, m->vertexCount, 1, 0, 0);
+        uint32_t first_vertex = (m->megaBaseVertex != UINT32_MAX) ? m->megaBaseVertex : (context.megaVertexBufferOffset + (frame_index * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex);
+        vkCmdDraw(cmd, m->vertexCount, 1, first_vertex, 0);
     }
 }
 

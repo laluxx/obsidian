@@ -1,35 +1,44 @@
 #+TITLE: Obsidian Engine TODO
 
-* TODO Correctness [0/1]
-- [ ] The lines should not use PBR
+* TODO Correctness [1/2]
+- [X] The lines should not use PBR (Fixed via dedicated unlit SSBO slot and 0-instance indirect command).
+- [ ] SimpleMorph lighting is broken (Investigate normal recalculation or missing normal deltas in the glTF).
 
 * TODO Features [0/1]
-- [ ] Parallax Occlusion Mapping - Togglable per material
+- [ ] Parallax Occlusion Mapping - Togglable per material.
 
-* TODO Performance [1/2]
-- [X] Unify immediate renderer into mega buffer - Kill the split, one draw call for everything. Dynamic geometry (moves/changes every frame) uses a dynamic region at the front of the mega buffer that resets each frame via a simple offset reset, no alloc/free. Static meshes sit permanently behind it and are never re-uploaded.
-- [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they ever hit the rasterizer
+* TODO Performance [1/7]
+- [ ] Serialize pipelines so it opens istantly
+- [ ] As I get closer to a texture the FPS drops drastically (Investigate mipmap generation, texture cache thrashing, or lack of anisotropic filtering limits).
+- [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they hit the rasterizer.
+- [ ] GPU Compute Animator - Move rigid node hierarchy and keyframe interpolation entirely to a Compute Shader to eliminate CPU bottlenecks.
+- [ ] Split MeshGPUData SSBO - Separate static material data (textures, PBR factors) from dynamic transform data (`model`, `normalMatrix`) to save PCIe bandwidth during animations.
+- [ ] Hardware Skinning - Compute bone matrices and deform vertices in the vertex shader for skeletal meshes.
+- [X] Unify immediate renderer into mega buffer - Dynamic geometry uses a resetting region; static meshes sit permanently behind it.
 
-* TODO Editor [0/1]
-- [ ] Mesh picking and highlighting
-- [ ] Inspector (runtime property editor) click mesh, edit PBR properties live with sliders. Ray vs AABB, writes directly into mapped SSBO memory, zero sync needed.
+* TODO Editor [0/2]
+- [ ] Mesh picking and highlighting.
+- [ ] Inspector (runtime property editor) - Click mesh, edit PBR properties live with sliders. Ray vs AABB, writes directly into mapped SSBO memory, zero sync needed.
 
-* TODO Gltf 2.0 [7/15]
-- [X] Static meshes
-- [X] PBR materials (albedo, normal, metallic/roughness, AO, emissive)
-- [X] Morph targets
-- [X] Alpha mask / blend
-- [X] Unlit materials
-- [X] Multiple texture coordinates
-- [X] Embedded and external textures
-- [ ] Skeletal animation / rigs (CesiumMan, RiggedFigure, Fox)
-- [ ] Animation channels (BoxAnimated)
-- [ ] Several complex materials (CarbonFibre, MosquitoInAmber)
-- [ ] Material variants (MaterialsVariantsShoe)
-- [ ] Texture transform extension (KHR_texture_transform)
-- [ ] Sparse accessors
-- [ ] Cameras defined in glTF file
-- [ ] Lights extension (KHR_lights_punctual)
+* TODO Gltf 2.0 [7/18]
+- [X] Static meshes (Box, Corset, Avocado, Sponza).
+- [X] PBR materials (albedo, normal, metallic/roughness, AO, emissive).
+- [X] Morph targets (MorphStressTest).
+- [X] Alpha mask / blend.
+- [X] Unlit materials (UnlitTest).
+- [X] Multiple texture coordinates (TextureCoordinateTest).
+- [X] Embedded and external textures.
+- [ ] Fix MetalRoughSpheres (Check metallic/roughness parsing or missing default factors).
+- [ ] Fix AlphaBlendModeTest (Implement depth sorting for translucent meshes).
+- [ ] Fix BoxAnimated / Fox (Animation channels: translation, rotation, scale interpolation).
+- [ ] Fix AnimatedMorphSphere (Combine morph target weight animation with standard node transforms).
+- [ ] Fix CesiumMan / RiggedFigure (Skeletal animation / joints / weights parsing).
+- [ ] Fix MaterialsVariantsShoe (KHR_materials_variants support).
+- [ ] Fix CarbonFibre / MosquitoInAmber (Advanced PBR extensions: Clearcoat, Transmission, Volume, IOR, Specular).
+- [ ] KHR_texture_transform (UV scaling/offset).
+- [ ] KHR_lights_punctual (Parse lights defined in the glTF file).
+- [ ] Parse Cameras defined in the glTF file.
+- [ ] Sparse accessors support.
 # TODO Make sure those are right and add them all..
 
 

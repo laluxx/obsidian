@@ -26,7 +26,7 @@
 
 /// Globals
 static uint64_t meshSSBOAddr[MAX_FRAMES_IN_FLIGHT];
-static uint64_t megaVertexBufferAddr = 0;
+uint64_t megaVertexBufferAddr = 0;
 VkPipeline shadowPipeline = VK_NULL_HANDLE;
 bool skyboxEnabled = true;
 bool iblLightingEnabled = true;
@@ -1464,6 +1464,17 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     }
     rg_reset(ctx->renderGraph);
 
+    // Update dynamic mesh vertex offsets for the current frame
+    if (scene.meshes.count > 0) {
+        VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)ctx->srcIndirectBufferMapped;
+        for (size_t i = 0; i < scene.meshes.count; i++) {
+            Mesh* m = &scene.meshes.items[i];
+            if (m->megaBaseVertex == UINT32_MAX && m->dynamicBaseVertex != UINT32_MAX) {
+                cmds[i].vertexOffset = (int32_t)(ctx->megaVertexBufferOffset + (ctx->currentFrame * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex);
+            }
+        }
+    }
+
     update_cascade_matrices(ctx); // MUST happen before updateFrustumUBO!
     updateFrustumUBO(ctx);
 
@@ -2337,7 +2348,7 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
     for (uint32_t i = 0; i < count; i++) {
         Mesh* m = &meshes->items[i];
 
-        if (m->megaBaseVertex == UINT32_MAX) {
+        if (m->megaBaseVertex == UINT32_MAX && m->dynamicBaseVertex == UINT32_MAX) {
             cmds[i].indexCount    = 0;
             cmds[i].instanceCount = 0;
             cmds[i].firstIndex    = 0;
@@ -2349,7 +2360,12 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
         cmds[i].indexCount    = m->indexCount;
         cmds[i].instanceCount = 1;
         cmds[i].firstIndex    = (m->megaBaseIndex == UINT32_MAX) ? 0 : m->megaBaseIndex;
-        cmds[i].vertexOffset  = (int32_t)m->megaBaseVertex;
+
+        if (m->megaBaseVertex != UINT32_MAX) {
+            cmds[i].vertexOffset  = (int32_t)m->megaBaseVertex;
+        } else {
+            cmds[i].vertexOffset  = (int32_t)(ctx->megaVertexBufferOffset + (ctx->currentFrame * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex);
+        }
         cmds[i].firstInstance = i;
     }
 
@@ -2381,7 +2397,7 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             if (i >= count) break;
 
             Mesh* m = &meshes->items[i];
-            if (m->megaBaseVertex == UINT32_MAX) {
+            if (m->megaBaseVertex == UINT32_MAX && m->dynamicBaseVertex == UINT32_MAX) {
                 memset(&dst[i], 0, sizeof(MeshGPUData));
                 continue;
             }

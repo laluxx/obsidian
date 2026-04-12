@@ -1,7 +1,7 @@
 #include "renderer.h"
 #include "scene.h"
+#include "vulkan_setup.h"
 #include "context.h"
-#include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,16 +64,16 @@ Mesh load_obj(const char* path, char* name, vec4 color){
         const tinyobj_shape_t* shape = &shapes[s];
         size_t face_offset = shape->face_offset;
         size_t face_end = face_offset + shape->length;
-        
+
         for (size_t f = face_offset; f < face_end; ++f) {
             // Get the three vertices of this triangle
             vec3 v0, v1, v2;
             vec3 normal;
-            
+
             for (size_t v = 0; v < 3; ++v) {
                 tinyobj_vertex_index_t idx = attrib.faces[3 * f + v];
                 float* vp = &attrib.vertices[3 * idx.v_idx];
-                
+
                 if (v == 0) {
                     glm_vec3_copy(vp, v0);
                 } else if (v == 1) {
@@ -82,13 +82,13 @@ Mesh load_obj(const char* path, char* name, vec4 color){
                     glm_vec3_copy(vp, v2);
                 }
             }
-            
+
             // Calculate face normal using cross product
             vec3 edge1, edge2;
             glm_vec3_sub(v1, v0, edge1);
             glm_vec3_sub(v2, v0, edge2);
             glm_vec3_cross(edge1, edge2, normal);
-            
+
             // Check if normal is valid (non-zero length)
             float norm_length = glm_vec3_norm(normal);
             if (norm_length > 0.0001f) {
@@ -97,59 +97,27 @@ Mesh load_obj(const char* path, char* name, vec4 color){
                 // Degenerate triangle, use default normal
                 glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, normal);
             }
-            
+
             // Now assign position, color, and normal to each vertex
             for (size_t v = 0; v < 3; ++v) {
                 tinyobj_vertex_index_t idx = attrib.faces[3 * f + v];
                 float* vp = &attrib.vertices[3 * idx.v_idx];
-                
+
                 glm_vec3_copy(vp, vertices[vert].pos);
                 glm_vec4_copy(color, vertices[vert].color);
                 glm_vec3_copy(normal, vertices[vert].normal);
-                
+
                 vert++;
             }
         }
     }
 
-    // Create Vulkan buffer (HOST_VISIBLE for simplicity)
-    VkBufferCreateInfo bufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = sizeof(Vertex) * vertexCount,
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    if (vkCreateBuffer(context.device, &bufferInfo, NULL, &mesh.vertexBuffer) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create vertex buffer\n");
-        free(vertices);
-        goto cleanup;
-    }
+    mesh.megaBaseIndex = UINT32_MAX;
+    mesh.dynamicBaseVertex = UINT32_MAX;
+    mesh.megaBaseVertex = megaBufferAllocate(&context, vertices, (uint32_t)vertexCount);
 
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(context.device, mesh.vertexBuffer, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = memRequirements.size,
-        .memoryTypeIndex = findMemoryType(context.physicalDevice,
-            memRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    };
-    if (vkAllocateMemory(context.device, &allocInfo, NULL, &mesh.vertexBufferMemory) != VK_SUCCESS) {
-        fprintf(stderr, "Failed to allocate vertex buffer memory\n");
-        vkDestroyBuffer(context.device, mesh.vertexBuffer, NULL);
-        free(vertices);
-        goto cleanup;
-    }
-    vkBindBufferMemory(context.device, mesh.vertexBuffer, mesh.vertexBufferMemory, 0);
-
-    // Copy vertex data to buffer
-    void* data;
-    vkMapMemory(context.device, mesh.vertexBufferMemory, 0, sizeof(Vertex) * vertexCount, 0, &data);
-    memcpy(data, vertices, sizeof(Vertex) * vertexCount);
-    vkUnmapMemory(context.device, mesh.vertexBufferMemory);
-
-    mesh.vertexCount = vertexCount;
+    mesh.vertexCount = (uint32_t)vertexCount;
+    mesh.indexCount = 0;
 
     printf("Loaded mesh '%s': %zu vertices, %zu triangles, named: %s\n", path, vertexCount, vertexCount / 3, mesh.name);
 

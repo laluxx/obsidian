@@ -156,17 +156,13 @@ typedef struct {
 } MorphData;
 
 typedef struct {
-    /* If megaBaseVertex != UINT32_MAX the mesh lives in the global mega buffer.
-       Otherwise it owns its own vertexBuffer (morph targets / dynamic meshes). */
-    uint32_t         megaBaseVertex;      /* base vertex offset in mega buffer   */
-    uint32_t         megaBaseIndex;       /* base index offset in mega index buffer; UINT32_MAX = no indices */
-    VkBuffer         vertexBuffer;        /* VK_NULL_HANDLE for mega-buffer meshes */
-    VkDeviceMemory   vertexBufferMemory;  /* VK_NULL_HANDLE for mega-buffer meshes */
-    uint64_t         vertexBufferAddr;    /* PHYSICAL POINTER for standalone meshes */
-    VkBuffer         indexBuffer;         /* VK_NULL_HANDLE for mega-buffer meshes */
-    VkDeviceMemory   indexBufferMemory;   /* VK_NULL_HANDLE for mega-buffer meshes */
+    /* If megaBaseVertex != UINT32_MAX the mesh is static and lives in the mega buffer.
+   Otherwise it's dynamic and gets appended to the dynamic mega buffer region each frame. */
+    uint32_t         megaBaseVertex;
+    uint32_t         megaBaseIndex;
+    uint32_t         dynamicBaseVertex;
     uint32_t         vertexCount;
-    uint32_t         indexCount;          /* 0 = non-indexed draw */
+    uint32_t         indexCount;
     vec3             aabbMin;
     vec3             aabbMax;
     mat4  model;

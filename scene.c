@@ -64,8 +64,8 @@ void print_scene_meshes() {
 
         printf("Mesh [%zu]:\n", i);
         printf("  Name: %s\n", mesh->name ? mesh->name : "(null)");
-        printf("  Vertex Buffer: %p\n", (void*)mesh->vertexBuffer);
-        printf("  Vertex Buffer Memory: %p\n", (void*)mesh->vertexBufferMemory);
+        printf("  Mega Base Vertex: %u\n", mesh->megaBaseVertex);
+        printf("  Dynamic Base Vertex: %u\n", mesh->dynamicBaseVertex);
         printf("  Vertex Count: %u\n", mesh->vertexCount);
         printf("  Node Pointer: %p\n", mesh->node);
         printf("  Texture Index: %d\n", mesh->textureIndex);

@@ -479,49 +479,21 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             bmax[1] = fmaxf(bmax[1], p[1]);
             bmax[2] = fmaxf(bmax[2], p[2]);
         }
+
         glm_vec3_copy(bmin, mesh.aabbMin);
         glm_vec3_copy(bmax, mesh.aabbMax);
     }
 
-    mesh.vertexBuffer       = VK_NULL_HANDLE;
-    mesh.vertexBufferMemory = VK_NULL_HANDLE;
-    mesh.indexBuffer        = VK_NULL_HANDLE;
-    mesh.indexBufferMemory  = VK_NULL_HANDLE;
     mesh.megaBaseVertex     = UINT32_MAX;
     mesh.megaBaseIndex      = UINT32_MAX;
-    mesh.vertexBufferAddr   = 0;
+    mesh.dynamicBaseVertex  = UINT32_MAX;
 
     if (mesh.morph_data) {
-        VkBufferCreateInfo bufferInfo = {
-            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size        = final_vertex_count * sizeof(Vertex),
-            .usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        };
-        vkCreateBuffer(context.device, &bufferInfo, NULL, &mesh.vertexBuffer);
-        VkMemoryRequirements mr;
-        vkGetBufferMemoryRequirements(context.device, mesh.vertexBuffer, &mr);
-
-        VkMemoryAllocateFlagsInfo flagsInfo = {
-            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
-            .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
-        };
-        VkMemoryAllocateInfo ai = {
-            .sType            = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .pNext            = &flagsInfo,
-            .allocationSize   = mr.size,
-            .memoryTypeIndex = findMemoryType(context.physicalDevice, mr.memoryTypeBits,
-                                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-        };
-        vkAllocateMemory(context.device, &ai, NULL, &mesh.vertexBufferMemory);
-        vkBindBufferMemory(context.device, mesh.vertexBuffer, mesh.vertexBufferMemory, 0);
-
-        VkBufferDeviceAddressInfo addrInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = mesh.vertexBuffer };
-        mesh.vertexBufferAddr = vkGetBufferDeviceAddress(context.device, &addrInfo);
-        void* ptr;
-        vkMapMemory(context.device, mesh.vertexBufferMemory, 0, bufferInfo.size, 0, &ptr);
-        memcpy(ptr, final_vertices, final_vertex_count * sizeof(Vertex));
-        vkUnmapMemory(context.device, mesh.vertexBufferMemory);
+        /* dynamic mesh: uses linear indices and gets appended to dynamic staging buffer every frame */
+        mesh.megaBaseVertex = UINT32_MAX;
+        mesh.megaBaseIndex  = 0;
+        final_index_count   = final_vertex_count;
+        mesh.dynamicBaseVertex = append_vertices(final_vertices, final_vertex_count);
     } else {
         /* static mesh: vertices into mega vertex buffer, indices into mega index buffer */
         mesh.megaBaseVertex = megaBufferAllocate(&context,
@@ -798,9 +770,21 @@ static float lerp(float a, float b, float t) {
 }
 
 static size_t find_keyframe(float* times, size_t count, float time) {
-    for (size_t i = 0; i < count - 1; i++) {
-        if (time >= times[i] && time < times[i + 1]) {
-            return i;
+    if (count < 2) return 0;
+
+    // AAA Binary Search: Slashes O(N) to O(log N)
+    size_t low = 0;
+    size_t high = count - 2;
+
+    while (low <= high) {
+        size_t mid = low + (high - low) / 2;
+        if (time < times[mid]) {
+            if (mid == 0) return 0;
+            high = mid - 1;
+        } else if (time >= times[mid + 1]) {
+            low = mid + 1;
+        } else {
+            return mid;
         }
     }
     return count - 2;
@@ -844,11 +828,9 @@ void animate_scene(Scene* scene, float time) {
                                 float w1 = channel->weights[k1 * num_targets + t];
                                 mesh->morph_data->weights[t] = lerp(w0, w1, factor);
                             }
-
-                            // Update the mesh vertices with morphed positions
-                            mesh_update_morph(mesh);
                         }
                     }
+                    continue; // CRITICAL: Skip the transform overwrite block!
                 }
 
                 // Handle transformation animations
@@ -886,4 +868,23 @@ void animate_scene(Scene* scene, float time) {
         }
         markMeshesSSBODirty(&context);
         }
+
+    // Guarantee that ALL dynamic meshes (even un-animated ones) get their
+    // geometry appended to the current frame's dynamic staging buffer.
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)context.srcIndirectBufferMapped;
+
+    for (size_t i = 0; i < scene->meshes.count; i++) {
+        Mesh* mesh = &scene->meshes.items[i];
+        if (mesh->morph_data) {
+            mesh_update_morph(mesh);
+
+            // Sync the indirect draw command for this dynamic mesh so it actually renders!
+            // Morph targets have indexCount = 0, so we use our linear index buffer starting from 0.
+            cmds[i].indexCount = mesh->vertexCount;
+            cmds[i].instanceCount = 1;
+            cmds[i].firstIndex = 0;
+            cmds[i].vertexOffset = context.megaVertexBufferOffset + (context.currentFrame * MAX_DYNAMIC_VERTICES) + mesh->dynamicBaseVertex;
+            cmds[i].firstInstance = i; // CRITICAL: Ensures SSBO material matches!
+        }
+    }
 }
