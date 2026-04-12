@@ -45,9 +45,24 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Ver
     float data[];
 };
 
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer JointBuffer {
-    mat4 matrices[];
+struct PackedJoint {
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
 };
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer JointBuffer {
+    PackedJoint joints[];
+};
+
+mat4 unpackJoint(PackedJoint j) {
+    return mat4(
+        vec4(j.row0.x, j.row1.x, j.row2.x, 0.0),
+        vec4(j.row0.y, j.row1.y, j.row2.y, 0.0),
+        vec4(j.row0.z, j.row1.z, j.row2.z, 0.0),
+        vec4(j.row0.w, j.row1.w, j.row2.w, 1.0)
+    );
+}
 
 layout(push_constant) uniform PC {
     int ambientOcclusionEnabled;
@@ -80,12 +95,11 @@ void main() {
         );
 
         skinMat =
-            inWeights.x * pc.jointData.matrices[jointOffset + inJoints.x] +
-            inWeights.y * pc.jointData.matrices[jointOffset + inJoints.y] +
-            inWeights.z * pc.jointData.matrices[jointOffset + inJoints.z] +
-            inWeights.w * pc.jointData.matrices[jointOffset + inJoints.w];
+            inWeights.x * unpackJoint(pc.jointData.joints[jointOffset + inJoints.x]) +
+            inWeights.y * unpackJoint(pc.jointData.joints[jointOffset + inJoints.y]) +
+            inWeights.z * unpackJoint(pc.jointData.joints[jointOffset + inJoints.z]) +
+            inWeights.w * unpackJoint(pc.jointData.joints[jointOffset + inJoints.w]);
     }
-
     vec4 localPos = skinMat * vec4(inPos, 1.0);
     vec4 worldPos = model * localPos;
 

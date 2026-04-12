@@ -468,14 +468,14 @@ int main() {
     /* load_gltf("./assets/gltf/UnlitTest.glb", &scene);                       // PASS */
     /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene);                  // PASS */
     /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene);   // PASS */
-    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene);           // TODO */
+    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene);           // TODO variants in the editor */
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                     // PASS */
     /* load_gltf("./assets/gltf/Box.glb", &scene);                             // PASS */
     /* load_gltf("./assets/gltf/Corset.glb", &scene);                          // PASS (but it's really small)*/
     load_gltf("./assets/gltf/CesiumMan.glb", &scene);                       // PASS
 
-    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO Materials
-    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS */
+    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO glass maeterial */
+    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene); // PASS
     /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene); // FIXME */
     /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */
     /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene); // PASS FIXME FLICKER ? */
@@ -489,8 +489,8 @@ int main() {
 
 
     // Bake and load the HDR Environment Map
-    /* loadIBL(&context, "./assets/hdr/ferndale_studio_05_4k.hdr"); */
     loadIBL(&context, "./assets/hdr/monochrome_studio_02_4k.hdr");
+    /* loadIBL(&context, "./assets/hdr/meadow_2_4k.hdr"); */
 
     // Load our beautiful 4K rock material automatically!
     Material rockMat = load_pbr_material_dir("./assets/textures/rock_wall_10_4k.blend/textures");

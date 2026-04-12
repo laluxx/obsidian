@@ -2286,7 +2286,8 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
            words * MAX_FRAMES_IN_FLIGHT * sizeof(uint64_t));
 
     // ── CREATE GLOBAL JOINT SSBO ──
-    VkDeviceSize jointSize = 16384 * sizeof(mat4); // Support 16,384 total bones globally
+    // AAA Packing: Store 3 vec4s (48 bytes) instead of mat4 (64 bytes). Saves 25% memory!
+    VkDeviceSize jointSize = 16384 * 48;
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         createBuffer(ctx, jointSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &jointSSBO[i], &jointSSBOMemory[i]);
         vkMapMemory(ctx->device, jointSSBOMemory[i], 0, jointSize, 0, (void**)&jointSSBOMapped[i]);

@@ -75,8 +75,14 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Ver
     float data[];
 };
 
+struct PackedJoint {
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
+};
+
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer JointBuffer {
-    mat4 matrices[];
+    PackedJoint joints[];
 };
 
 layout(push_constant) uniform PC {

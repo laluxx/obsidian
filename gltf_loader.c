@@ -1023,7 +1023,11 @@ void animate_scene(Scene* scene, float time) {
                             glm_mat4_mul(inverse_mesh_world, joint_world, final_joint);
                             glm_mat4_mul(final_joint, inverse_bind, final_joint);
 
-                            memcpy(&joint_buffer[mesh->jointOffset + j], final_joint, sizeof(mat4));
+                            // AAA 4x3 Packing: cglm is column-major. We transpose the top 3 rows into 3 vec4s.
+                            float* dst = (float*)((uint8_t*)joint_buffer + (mesh->jointOffset + j) * 48);
+                            dst[0] = final_joint[0][0]; dst[1] = final_joint[1][0]; dst[2] = final_joint[2][0]; dst[3] = final_joint[3][0];
+                            dst[4] = final_joint[0][1]; dst[5] = final_joint[1][1]; dst[6] = final_joint[2][1]; dst[7] = final_joint[3][1];
+                            dst[8] = final_joint[0][2]; dst[9] = final_joint[1][2]; dst[10]= final_joint[2][2]; dst[11]= final_joint[3][2];
                         }
                     }
                 }
