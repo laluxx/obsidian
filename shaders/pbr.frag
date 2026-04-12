@@ -187,7 +187,7 @@ vec3 iblAmbient(vec3 N, vec3 V, vec3 L, vec3 albedo, float metallic, float rough
 }
 
 // ── Cascaded Shadow Mapping (Atlas) ──────────────────────────────────────────
-float ShadowCalculation(vec3 worldPos, float NdotL) {
+float ShadowCalculation(vec3 worldPos, vec3 N, vec3 L, float NdotL) {
     vec4 viewPos = ubo.view * vec4(worldPos, 1.0);
     float z = abs(viewPos.z);
 
@@ -196,15 +196,26 @@ float ShadowCalculation(vec3 worldPos, float NdotL) {
         if(z > lighting.cascadeSplits[i]) cascadeIndex = i + 1;
     }
 
-    vec4 fragPosLightSpace = lighting.cascadeSpace[cascadeIndex] * vec4(worldPos, 1.0);
+    // AAA Normal Offset Bias
+    // Push the shadow sample point out along the normal to stop self-shadowing.
+    // We scale by cascade index because distant cascades have larger world-space texels.
+    float cascadeScale = (cascadeIndex == 0) ? 1.0 : (cascadeIndex == 1) ? 2.0 : (cascadeIndex == 2) ? 4.0 : 8.0;
+
+    // CRITICAL FIX: The bias MUST NOT drop to 0.0 when facing the sun, or you get a checkerboard pattern!
+    // We use mix to guarantee a minimum normal bias of 0.05.
+    float normalBias = cascadeScale * mix(0.05, 0.15, 1.0 - NdotL);
+    vec3 biasedWorldPos = worldPos + N * normalBias;
+
+    vec4 fragPosLightSpace = lighting.cascadeSpace[cascadeIndex] * vec4(biasedWorldPos, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
 
     if(projCoords.z > 1.0 || projCoords.z < 0.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0)
         return 0.0;
 
-    // Front-Face culling handles most acne, so we can use an extremely small bias
-    float bias = max(0.001 * (1.0 - NdotL), 0.0001);
+    // Base depth bias. Also cannot be allowed to drop to microscopic levels (0.0001)
+    // because IEEE 32-bit floats will cause Z-fighting against the depth map.
+    float bias = mix(0.001, 0.004, 1.0 - NdotL);
     if (cascadeIndex == 1) bias *= 1.2;
     else if (cascadeIndex == 2) bias *= 1.5;
     else if (cascadeIndex == 3) bias *= 2.0;
@@ -319,7 +330,7 @@ void main() {
     // Evaluate Directional Shadow globally so we can pass it to the IBL
     vec3  sunL       = normalize(-lighting.sun.direction.xyz);
     float sunNdotL   = max(dot(N, sunL), 0.0);
-    float visibility = ShadowCalculation(inWorldPos, sunNdotL);
+    float visibility = ShadowCalculation(inWorldPos, N, sunL, sunNdotL);
 
     // Directional light (sun)
     {
