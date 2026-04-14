@@ -6,6 +6,7 @@
 #include "scene.h"
 #include "vulkan_setup.h"
 #include "tinyexr_c.h"
+#include "camera.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -59,6 +60,9 @@ static uint32_t vertex_count = 0;
 static uint32_t dynamic_draw_count = 0;
 static uint32_t frame_index = 0;
 
+uint32_t opaqueMeshCount = 0;
+uint32_t transparentMeshCount = 0;
+
 extern uint64_t megaVertexBufferAddr;
 extern uint64_t dynamicVertexBufferAddr;
 
@@ -110,6 +114,14 @@ void reset_material(void) {
         .emissiveIndex      = -1,
         .displacementIndex  = -1,
         .displacementScale  = 0.1f, // Default 10cm displacement
+        .transmissionFactor = 0.0f,
+        .ior                = 1.5f,
+        .thicknessFactor    = 0.0f,
+        .transmissionIndex  = -1,
+        .thicknessIndex     = -1,
+        .attenuationColor   = {1.0f, 1.0f, 1.0f},
+        .attenuationDistance = 100000.0f,
+        .dispersion         = 0.0f,
     };
 }
 
@@ -404,9 +416,24 @@ int alloc_slot(mat4 model) {
     d->emissiveIndex      = currentMaterial.emissiveIndex;
     d->displacementIndex  = currentMaterial.displacementIndex;
     d->displacementScale  = currentMaterial.displacementScale;
-    glm_vec3_copy((vec3){-1e10f,-1e10f,-1e10f}, d->aabbMin);
-    glm_vec3_copy((vec3){ 1e10f, 1e10f, 1e10f}, d->aabbMax);
+    d->transmissionFactor = currentMaterial.transmissionFactor;
+    d->ior                = currentMaterial.ior;
+    d->thicknessFactor    = currentMaterial.thicknessFactor;
+    d->transmissionIndex  = currentMaterial.transmissionIndex;
+    d->thicknessIndex     = currentMaterial.thicknessIndex;
+    d->attenuationColorR  = currentMaterial.attenuationColor[0];
+    d->attenuationColorG  = currentMaterial.attenuationColor[1];
+    d->attenuationColorB  = currentMaterial.attenuationColor[2];
+    d->attenuationDistance = currentMaterial.attenuationDistance;
+    d->dispersion         = currentMaterial.dispersion;
+    d->thicknessFactor    = currentMaterial.thicknessFactor;
+    glm_vec3_copy((vec3){-1e5f, -1e5f, -1e5f}, d->aabbMin);
+    glm_vec3_copy((vec3){ 1e5f,  1e5f,  1e5f}, d->aabbMax);
+
     d->jointOffset        = -1;
+    d->morphCount         = 0;
+    d->morphDeltaOffset   = 0;
+    d->morphWeightOffset  = 0;
     return slot;
 }
 
@@ -416,7 +443,28 @@ void begin_frame(void) {
     vertex_count = 0;
     lineVertexCount = 0;
     context.indirectDrawCount = (uint32_t)scene.meshes.count;
+
+    // AAA FIX: Sort meshes every single frame!
+    // Shell sort is O(N log N) and runs in microseconds. This guarantees
+    // opaqueMeshCount is perfectly synced with compact.comp to prevent flickering.
+    vec3 camPos = { camera.position[0], camera.position[1], camera.position[2] };
+    sort_meshes_by_alpha(&scene.meshes, camPos);
+
+    // AAA ARCHITECTURE FIX: We MUST resync the CPU sorted array with the GPU!
+    // If we sort the meshes in memory but don't rebuild the indirect commands and
+    // mark the SSBO dirty, the GPU will draw the wrong meshes with the wrong materials,
+    // resulting in invisible objects or corrupted rendering.
+    updateMeshSSBOAndIndirect(&context, &scene.meshes);
+    flushMeshSSBO(&context, &scene.meshes);
 }
+
+/* void begin_frame(void) { */
+/*     frame_index = context.currentFrame; */
+/*     dynamic_draw_count = 0; */
+/*     vertex_count = 0; */
+/*     lineVertexCount = 0; */
+/*     context.indirectDrawCount = (uint32_t)scene.meshes.count; */
+/* } */
 
 static void create_mapped_buffer(VkDevice dev, VkPhysicalDevice physDev, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer* buffer, VkDeviceMemory* memory, void** mapped) {
     VkBufferCreateInfo bufferInfo = {
@@ -639,13 +687,14 @@ void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
             vec4 t2 = { -sin_lon[lon + 1], 0.0f, cos_lon[lon + 1], 1.0f };
             vec4 t3 = { -sin_lon[lon + 1], 0.0f, cos_lon[lon + 1], 1.0f };
 
+            // Reversed winding order to Counter-Clockwise to match glTF and Vulkan pipeline
             vertex_full(p0, color, n0, (vec2){u1, v1}, t0);
-            vertex_full(p1, color, n1, (vec2){u1, v2}, t1);
             vertex_full(p2, color, n2, (vec2){u2, v2}, t2);
+            vertex_full(p1, color, n1, (vec2){u1, v2}, t1);
 
             vertex_full(p0, color, n0, (vec2){u1, v1}, t0);
-            vertex_full(p2, color, n2, (vec2){u2, v2}, t2);
             vertex_full(p3, color, n3, (vec2){u2, v1}, t3);
+            vertex_full(p2, color, n2, (vec2){u2, v2}, t2);
         }
     }
     mat4 identity; glm_mat4_identity(identity);
@@ -689,8 +738,8 @@ Vertex* get_dynamic_vertices(void) {
     return &dynVerts[frame_index * MAX_DYNAMIC_VERTICES];
 }
 
+
 void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
-    if (meshes->count <= 1) return;
     size_t write_idx = 0;
     for (size_t i = 0; i < meshes->count; i++) {
         if (meshes->items[i].alpha_mode != 2) {
@@ -702,6 +751,8 @@ void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
             write_idx++;
         }
     }
+    opaqueMeshCount = (uint32_t)write_idx;
+    transparentMeshCount = (uint32_t)(meshes->count - write_idx);
 
     size_t blend_count = meshes->count - write_idx;
     if (blend_count <= 1) return;
@@ -726,6 +777,9 @@ void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
             blend[j] = temp;
         }
     }
+
+    opaqueMeshCount = write_idx;
+    transparentMeshCount = meshes->count - write_idx;
 }
 
 // WITH TEXTURES AND UNLIT

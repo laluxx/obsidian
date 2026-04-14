@@ -1,7 +1,3 @@
-#include <vulkan/vulkan_core.h>
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
-
 #include "gltf_loader.h"
 #include "font.h"
 #include <stdio.h>
@@ -34,8 +30,6 @@ bool shiftPressed;
 bool ctrlPressed;
 bool altPressed;
 
-void screenshot( VkDevice device, VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue queue, VkImage srcImage, VkFormat imageFormat, uint32_t width, uint32_t height, const char* filename);
-
 
 bool middleMousePressed = false;
 bool rightMousePressed = false;
@@ -60,20 +54,6 @@ void key_callback(int key, int action, int mods) {
         if (action == PRESS || action == REPEAT)
             vertico_handle_char_input(key, mods);
         return;  // Don't process other keys when vertico is active
-    }
-
-    if (key == GLFW_KEY_TAB && action == PRESS) {
-        screenshot(
-                   context.device,
-                   context.physicalDevice,
-                   context.commandPool,
-                   context.graphicsQueue,
-                   context.swapChainImages[0],
-                   VK_FORMAT_B8G8R8A8_SRGB,
-                   context.swapChainExtent.width,
-                   context.swapChainExtent.height,
-                   "screenshot.png"
-                   );
     }
 
     if (key == GLFW_KEY_Z && action == PRESS) {
@@ -266,172 +246,6 @@ void cursor_pos_callback(double xpos, double ypos) {
     }
 }
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-
-
-void screenshot(
-                VkDevice device,
-                VkPhysicalDevice physicalDevice,
-                VkCommandPool commandPool,
-                VkQueue queue,
-                VkImage srcImage,
-                VkFormat imageFormat,
-                uint32_t width,
-                uint32_t height,
-                const char* filename)
-{
-    VkResult err;
-
-    // 1. Create CPU-accessible buffer
-    VkDeviceSize imageSize = width * height * 4;
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-
-    VkBufferCreateInfo bufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = imageSize,
-        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-
-    err = vkCreateBuffer(device, &bufferInfo, NULL, &stagingBuffer);
-    assert(err == VK_SUCCESS);
-
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = memRequirements.size,
-        .memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
-                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
-    };
-
-    err = vkAllocateMemory(device, &allocInfo, NULL, &stagingBufferMemory);
-    assert(err == VK_SUCCESS);
-    vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
-
-    // 2. Create command buffer for copy
-    VkCommandBufferAllocateInfo cmdBufAllocInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandPool = commandPool,
-        .commandBufferCount = 1,
-    };
-
-    VkCommandBuffer cmdBuf;
-    vkAllocateCommandBuffers(device, &cmdBufAllocInfo, &cmdBuf);
-
-    VkCommandBufferBeginInfo beginInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-    vkBeginCommandBuffer(cmdBuf, &beginInfo);
-
-    // 3. Transition image layout if necessary (skip if already TRANSFER_SRC_OPTIMAL)
-    VkImageMemoryBarrier barrier = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,  // adjust if different!
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = srcImage,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    };
-    vkCmdPipelineBarrier(
-                         cmdBuf,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0,
-                         0, NULL,
-                         0, NULL,
-                         1, &barrier);
-
-    // 4. Copy image to buffer
-    VkBufferImageCopy region = {
-        .bufferOffset = 0,
-        .bufferRowLength = 0,
-        .bufferImageHeight = 0,
-        .imageSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .mipLevel = 0,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {width, height, 1},
-    };
-
-    vkCmdCopyImageToBuffer(cmdBuf, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &region);
-
-    // 5. Barrier to host read
-    VkBufferMemoryBarrier bufBarrier = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .buffer = stagingBuffer,
-        .offset = 0,
-        .size = imageSize,
-    };
-    vkCmdPipelineBarrier(
-                         cmdBuf,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT,
-                         0,
-                         0, NULL,
-                         1, &bufBarrier,
-                         0, NULL);
-
-    vkEndCommandBuffer(cmdBuf);
-
-    // 6. Submit and wait
-    VkSubmitInfo submitInfo = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &cmdBuf,
-    };
-    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
-
-    // 7. Map buffer and save with stb_image_write
-    void* data;
-    vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-
-    // NOTE: Vulkan default is BGRA, convert to RGBA for PNG
-    uint8_t* rgba_pixels = malloc(imageSize);
-    for (uint32_t i = 0; i < width * height; ++i) {
-        uint8_t* src = (uint8_t*)data + i * 4;
-        uint8_t* dst = rgba_pixels + i * 4;
-        dst[0] = src[2]; // R
-        dst[1] = src[1]; // G
-        dst[2] = src[0]; // B
-        dst[3] = src[3]; // A
-    }
-
-    stbi_write_png(filename, width, height, 4, rgba_pixels, width * 4);
-
-    free(rgba_pixels);
-
-    vkUnmapMemory(device, stagingBufferMemory);
-
-    // 8. Cleanup
-    vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
-    vkDestroyBuffer(device, stagingBuffer, NULL);
-    vkFreeMemory(device, stagingBufferMemory, NULL);
-    printf("took screenshot");
-}
-
 vec4 red    = {1.0f, 0.0f, 0.0f, 1.0f};
 vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
 vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
@@ -471,18 +285,31 @@ int main() {
     /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene);           // TODO variants in the editor */
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                     // PASS */
     /* load_gltf("./assets/gltf/Box.glb", &scene);                             // PASS */
-    /* load_gltf("./assets/gltf/Corset.glb", &scene);                          // PASS (but it's really small)*/
+    /* load_gltf("./assets/gltf/Corset.glb", &scene);                          // PASS (but it's really small) */
     /* load_gltf("./assets/gltf/CesiumMan.glb", &scene);                       // PASS */
+    /* load_gltf("./assets/gltf/RecursiveSkeletons.glb", &scene);              // FAIL */
     /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene);             // PASS */
     /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene);                     // PASS */
-    load_gltf("./assets/gltf/MorphStressTest.glb", &scene);                 // PASS
+    /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene);                 // PASS */
+    /* load_gltf("./assets/gltf/Avocado.glb", &scene);                         // PASS */
+    /* load_gltf("./assets/gltf/Lantern.glb", &scene);                         // PASS */
+    /* load_gltf("./assets/gltf/TextureCoordinateTest.glb", &scene);           // FAIL */
+    /* load_gltf("./assets/gltf/AnimatedColorsCube.glb", &scene);              // FAIL */
+    /* load_gltf("./assets/gltf/CubeVisibility.glb", &scene);                  // FAIL */
+    /* load_gltf("./assets/gltf/EmissiveStrengthTest.glb", &scene);            // FAIL also the sun goes thorugh walls */
+    /* load_gltf("./assets/gltf/InterpolationTest.glb", &scene);               // FAIL */
+    load_gltf("./assets/gltf/DragonAttenuation.glb", &scene);               // PASS
 
-    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO glass maeterial */
+
+    /* load_gltf("./assets/gltf/DispersionTest.glb", &scene); */
+    /* load_gltf("./assets/gltf/DragonDispersion.glb", &scene); */
+    /* load_gltf("./assets/gltf/IridescenceMetallicSpheres/glTF/IridescenceMetallicSpheres.gltf", &scene); // FAIL KHR_materials_iridescence */
+    /* load_gltf("./assets/gltf/IORTestGrid.glb", &scene); */
+    /* load_gltf("./assets/gltf/TransmissionTest.glb", &scene); */
+    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO glass trasparent maeterial (refraction) */
     /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */
     /* load_gltf("./assets/gltf/Fox.glb", &scene); // FIXME ANIMATIONS */
     /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene); // FIXME */
-    /* load_gltf("./assets/gltf/TextureCoordinateTest.glb", &scene); // PASS */
-    /* load_gltf("./assets/gltf/Avocado.glb", &scene); // PASS */
 
     Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
     vertico_init();
@@ -551,11 +378,11 @@ int main() {
         /* reset_material(); */
 
 
-        text(jetbrains, "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", 150, 50, WHITE);
+        /* text(jetbrains, "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", 150, 50, WHITE); */
 
         // Draw 3D text at world position
-        text3D(jetbrains, "Hello 3D!", (vec3){0.0f, 5.0f, 10.0f}, 6, WHITE);
-        text3D(jetbrains, "Press SPACE", (vec3){0.0f, 4.5f, 10.0f}, 6, RED);
+        /* text3D(jetbrains, "Hello 3D!", (vec3){0.0f, 5.0f, 10.0f}, 6, WHITE); */
+        /* text3D(jetbrains, "Press SPACE", (vec3){0.0f, 4.5f, 10.0f}, 6, RED); */
 
         double time = glfwGetTime();
 
@@ -566,16 +393,16 @@ int main() {
         float centerY = screenHeight / 2.0f;
 
         // 2D GEOMETRY
-        quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE);
-        quad2D((vec2){70, 10}, (vec2){50, 50}, WHITE);
-        quad2D((vec2){10, 70}, (vec2){50, 50}, RED);
-        quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN);
+        /* quad2D((vec2){10, 10}, (vec2){50, 50}, BLUE); */
+        /* quad2D((vec2){70, 10}, (vec2){50, 50}, WHITE); */
+        /* quad2D((vec2){10, 70}, (vec2){50, 50}, RED); */
+        /* quad2D((vec2){70, 70}, (vec2){50, 50}, GREEN); */
 
         fps(jetbrains, 500, 500, RED);
 
 
-        texture2D((vec2){100, 200}, (vec2){200, 200}, texture1, WHITE);
-        texture2D((vec2){500, 200}, (vec2){150, 150}, texture2, WHITE);
+        /* texture2D((vec2){100, 200}, (vec2){200, 200}, texture1, WHITE); */
+        /* texture2D((vec2){500, 200}, (vec2){150, 150}, texture2, WHITE); */
         /* texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE); */
 
 

@@ -312,6 +312,55 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     mesh.aoIndex             = -1;
     mesh.emissiveIndex       = -1;
 
+    mesh.transmissionFactor = 0.0f;
+    mesh.ior                = 1.5f;
+    mesh.thicknessFactor    = 0.0f;
+    mesh.transmissionIndex  = -1;
+    mesh.thicknessIndex     = -1;
+    glm_vec3_copy((vec3){1.0f, 1.0f, 1.0f}, mesh.attenuationColor);
+    mesh.attenuationDistance = 100000.0f;
+    mesh.dispersion = 0.0f;
+
+    if (prim->material) {
+        if (prim->material->has_dispersion) {
+            mesh.dispersion = prim->material->dispersion.dispersion;
+        }
+        if (prim->material->has_ior) {
+            mesh.ior = prim->material->ior.ior;
+        }
+        if (prim->material->has_transmission) {
+            mesh.transmissionFactor = prim->material->transmission.transmission_factor;
+            if (prim->material->transmission.transmission_texture.texture) {
+                for (size_t t = 0; t < data->textures_count; t++) {
+                    if (&data->textures[t] == prim->material->transmission.transmission_texture.texture) {
+                        if (t < gltf_texture_count && gltf_texture_indices[t] >= 0)
+                            mesh.transmissionIndex = gltf_texture_indices[t];
+                        break;
+                    }
+                }
+            }
+            // Transmission meshes are physically opaque — they compute their own
+            // background via screen-space refraction. Do NOT set alpha_mode = 2.
+            // They are drawn in a dedicated transmission pass after the screen copy.
+        }
+        if (prim->material->has_volume) {
+            mesh.thicknessFactor = prim->material->volume.thickness_factor;
+            memcpy(mesh.attenuationColor, prim->material->volume.attenuation_color, sizeof(vec3));
+            if (prim->material->volume.attenuation_distance > 0.0f) {
+                mesh.attenuationDistance = prim->material->volume.attenuation_distance;
+            }
+            if (prim->material->volume.thickness_texture.texture) {
+                for (size_t t = 0; t < data->textures_count; t++) {
+                    if (&data->textures[t] == prim->material->volume.thickness_texture.texture) {
+                        if (t < gltf_texture_count && gltf_texture_indices[t] >= 0)
+                            mesh.thicknessIndex = gltf_texture_indices[t];
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     if (prim->material && prim->material->has_pbr_metallic_roughness) {
         cgltf_pbr_metallic_roughness* pbr = &prim->material->pbr_metallic_roughness;
         memcpy(mesh.baseColorFactor, pbr->base_color_factor, sizeof(vec4));

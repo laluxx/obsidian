@@ -162,6 +162,12 @@ void beginFrame() {
     delta_time = current_frame - last_frame;
     last_frame = current_frame;
 
+    // FIX: We must wait for the GPU to finish with this frame index BEFORE modifying CPU-mapped buffers!
+    // This prevents massive data races where the CPU overwrites SSBOs while the GPU is still rendering.
+    uint32_t frameIndex = context.currentFrame;
+    VkFence inFlightFence = context.inFlightFences[frameIndex];
+    vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+
     /* Reset ALL per-frame CPU render state first — before any user draw calls. */
     begin_frame();
     renderer2D_clear();
@@ -206,7 +212,7 @@ void endFrame() {
     uint32_t frameIndex   = context.currentFrame;
     VkFence  inFlightFence = context.inFlightFences[frameIndex];
 
-    vkWaitForFences(context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+    // Wait was moved to beginFrame() to protect mapped GPU buffers.
 
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(

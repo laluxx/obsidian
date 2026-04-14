@@ -34,6 +34,19 @@ struct MeshData {
     int   morphDeltaOffset;
     int   morphWeightOffset;
     int   morphCount;
+
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    float _pad0;
+    float _pad1;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {

@@ -40,6 +40,14 @@ VkPipeline shadowPipeline = VK_NULL_HANDLE;
 bool skyboxEnabled = true;
 bool iblLightingEnabled = true;
 bool shadowsEnabled = true;
+
+VkImage transmissionImage[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+VkDeviceMemory transmissionMemory[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+VkImageView transmissionView[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+VkSampler transmissionSampler = VK_NULL_HANDLE;
+
+extern uint32_t opaqueMeshCount;
+extern uint32_t transparentMeshCount;
 VkPipeline skyboxPipeline = VK_NULL_HANDLE;
 VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
 VkImage iblSkyboxImage = VK_NULL_HANDLE;
@@ -136,7 +144,7 @@ static VkPipelineRasterizationStateCreateInfo makeRasterizer(float lineWidth) {
         .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode             = VK_POLYGON_MODE_FILL,
         .lineWidth               = lineWidth,
-        .cullMode                = VK_CULL_MODE_NONE,
+        .cullMode                = VK_CULL_MODE_BACK_BIT,
         .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
     };
 }
@@ -431,7 +439,8 @@ void createSwapChain(VulkanContext* ctx)
         .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         .imageExtent      = ext,
         .imageArrayLayers = 1,
-        .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        // AAA FIX: Allow Vulkan to copy FROM the swapchain for our screen-space refraction!
+        .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform     = caps.currentTransform,
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
@@ -720,6 +729,10 @@ void createGraphicsPipelines(VulkanContext* ctx)
         .depthAttachmentFormat = ctx->depthFormat,
     };
 
+    // AAA: Dedicated un-culled rasterizer for the Skybox (since we are inside it!)
+    VkPipelineRasterizationStateCreateInfo rastSkybox = makeRasterizer(1.0f);
+    rastSkybox.cullMode = VK_CULL_MODE_NONE;
+
     /*
        Index  Pipeline
        0      3D PBR triangles  (direct + indirect, same pipeline)
@@ -768,11 +781,11 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages               = ssSkybox,
+            .stageCount          = 2, .pStages                = ssSkybox,
             .pVertexInputState   = &viEmpty,
             .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
-            .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
+            .pRasterizationState = &rastSkybox, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = &blend, .pDepthStencilState = &depthSkybox,
             .pDynamicState       = &kDynamicState,
             .layout              = skyboxPipelineLayout,
@@ -892,17 +905,18 @@ void createComputeCullPipeline(VulkanContext* ctx)
 /* ── Compact pipeline: visibility → compacted indirect + count ──────── */
 void createComputeCompactPipeline(VulkanContext* ctx)
 {
-    VkDescriptorSetLayoutBinding bindings[4] = {
+    VkDescriptorSetLayoutBinding bindings[5] = {
         { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
         { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
         { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
         { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+        { .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
     };
     VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 4, .pBindings = bindings };
+        .bindingCount = 5, .pBindings = bindings };
     vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->computeCompactSetLayout);
 
-    VkPushConstantRange pcRange = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 8 };
+    VkPushConstantRange pcRange = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 16 };
     VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1, .pSetLayouts = &ctx->computeCompactSetLayout,
         .pushConstantRangeCount = 1, .pPushConstantRanges = &pcRange };
@@ -918,7 +932,7 @@ void createComputeCompactPipeline(VulkanContext* ctx)
     vkCreateComputePipelines(ctx->device, pipelineCache, 1, &cpci, NULL, &ctx->computeCompactPipeline);
     vkDestroyShaderModule(ctx->device, compactShader, NULL);
 
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 4 };
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 5 };
     VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps };
     vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->computeCompactPool);
@@ -932,17 +946,19 @@ void createComputeCompactPipeline(VulkanContext* ctx)
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
-        VkDescriptorBufferInfo visInfo   = { .buffer = ctx->visibilityBuffer,   .range = VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo visInfo   = { .buffer = ctx->visibilityBuffer,            .range = VK_WHOLE_SIZE };
         VkDescriptorBufferInfo srcInfo   = { .buffer = ctx->srcIndirectBuffer,  .offset = i * drawSize, .range = drawSize };
-        VkDescriptorBufferInfo dstInfo   = { .buffer = ctx->indirectBuffer,     .range = VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo cntInfo   = { .buffer = ctx->drawCountBuffer,    .range = VK_WHOLE_SIZE };
-        VkWriteDescriptorSet writes[4] = {
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &visInfo },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &srcInfo },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &dstInfo },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &cntInfo },
+        VkDescriptorBufferInfo dstInfo   = { .buffer = ctx->indirectBuffer,               .range = VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo cntInfo   = { .buffer = ctx->drawCountBuffer,              .range = VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo meshInfo  = { .buffer = ctx->meshSSBO[i],                  .range = VK_WHOLE_SIZE };
+        VkWriteDescriptorSet writes[5] = {
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &visInfo  },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &srcInfo  },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &dstInfo  },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &cntInfo  },
+            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &meshInfo },
         };
-        vkUpdateDescriptorSets(ctx->device, 4, writes, 0, NULL);
+        vkUpdateDescriptorSets(ctx->device, 5, writes, 0, NULL);
     }
     fprintf(stdout, "Compact pipeline: visibility → compacted indirect + count\n");
 }
@@ -953,7 +969,7 @@ static void extractPlanes(const mat4 m, vec4* planes) {
         planes[1][j] = m[j][3] - m[j][0]; // Right
         planes[2][j] = m[j][3] - m[j][1]; // Top
         planes[3][j] = m[j][3] + m[j][1]; // Bottom
-        planes[4][j] = m[j][2];            // Near
+        planes[4][j] = m[j][3] + m[j][2]; // Near
         planes[5][j] = m[j][3] - m[j][2]; // Far
     }
     for (int i = 0; i < 6; i++) {
@@ -1003,7 +1019,7 @@ static void execute_mega_cull_pass(VkCommandBuffer cmd, void* user_data)
     uint32_t frustumCount = shadowsEnabled ? 5u : 1u;
 
     /* ── 1. Clear drawCountBuffer to 0 for all frustums ─────────────── */
-    vkCmdFillBuffer(cmd, ctx->drawCountBuffer, 0, 5 * sizeof(uint32_t), 0);
+    vkCmdFillBuffer(cmd, ctx->drawCountBuffer, 0, 15 * sizeof(uint32_t), 0);
 
     VkBufferMemoryBarrier countClear = {
         .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -1040,16 +1056,18 @@ static void execute_mega_cull_pass(VkCommandBuffer cmd, void* user_data)
                          0, NULL, 1, &visBarrier, 0, NULL);
 
     /* ── 4. Compact: all frustums in one parallel dispatch ───────────── */
-    /* X = mesh workgroups, Y = frustum index (0=camera, 1-4=cascades)   */
+    /* X = frustum index (0=camera, 1-4=cascades)   */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->computeCompactPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             ctx->computeCompactPipelineLayout, 0, 1,
                             &ctx->computeCompactSets[f], 0, NULL);
 
-    uint32_t compactPC[2] = { ctx->indirectDrawCount, ctx->indirectDrawCount };
+    // opaqueMeshCount is unused in new compact.comp (routing by material property)
+    // but kept in PC struct for ABI compatibility. staticMeshCount marks dynamic start.
+    uint32_t compactPC[4] = { ctx->indirectDrawCount, 20480, opaqueMeshCount, (uint32_t)scene.meshes.count };
     vkCmdPushConstants(cmd, ctx->computeCompactPipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, compactPC);
-    vkCmdDispatch(cmd, groupCount, frustumCount, 1);
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, compactPC);
+    vkCmdDispatch(cmd, frustumCount, 1, 1);
 }
 
 static void update_cascade_matrices(VulkanContext* ctx) {
@@ -1163,11 +1181,31 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
         pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
         vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
-        // Frustum index: cascade i → frustum (i+1). Count lives in drawCountBuffer.
-        VkDeviceSize offset    = (VkDeviceSize)(i + 1) * ctx->indirectDrawCount * sizeof(VkDrawIndexedIndirectCommand);
-        VkDeviceSize countOff  = (VkDeviceSize)(i + 1) * sizeof(uint32_t);
+        // Because count buffer is now 2 elements per frustum (Opaque, Transparent), countOff is (Frustum * 2 + 0) * 4 bytes.
+        uint32_t shadowStride = 20480u / 3u; // 6826 — matches compact.comp
+        uint32_t frustumIdx = (uint32_t)(i + 1); // shadow frustums are 1..4
+
+        // Opaque shadows: stream 0 of this frustum
+        VkDeviceSize offset   = (VkDeviceSize)(frustumIdx * 20480u)          * sizeof(VkDrawIndexedIndirectCommand);
+        VkDeviceSize countOff = (VkDeviceSize)(frustumIdx * 3u + 0u)         * sizeof(uint32_t);
         vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, offset,
                                       ctx->drawCountBuffer, countOff,
+                                      ctx->indirectDrawCount,
+                                      sizeof(VkDrawIndexedIndirectCommand));
+
+        // Transmission shadows: stream 1 of this frustum (transmission casts shadows too)
+        VkDeviceSize xmtOffset   = (VkDeviceSize)(frustumIdx * 20480u + shadowStride) * sizeof(VkDrawIndexedIndirectCommand);
+        VkDeviceSize xmtCountOff = (VkDeviceSize)(frustumIdx * 3u + 1u)               * sizeof(uint32_t);
+        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, xmtOffset,
+                                      ctx->drawCountBuffer, xmtCountOff,
+                                      ctx->indirectDrawCount,
+                                      sizeof(VkDrawIndexedIndirectCommand));
+
+        // Transparent shadows: stream 2
+        VkDeviceSize trpOffset   = (VkDeviceSize)(frustumIdx * 20480u + 2u * shadowStride) * sizeof(VkDrawIndexedIndirectCommand);
+        VkDeviceSize trpCountOff = (VkDeviceSize)(frustumIdx * 3u + 2u)                    * sizeof(uint32_t);
+        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, trpOffset,
+                                      ctx->drawCountBuffer, trpCountOff,
                                       ctx->indirectDrawCount,
                                       sizeof(VkDrawIndexedIndirectCommand));
     }
@@ -1232,8 +1270,6 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 2, skyboxSets, 0, NULL);
         vkCmdDraw(cmd, 36, 1, 0, 0);
     }
-
-    renderer2D_draw(cmd);
 }
 
 void create2DGraphicsPipeline(VulkanContext* ctx)        { /* handled by createGraphicsPipelines */ }
@@ -1387,6 +1423,31 @@ void createDepthResources(VulkanContext* ctx)
     if (vkCreateImageView(ctx->device, &viewCI, NULL, &ctx->depthImageView) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create depth image view\n"); exit(EXIT_FAILURE);
     }
+
+    // AAA Screen-Space Transmission Buffer (Multi-Buffered to prevent temporal race conditions!)
+    if (transmissionSampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo tSampCI = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+        vkCreateSampler(ctx->device, &tSampCI, NULL, &transmissionSampler);
+    }
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkImageCreateInfo tImgCI = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = ctx->swapChainImageFormat, .extent = {ctx->swapChainExtent.width, ctx->swapChainExtent.height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        vkCreateImage(ctx->device, &tImgCI, NULL, &transmissionImage[i]);
+
+        VkMemoryRequirements tReq; vkGetImageMemoryRequirements(ctx->device, transmissionImage[i], &tReq);
+        VkMemoryAllocateInfo tAlloc = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = tReq.size, .memoryTypeIndex = findMemoryType(ctx->physicalDevice, tReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+        vkAllocateMemory(ctx->device, &tAlloc, NULL, &transmissionMemory[i]);
+        vkBindImageMemory(ctx->device, transmissionImage[i], transmissionMemory[i], 0);
+
+        VkImageViewCreateInfo tViewCI = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = transmissionImage[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = ctx->swapChainImageFormat, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        vkCreateImageView(ctx->device, &tViewCI, NULL, &transmissionView[i]);
+
+        if (ctx->lightingSets[i] != VK_NULL_HANDLE) {
+            VkDescriptorImageInfo dInfo = { .sampler = transmissionSampler, .imageView = transmissionView[i], .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[i], .dstBinding = 6, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dInfo };
+            vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        }
+    }
 }
 
 /// Uniform buffer
@@ -1501,16 +1562,18 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     RgResId depthImg = rg_import_image(ctx->renderGraph, "Depth", ctx->depthImage, ctx->depthImageView, ctx->depthFormat, ctx->swapChainExtent.width, ctx->swapChainExtent.height, VK_IMAGE_LAYOUT_UNDEFINED);
     RgResId indirectBuf = rg_import_buffer(ctx->renderGraph, "IndirectBuffer", ctx->indirectBuffer);
     RgResId frustumUBO = rg_import_buffer(ctx->renderGraph, "FrustumUBO", ctx->frustumUBOBuffer[f]);
+    RgResId drawCountBuf = rg_import_buffer(ctx->renderGraph, "DrawCountBuffer", ctx->drawCountBuffer);
 
     // 2. Define Mega Culling Pass (1 Dispatch for everything!)
     RgPass* cullPass = rg_add_pass(ctx->renderGraph, "MegaCull");
     rg_pass_read_buffer(cullPass, frustumUBO, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
     rg_pass_write_buffer(cullPass, indirectBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+    rg_pass_write_buffer(cullPass, drawCountBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
     rg_pass_execute(cullPass, execute_mega_cull_pass, ctx);
 
     // 3. Define Shadow Pass (Creates the Atlas)
     RgResId shadowAtlasId = rg_import_image(ctx->renderGraph, "ShadowAtlas", ctx->shadowImage, ctx->shadowView, VK_FORMAT_D32_SFLOAT, 2048, 2048, VK_IMAGE_LAYOUT_UNDEFINED);
-    RgResId drawCountBuf  = rg_import_buffer(ctx->renderGraph, "DrawCountBuffer", ctx->drawCountBuffer);
+
     RgPass* shadowPass = rg_add_pass(ctx->renderGraph, "CascadedShadows");
     rg_pass_read_buffer(shadowPass, indirectBuf,  VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     rg_pass_read_buffer(shadowPass, drawCountBuf, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
@@ -1528,6 +1591,147 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
 
     // 5. Execute the Graph!
     rg_execute(ctx->renderGraph, cmd);
+
+    // 6. AAA SCREEN-SPACE TRANSMISSION COPY, TRANSMISSION PASS & TRANSPARENT PASS
+    // Always do the screen copy — compact.comp may have put transmission meshes in
+    // stream 1 even if indirectDrawCount == opaqueMeshCount from the CPU side.
+    // The copy is cheap (single blit) and the draw calls are guarded by indirect counts.
+    {
+        const uint32_t sStride = 20480u / 3u; // 6826 — must match compact.comp streamStride
+
+        // --- Screen copy: swapchain opaque result -> transmissionImage ---
+        VkImageMemoryBarrier copyBarriers[2] = {0};
+        copyBarriers[0].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        copyBarriers[0].oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        copyBarriers[0].newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        copyBarriers[0].srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        copyBarriers[0].dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        copyBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyBarriers[0].image               = ctx->swapChainImages[imageIndex];
+        copyBarriers[0].subresourceRange    = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        copyBarriers[1].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        copyBarriers[1].oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        copyBarriers[1].newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        copyBarriers[1].srcAccessMask       = 0;
+        copyBarriers[1].dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        copyBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        copyBarriers[1].image               = transmissionImage[ctx->currentFrame];
+        copyBarriers[1].subresourceRange    = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, NULL, 0, NULL, 2, copyBarriers);
+
+        VkImageCopy region = {
+            .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+            .extent         = { ctx->swapChainExtent.width, ctx->swapChainExtent.height, 1 }
+        };
+        vkCmdCopyImage(cmd,
+            ctx->swapChainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            transmissionImage[ctx->currentFrame], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &region);
+
+        // Transition: swapchain back to color attachment, transmissionImage to shader read
+        copyBarriers[0].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        copyBarriers[0].newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        copyBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        copyBarriers[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+
+        copyBarriers[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        copyBarriers[1].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        copyBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        copyBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, NULL, 0, NULL, 2, copyBarriers);
+
+        // --- Transmission + Transparent pass ---
+        VkRenderingAttachmentInfo colorAtt = {
+            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView   = ctx->swapChainImageViews[imageIndex],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE
+        };
+        VkRenderingAttachmentInfo depthAtt = {
+            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView   = ctx->depthImageView,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE
+        };
+        VkRenderingInfo renderInfo = {
+            .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea           = { {0,0}, ctx->swapChainExtent },
+            .layerCount           = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments    = &colorAtt,
+            .pDepthAttachment     = &depthAtt
+        };
+
+        vkCmdBeginRendering(cmd, &renderInfo);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipeline);
+        VkDescriptorSet gltfSets[4] = {
+            ctx->descriptorSets[ctx->currentFrame],
+            ctx->bindlessSet,
+            ctx->bindlessSet,
+            ctx->lightingSets[ctx->currentFrame]
+        };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
+
+        // AAA CRITICAL FIX: line_renderer_draw (executed in the main pass) corrupted the global
+        // pushConstants state (setting meshIndex > 0 and pointing to the line vertex buffer).
+        // We MUST restore the state to use indirect instances and the mega buffer before drawing glass!
+        pushConstants.meshIndex        = -1;
+        pushConstants.meshBufferAddr   = meshSSBOAddr[ctx->currentFrame];
+        pushConstants.vertexBufferAddr = megaVertexBufferAddr;
+        pushConstants.jointBufferAddr  = jointSSBOAddr[ctx->currentFrame];
+        pushConstants.morphBufferAddr  = megaMorphBufferAddr;
+        pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
+
+        vkCmdPushConstants(cmd, ctx->pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PushConstants), &pushConstants);
+        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        // Stream 1: Transmission (opaqueScreenMap is now valid)
+        // Camera frustum = frustumIdx 0, stream 1 offset = sStride draws
+        // drawCounts[0*3+1] byte offset = 4
+        VkDeviceSize xmtOffset = (VkDeviceSize)sStride * sizeof(VkDrawIndexedIndirectCommand);
+        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, xmtOffset,
+                                      ctx->drawCountBuffer, 4,
+                                      ctx->indirectDrawCount,
+                                      sizeof(VkDrawIndexedIndirectCommand));
+
+        // Stream 2: Alpha-blend transparent
+        // Camera frustum = frustumIdx 0, stream 2 offset = 2*sStride draws
+        // drawCounts[0*3+2] byte offset = 8
+        VkDeviceSize trpOffset = (VkDeviceSize)(2u * sStride) * sizeof(VkDrawIndexedIndirectCommand);
+        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, trpOffset,
+                                      ctx->drawCountBuffer, 8,
+                                      ctx->indirectDrawCount,
+                                      sizeof(VkDrawIndexedIndirectCommand));
+
+        vkCmdEndRendering(cmd);
+    }
+
+    // 7. AAA 2D UI PASS (Always draws last, OVER the glass!)
+    VkRenderingAttachmentInfo uiColorAtt = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = ctx->swapChainImageViews[imageIndex], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+    VkRenderingAttachmentInfo uiDepthAtt = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = ctx->depthImageView, .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+    VkRenderingInfo uiRenderInfo = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { {0,0}, ctx->swapChainExtent }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &uiColorAtt, .pDepthAttachment = &uiDepthAtt };
+
+    vkCmdBeginRendering(cmd, &uiRenderInfo);
+    renderer2D_draw(cmd);
+    vkCmdEndRendering(cmd);
 
     /* Transition color image to presentable format */
     VkImageMemoryBarrier presentBarrier = {
@@ -1613,6 +1817,13 @@ void cleanupSwapChainResources(VulkanContext* ctx, VkSwapchainKHR oldSwapchain)
 {
     vkDeviceWaitIdle(ctx->device);
 
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (transmissionView[i]) { vkDestroyImageView(ctx->device, transmissionView[i], NULL); transmissionView[i] = VK_NULL_HANDLE; }
+        if (transmissionImage[i]) { vkDestroyImage(ctx->device, transmissionImage[i], NULL); transmissionImage[i] = VK_NULL_HANDLE; }
+        if (transmissionMemory[i]) { vkFreeMemory(ctx->device, transmissionMemory[i], NULL); transmissionMemory[i] = VK_NULL_HANDLE; }
+    }
+    if (transmissionSampler) { vkDestroySampler(ctx->device, transmissionSampler, NULL); transmissionSampler = VK_NULL_HANDLE; }
+
     if (ctx->shadowSampler) { vkDestroySampler(ctx->device, ctx->shadowSampler, NULL); ctx->shadowSampler = VK_NULL_HANDLE; }
     if (ctx->shadowView)    { vkDestroyImageView(ctx->device, ctx->shadowView, NULL); ctx->shadowView = VK_NULL_HANDLE; }
     if (ctx->shadowImage)   { vkDestroyImage(ctx->device, ctx->shadowImage, NULL); ctx->shadowImage = VK_NULL_HANDLE; }
@@ -1685,7 +1896,8 @@ void recreateSwapChain(VulkanContext* ctx)
         .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         .imageExtent      = ext,
         .imageArrayLayers = 1,
-        .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        // AAA FIX: Allow Vulkan to copy FROM the swapchain for our screen-space refraction!
+        .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform     = caps.currentTransform,
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
@@ -2264,22 +2476,23 @@ void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
 
 void createLightingDescriptors(VulkanContext* ctx)
 {
-    VkDescriptorSetLayoutBinding b[6] = {
+    VkDescriptorSetLayoutBinding b[7] = {
         { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT },
         { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
-        { .binding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
+        { .binding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding = 6, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
     };
-    VkDescriptorBindingFlagsEXT flags[6] = { 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT };
-    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT flagsInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 6, .pBindingFlags = flags };
-    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &flagsInfo, .bindingCount = 6, .pBindings = b };
+    VkDescriptorBindingFlagsEXT flags[7] = { 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT };
+    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT flagsInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 7, .pBindingFlags = flags };
+    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &flagsInfo, .bindingCount = 7, .pBindings = b };
     vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->lightingSetLayout);
 
     VkDescriptorPoolSize ps[2] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT * 5 }
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT * 6 }
     };
     VkDescriptorPoolCreateInfo pci = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -2328,6 +2541,15 @@ void createLightingDescriptors(VulkanContext* ctx)
         for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
             VkDescriptorImageInfo dInfo = { .sampler = ctx->shadowSampler, .imageView = ctx->shadowView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[f], .dstBinding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dInfo };
+            vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        }
+    }
+
+    // AAA FIX: If depth resources (transmission) were created before lighting, map Binding 6 now!
+    if (transmissionView[0] != VK_NULL_HANDLE) {
+        for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+            VkDescriptorImageInfo dInfo = { .sampler = transmissionSampler, .imageView = transmissionView[f], .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[f], .dstBinding = 6, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dInfo };
             vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
         }
     }
@@ -2383,7 +2605,8 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
     maxMeshes = 16384 + 4096;
     VkDeviceSize drawSize  = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize visSize   = maxMeshes * 5 * sizeof(uint32_t);
-    VkDeviceSize countSize = 5 * sizeof(uint32_t);
+    // 3 streams (Opaque, Transmission, Transparent) per frustum x 5 frustums = 15 slots
+    VkDeviceSize countSize = 15 * sizeof(uint32_t);
 
     /* Source: CPU writes per-mesh draw commands, compact.comp reads.
        CRITICAL: Multiplied by MAX_FRAMES_IN_FLIGHT to prevent CPU/GPU tearing! */
@@ -2459,9 +2682,10 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
             continue;
         }
 
-        // CRITICAL: Morph targets drop their indices (indexCount=0).
-        // We MUST use vertexCount for the draw call so they don't vanish when sorted!
-        cmds[i].indexCount    = (m->indexCount == 0 && m->dynamicBaseVertex != UINT32_MAX) ? m->vertexCount : m->indexCount;
+        // CRITICAL FIX: If a mesh has no indices (sequential triangles), we MUST set indexCount to vertexCount
+        // regardless of whether it's a dynamic morph target or a static mega-buffer mesh.
+        // Otherwise, non-indexed glTF primitives evaluate to 0 and become completely invisible.
+        cmds[i].indexCount    = (m->indexCount == 0) ? m->vertexCount : m->indexCount;
         cmds[i].instanceCount = 1;
         cmds[i].firstIndex    = (m->megaBaseIndex == UINT32_MAX) ? 0 : m->megaBaseIndex;
 
@@ -2559,6 +2783,17 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].morphDeltaOffset = m->morphDeltaOffset - (int)(m->megaBaseVertex * m->morphCount);
             dst[i].morphWeightOffset = m->morphWeightOffset;
             dst[i].morphCount   = m->morphCount;
+
+            dst[i].transmissionFactor = m->transmissionFactor;
+            dst[i].ior                = m->ior;
+            dst[i].thicknessFactor    = m->thicknessFactor;
+            dst[i].transmissionIndex  = m->transmissionIndex;
+            dst[i].thicknessIndex     = m->thicknessIndex;
+            dst[i].attenuationColorR  = m->attenuationColor[0];
+            dst[i].attenuationColorG  = m->attenuationColor[1];
+            dst[i].attenuationColorB  = m->attenuationColor[2];
+            dst[i].attenuationDistance = m->attenuationDistance;
+            dst[i].dispersion         = m->dispersion;
         }
 
         /* Clear the entire 64-bit block for this frame instantly */

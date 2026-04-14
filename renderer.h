@@ -147,6 +147,19 @@ typedef struct {
     int   morphDeltaOffset;   // Offset into Mega Morph Buffer
     int   morphWeightOffset;  // Offset into dynamic Morph Weight Buffer
     int   morphCount;         // Number of active morph targets
+
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    float _pad0;
+    float _pad1;
 } MeshGPUData;
 
 extern PushConstants pushConstants;
@@ -207,6 +220,15 @@ typedef struct {
     float roughnessFactor;        // default 1.0
     float emissiveStrength;       // default 1.0
     vec3  emissiveFactor;         // default {0,0,0}
+
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    vec3  attenuationColor;
+    float attenuationDistance;
+    float dispersion;
 } Mesh;
 
 typedef struct {
@@ -241,6 +263,15 @@ typedef struct {
     int   emissiveIndex;     /* default -1        */
     int   displacementIndex;
     float displacementScale;
+
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    vec3  attenuationColor;
+    float attenuationDistance;
+    float dispersion;
 } Material;
 
 void set_material(const Material* mat);

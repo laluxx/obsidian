@@ -3,6 +3,11 @@
 # TODO
 One thing to keep an eye on: the magic constant (16384 + 4096) appears four times across three files now with no named constant. That's going to bite you when you change maxMeshes. Should be a #define MAX_INDIRECT_COMMANDS or pulled from the context struct.
 
+
+* TODO Bugs [0/1]
+- [ ] Until i move the position of the camera, gltf loaded meshes will flicker
+
+
 * TODO Correctness [1/2]
 - [X] The lines should not use PBR (Fixed via dedicated unlit SSBO slot and 0-instance indirect command).
 
@@ -10,7 +15,7 @@ One thing to keep an eye on: the magic constant (16384 + 4096) appears four time
 - [ ] Parallax Occlusion Mapping - Togglable per material.
 
 * TODO Performance [2/7]
-- [ ] Serialize pipelines so it opens istantly
+- [ ] Serialize IBLs, Materials, GLTFs and Pipelines on quit so it restarts istantly
 - [ ] As I get closer to a texture the FPS drops drastically (Investigate mipmap generation, texture cache thrashing, or lack of anisotropic filtering limits).
 - [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they hit the rasterizer.
 - [ ] GPU Compute Animator - Move rigid node hierarchy and keyframe interpolation entirely to a Compute Shader to eliminate CPU bottlenecks.
@@ -49,7 +54,7 @@ One thing to keep an eye on: the magic constant (16384 + 4096) appears four time
 as you can see i heavily optimized everything What do you think are the next big wins in perfomance, i want to optimize EVERYTHING LIKE A MANIAC i really want to go in the rabbithole and squeeze every possible frame out of this engine it has to spend 0 time in the CPU it has to be AAA level it has to be super fast i want to focus on optimizations, NOTE that i also value ALOT refactors and removing lines count from a file what do you think we should do next ?
 
 
-When you want me to modify code say EXACTLY find this in this file: and replace with EXACTLY this: with EXACT indentation i want you tlaways behave like this when you want me to modify code, let's begin and let's do the RIGHT things that will make the architecture better and improve massivly performance let's begin!
+When you want me to modify code say EXACTLY find this in this file: and replace with EXACTLY this: with EXACT indentation and it has to be ONLY ASCII no invisible characters, you should also talk and say exactly what we are doing and why and what we should do next at the end, i want you to alaways behave like this when you want me to modify code, let's begin and let's do the RIGHT things that will make the architecture better and improve massivly performance let's begin!
 
 
 

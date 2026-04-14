@@ -1,6 +1,5 @@
 #version 450
-
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
 struct DrawCommand {
     uint indexCount;
@@ -10,50 +9,97 @@ struct DrawCommand {
     uint firstInstance;
 };
 
+// MeshData mirror — only the fields we need for stream routing.
+// Must match MeshGPUData layout in renderer.h exactly up to transmissionFactor.
+struct MeshData {
+    mat4  model;          // 64 bytes
+    int   albedoIndex;    // +64
+    int   normalMapIndex;
+    int   metallicRoughIndex;
+    int   aoIndex;
+    int   emissiveIndex;  // +80
+    int   isUnlit;
+    int   alphaMode;      // +88  <-- we need this
+    float alphaCutoff;
+    vec4  baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    float emissiveStrength;
+    int   displacementIndex;
+    vec3  emissiveFactor;
+    float displacementScale;
+    vec4  aabbMin;
+    vec4  aabbMax;
+    int   jointOffset;
+    int   morphDeltaOffset;
+    int   morphWeightOffset;
+    int   morphCount;
+    float transmissionFactor; // <-- and this
+    // rest we don't need
+};
+
 layout(set = 0, binding = 0) readonly buffer VisibilityBuffer   { uint visibility[]; };
 layout(set = 0, binding = 1) readonly buffer SrcIndirectBuffer  { DrawCommand srcDraws[]; };
 layout(set = 0, binding = 2) writeonly buffer DstIndirectBuffer { DrawCommand dstDraws[]; };
 layout(set = 0, binding = 3) buffer DrawCountBuffer             { uint drawCounts[]; };
 
+// NEW: binding 4 — the mesh SSBO so we can read alphaMode and transmissionFactor
+layout(set = 0, binding = 4) readonly buffer MeshSSBO           { MeshData meshes[]; };
+
 layout(push_constant) uniform PC {
     uint meshCount;
-    uint maxMeshes;
-};
-
-shared uint sdata[64];
+    uint maxMeshes;       // slot stride = 20480 draws per frustum per stream
+    uint opaqueMeshCount; // unused now — we route by material property
+    uint staticMeshCount; // first dynamic mesh index
+} pc;
 
 void main() {
-    uint lid        = gl_LocalInvocationID.x;
-    uint gid        = gl_GlobalInvocationID.x;
-    uint frustumIdx = gl_WorkGroupID.y;           // Y dimension = frustum
-    uint base       = frustumIdx * meshCount;
+    uint frustumIdx = gl_GlobalInvocationID.x;
+    uint writeOffset = frustumIdx * pc.maxMeshes;
 
-    uint vis = (gid < meshCount) ? visibility[base + gid] : 0u;
+    uint opqCount  = 0; // Stream 0: opaque + transmission (drawn before screen copy)
+    uint xmtCount  = 0; // Stream 1: transmission (drawn after screen copy, before alpha blend)
+    uint trnCount  = 0; // Stream 2: alpha blend transparent
 
-    // Kogge-Stone inclusive prefix sum
-    sdata[lid] = vis;
-    barrier();
-    for (uint stride = 1u; stride < 64u; stride <<= 1u) {
-        uint v = (lid >= stride) ? sdata[lid - stride] : 0u;
-        barrier();
-        sdata[lid] += v;
-        barrier();
+    // Slot stride per stream within indirectBuffer:
+    // Stream 0 opaque:       writeOffset + [0       .. 6826)
+    // Stream 1 transmission: writeOffset + [6826    .. 13652)
+    // Stream 2 transparent:  writeOffset + [13652   .. 20480)
+    // Using equal thirds of maxMeshes=20480 => 6826 each (safe, meshes << 6826)
+    uint streamStride = pc.maxMeshes / 3u;
+
+    for (uint i = 0; i < pc.meshCount; i++) {
+        if (visibility[frustumIdx * pc.meshCount + i] == 0u) continue;
+
+        DrawCommand cmd = srcDraws[i];
+        if (cmd.instanceCount == 0u) continue;
+
+        // Dynamic meshes (past staticMeshCount) are always opaque
+        if (i >= pc.staticMeshCount) {
+            dstDraws[writeOffset + opqCount++] = cmd;
+            continue;
+        }
+
+        MeshData m = meshes[i];
+        int alphaMode = m.alphaMode;
+        float transmission = m.transmissionFactor;
+
+        if (transmission > 0.0) {
+            // Transmission: needs screen copy — drawn in dedicated pass after copy
+            dstDraws[writeOffset + streamStride + xmtCount++] = cmd;
+        } else if (alphaMode == 2) {
+            // Alpha blend transparent: drawn last
+            dstDraws[writeOffset + 2u * streamStride + trnCount++] = cmd;
+        } else {
+            // Opaque or alpha mask: drawn first
+            dstDraws[writeOffset + opqCount++] = cmd;
+        }
     }
 
-    uint localExclusive = sdata[lid] - vis;
-    uint workgroupTotal = sdata[63];
-    barrier();
-
-    uint blockBase = 0u;
-    if (lid == 0u) {
-        blockBase = atomicAdd(drawCounts[frustumIdx], workgroupTotal);
-        sdata[0]  = blockBase;
-    }
-    barrier();
-    blockBase = sdata[0];
-
-    if (vis == 1u && gid < meshCount) {
-        uint dstIdx = frustumIdx * maxMeshes + blockBase + localExclusive;
-        dstDraws[dstIdx] = srcDraws[gid];
-    }
+    // drawCounts layout per frustum: [opaque, transmission, transparent]
+    // Total 3 uints per frustum, 5 frustums = 15 uints needed.
+    // Current drawCountBuffer is 10 uints (2 per frustum). We need to expand to 3.
+    drawCounts[frustumIdx * 3u + 0u] = opqCount;
+    drawCounts[frustumIdx * 3u + 1u] = xmtCount;
+    drawCounts[frustumIdx * 3u + 2u] = trnCount;
 }

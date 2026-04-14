@@ -39,6 +39,19 @@ struct MeshData {
     int   morphDeltaOffset;
     int   morphWeightOffset;
     int   morphCount;
+
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    float _pad0;
+    float _pad1;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
@@ -170,7 +183,16 @@ void main() {
     vec3 N = normalize(normalMatrix * localNormal);
     vec3 T = normalize(normalMatrix * localTangent);
 
-    T = normalize(T - dot(T, N) * N);
+    // AAA NaN Protection: Gram-Schmidt orthogonalization can explode if T and N align!
+    vec3 T_ortho = T - dot(T, N) * N;
+    if (dot(T_ortho, T_ortho) > 0.0001) {
+        T = normalize(T_ortho);
+    } else {
+        // Fallback tangent to prevent black hole pixel explosions at grazing angles
+        vec3 up = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        T = normalize(cross(up, N));
+    }
+
     vec3 B = cross(N, T) * inTangent.w;
 
     outTBN = mat3(T, B, N);

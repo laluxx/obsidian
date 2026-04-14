@@ -27,6 +27,19 @@ struct MeshData {
     int   morphDeltaOffset;
     int   morphWeightOffset;
     int   morphCount;
+
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    float _pad0;
+    float _pad1;
 };
 
 layout(set = 0, binding = 0) readonly buffer MeshSSBO      { MeshData meshes[]; };
