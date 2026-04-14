@@ -3,12 +3,15 @@
 # TODO
 One thing to keep an eye on: the magic constant (16384 + 4096) appears four times across three files now with no named constant. That's going to bite you when you change maxMeshes. Should be a #define MAX_INDIRECT_COMMANDS or pulled from the context struct.
 
+Check quad utilization
+
 
 * TODO Bugs [0/1]
 - [ ] Until i move the position of the camera, gltf loaded meshes will flicker
 
 
 * TODO Correctness [1/2]
+- [ ] The ease_table64 Bézier entries casting float function pointers to EaseFn64 is a known smell — worth a note.
 - [X] The lines should not use PBR (Fixed via dedicated unlit SSBO slot and 0-instance indirect command).
 
 * TODO Features [0/1]

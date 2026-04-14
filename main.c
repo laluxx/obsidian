@@ -14,6 +14,8 @@
 #include "window.h"
 #include "keychords.h"
 #include "vertico.h"
+#include "editor.h"
+#include "gizmo.h"
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -118,6 +120,10 @@ void key_callback(int key, int action, int mods) {
 void mouse_button_callback(int button, int action, int mods) {
     // Only handle mouse buttons in editor mode (camera inactive)
     if (!camera.active) {
+        double mx, my;
+        glfwGetCursorPos(context.window, &mx, &my);
+        gizmo_mouse_button(button, action, mods, mx, my);
+
         // Middle mouse button - orbit/pan
         if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
             if (action == PRESS) {
@@ -178,6 +184,10 @@ void scroll_callback(double xoffset, double yoffset) {
 }
 
 void cursor_pos_callback(double xpos, double ypos) {
+    if (!camera.active) {
+        gizmo_mouse_move(xpos, ypos);
+    }
+
     if (firstMouse) {
         lastX = xpos;
         lastY = ypos;
@@ -258,6 +268,10 @@ int main() {
 
     setInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
+    editor_init();
+    gizmo_init();
+
+
     /* load_obj("./assets/teapot.obj", "teapot",  red); */
     /* load_obj("./assets/cow.obj", "cow", blue); */
 
@@ -274,42 +288,41 @@ int main() {
     Texture2D* texture4 = texture_pool_get(tex4);
     Texture2D* texture5 = texture_pool_get(tex5);
 
-    /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene); // PASS */
-    /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene);               // PASS */
-    /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene);               // PASS */
-    /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene);             // PASS */
-    /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene);              // PASS */
-    /* load_gltf("./assets/gltf/UnlitTest.glb", &scene);                       // PASS */
-    /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene);                  // PASS */
-    /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene);   // PASS */
-    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene);           // TODO variants in the editor */
-    /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                     // PASS */
-    /* load_gltf("./assets/gltf/Box.glb", &scene);                             // PASS */
-    /* load_gltf("./assets/gltf/Corset.glb", &scene);                          // PASS (but it's really small) */
-    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene);                       // PASS */
-    /* load_gltf("./assets/gltf/RecursiveSkeletons.glb", &scene);              // FAIL */
-    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene);             // PASS */
-    /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene);                     // PASS */
-    /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene);                 // PASS */
-    /* load_gltf("./assets/gltf/Avocado.glb", &scene);                         // PASS */
-    /* load_gltf("./assets/gltf/Lantern.glb", &scene);                         // PASS */
-    /* load_gltf("./assets/gltf/TextureCoordinateTest.glb", &scene);           // FAIL */
-    /* load_gltf("./assets/gltf/AnimatedColorsCube.glb", &scene);              // FAIL */
-    /* load_gltf("./assets/gltf/CubeVisibility.glb", &scene);                  // FAIL */
-    /* load_gltf("./assets/gltf/EmissiveStrengthTest.glb", &scene);            // FAIL also the sun goes thorugh walls */
-    /* load_gltf("./assets/gltf/InterpolationTest.glb", &scene);               // FAIL */
-    load_gltf("./assets/gltf/DragonAttenuation.glb", &scene);               // PASS
-
-
-    /* load_gltf("./assets/gltf/DispersionTest.glb", &scene); */
-    /* load_gltf("./assets/gltf/DragonDispersion.glb", &scene); */
+    /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene);     // PASS */
+    /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene);                   // PASS */
+    /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene);                   // PASS */
+    /* load_gltf("./assets/gltf/AnimatedMorphSphere.glb", &scene);                 // PASS */
+    /* load_gltf("./assets/gltf/AlphaBlendModeTest.glb", &scene);                  // PASS */
+    /* load_gltf("./assets/gltf/UnlitTest.glb", &scene);                           // PASS */
+    /* load_gltf("./assets/gltf/Unicode❤♻Test.glb", &scene);                      // PASS */
+    /* load_gltf("./assets/gltf/SimpleMorph/glTF/SimpleMorph.gltf", &scene);       // PASS */
+    /* load_gltf("./assets/gltf/MaterialsVariantsShoe.glb", &scene);               // TODO variants in the editor */
+    /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                         // PASS */
+    /* load_gltf("./assets/gltf/Box.glb", &scene);                                 // PASS */
+    /* load_gltf("./assets/gltf/Corset.glb", &scene);                              // PASS (but it's really small) */
+    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene);                           // PASS */
+    /* load_gltf("./assets/gltf/Fox.glb", &scene);                                 // PASS */
+    /* load_gltf("./assets/gltf/RecursiveSkeletons.glb", &scene);                  // PASS */
+    /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene);                        // PASS */
+    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene);                 // PASS */
+    /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene);                         // PASS */
+    /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene);                     // PASS */
+    /* load_gltf("./assets/gltf/Avocado.glb", &scene);                             // PASS */
+    /* load_gltf("./assets/gltf/Lantern.glb", &scene);                             // PASS */
+    /* load_gltf("./assets/gltf/TextureCoordinateTest.glb", &scene);               // PASS */
+    /* load_gltf("./assets/gltf/AnimatedColorsCube.glb", &scene);                  // FAIL */
+    /* load_gltf("./assets/gltf/CubeVisibility.glb", &scene);                      // FAIL */
+    /* load_gltf("./assets/gltf/EmissiveStrengthTest.glb", &scene);                // FAIL also the sun goes thorugh walls */
+    /* load_gltf("./assets/gltf/InterpolationTest.glb", &scene);                   // FAIL */
+    load_gltf("./assets/gltf/DragonAttenuation.glb", &scene);                   // PASS
+    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // PASS */
+    /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // PASS */
+    /* load_gltf("./assets/gltf/DragonDispersion.glb", &scene);                    // FAIL */
+    /* load_gltf("./assets/gltf/DispersionTest.glb", &scene);                      // FAIL */
     /* load_gltf("./assets/gltf/IridescenceMetallicSpheres/glTF/IridescenceMetallicSpheres.gltf", &scene); // FAIL KHR_materials_iridescence */
-    /* load_gltf("./assets/gltf/IORTestGrid.glb", &scene); */
-    /* load_gltf("./assets/gltf/TransmissionTest.glb", &scene); */
-    /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // TODO glass trasparent maeterial (refraction) */
-    /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // FIXME Materials */
-    /* load_gltf("./assets/gltf/Fox.glb", &scene); // FIXME ANIMATIONS */
-    /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene); // FIXME */
+    /* load_gltf("./assets/gltf/IORTestGrid.glb", &scene);                         // FAIL */
+    /* load_gltf("./assets/gltf/TransmissionTest.glb", &scene);                    // FAIL */
+
 
     Font *jetbrains = load_font("./assets/fonts/JetBrainsMono-Regular.ttf", 81);
     vertico_init();
@@ -318,6 +331,7 @@ int main() {
     // Bake and load the HDR Environment Map
     loadIBL(&context, "./assets/hdr/monochrome_studio_02_4k.hdr");
     /* loadIBL(&context, "./assets/hdr/meadow_2_4k.hdr"); */
+    /* loadIBL(&context, "./assets/hdr/ferndale_studio_05_4k.hdr"); */
 
     // Load our beautiful 4K rock material automatically!
     Material rockMat = load_pbr_material_dir("./assets/textures/rock_wall_10_4k.blend/textures");
@@ -342,6 +356,9 @@ int main() {
         beginFrame();
 
         vertico_render();
+        editor_update();
+        editor_render();
+        gizmo_render(editor.inspector.selected_mesh_index);
 
         // 3D GEOMETRY
         /* vec3 v0 = { -0.03f, -0.03f, 0.0f }; */
@@ -405,6 +422,9 @@ int main() {
         /* texture2D((vec2){500, 200}, (vec2){150, 150}, texture2, WHITE); */
         /* texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE); */
 
+        vec4 radii = {0.0, 100.0, 10.0, 0.0};
+        exQuad2D((vec2){300, 900}, (vec2){300, 300}, radii, 10, (Color){0.937f, 0.310f, 0.420f, 1.0f}, BLACK);
+
 
         // Render axes
         float lineLength = 10000.0f; // Very long lines to appear "infinite"
@@ -419,7 +439,7 @@ int main() {
     }
 
     vkDeviceWaitIdle(context.device);
-
+    editor_cleanup();
     texture_pool_cleanup(&context);
     cleanup(&context);
 

@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define THEME_COUNT 11
+#define THEME_COUNT 12
 
 static ColorScheme themes[THEME_COUNT];
 static int currentThemeIndex = 0;
@@ -65,10 +65,86 @@ void loadThemeByName(const char *themeName) {
     }
 
 
-
-
 void initThemes() {
     themes[0] = (ColorScheme){
+        .name                  = "obsidian",
+        .bg                    = hexToColor("#131314"),
+        .bg_alt                = hexToColor("#1E1F20"),
+        .bg_deep               = hexToColor("#282A2C"),
+        .cursor                = hexToColor("#E3E3E3"),
+        .text                  = hexToColor("#E3E3E3"),
+        .text_dim              = hexToColor("#C4C7C5"),
+        .border                = hexToColor("#484845"),
+        .accent                = hexToColor("#C6613F"),
+        .fringe_fg             = hexToColor("#E3E3E3"),
+        .fringe_bg             = hexToColor("#131314"),
+        .minibuffer            = hexToColor("#131314"),
+        .x                     = hexToColor("#EF4F6B"),
+        .y                     = hexToColor("#87D602"),
+        .z                     = hexToColor("#298CF5"),
+        .x_alt                 = hexToColor("#FFDCE2"),
+        .y_alt                 = hexToColor("#F4FFDC"),
+        .z_alt                 = hexToColor("#DCEFFF"),
+        .show_paren_match      = hexToColor(""),
+        .isearch_highlight     = hexToColor(""),
+        .minibuffer_prompt     = hexToColor(""),
+        .region_bg             = hexToColor(""),
+        .region_fg             = hexToColor(""),
+        .type                  = hexToColor(""),
+        .string                = hexToColor(""),
+        .number                = hexToColor(""),
+        .function              = hexToColor(""),
+        .preprocessor          = hexToColor(""),
+        .variable              = hexToColor(""),
+        .keyword               = hexToColor(""),
+        .comment               = hexToColor(""),
+        .null                  = hexToColor(""),
+        .negation              = hexToColor(""),
+        .success               = hexToColor("#6fb593"),
+        .warning               = hexToColor("#dbac66"),
+        .error                 = hexToColor("#cd5c60"),
+        .diff_hl_change        = hexToColor(""),
+        .diff_hl_change_cursor = hexToColor(""),
+        .diff_hl_insert        = hexToColor(""),
+        .diff_hl_insert_cursor = hexToColor(""),
+        .diff_hl_bg            = hexToColor(""),
+        .diff_hl_change_bg     = hexToColor(""),
+        .header_line           = hexToColor(""),
+        .rainbow_delimiters_base_face    = hexToColor(""),
+        .rainbow_delimiters_depth_1_face = hexToColor(""),
+        .rainbow_delimiters_depth_2_face = hexToColor(""),
+        .rainbow_delimiters_depth_3_face = hexToColor(""),
+        .rainbow_delimiters_depth_4_face = hexToColor(""),
+        .rainbow_delimiters_depth_5_face = hexToColor(""),
+        .rainbow_delimiters_depth_6_face = hexToColor(""),
+        .diredfl_dir_heading   = hexToColor(""),
+        .diredfl_dir_priv      = hexToColor(""),
+        .diredfl_read_priv     = hexToColor(""),
+        .diredfl_write_priv    = hexToColor(""),
+        .diredfl_exec_priv     = hexToColor(""),
+        .diredfl_no_priv       = hexToColor(""),
+        .diredfl_number        = hexToColor(""),
+        .diredfl_date_time     = hexToColor(""),
+        .diredfl_dir_name      = hexToColor(""),
+        .diredfl_file_suffix   = hexToColor(""),
+        .button_bg             = hexToColor(""),
+        .button_fg             = hexToColor(""),
+        .vertico_current       = hexToColor(""),
+        .orderless_match_face_0_bg = hexToColor(""),
+        .orderless_match_face_0_fg = hexToColor(""),
+        .orderless_match_face_1_bg = hexToColor(""),
+        .orderless_match_face_1_fg = hexToColor(""),
+        .orderless_match_face_2_bg = hexToColor(""),
+        .orderless_match_face_2_fg = hexToColor(""),
+        .orderless_match_face_3_bg = hexToColor(""),
+        .orderless_match_face_3_fg = hexToColor(""),
+        .window_divider = hexToColor(""),
+        .mode_line_active_fg = hexToColor(""),
+        .mode_line_active_bg = hexToColor(""),
+        .mode_line_inactive_fg = hexToColor(""),
+        .mode_line_inactive_bg = hexToColor(""),
+    };
+    themes[1] = (ColorScheme){
         .name                  = "kaolin-dark",
         .bg                    = hexToColor("#18181B"),
         .cursor                = hexToColor("#e4e4e8"),
@@ -135,7 +211,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#545c5e"),
         .mode_line_inactive_bg = hexToColor("#222225"),
     };
-    themes[1] = (ColorScheme){
+    themes[2] = (ColorScheme){
         .name                  = "kaolin-bubblegum",
         .bg                    = hexToColor("#14171E"),
         .cursor                = hexToColor("#D6A0D1"),
@@ -201,7 +277,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#454459"),
         .mode_line_inactive_bg = hexToColor("#191D26"),
     };
-    themes[2] = (ColorScheme){
+    themes[3] = (ColorScheme){
         .name                  = "kaolin-ocean",
         .bg                    = hexToColor("#1A1A25"),
         .cursor                = hexToColor("#F2F2F2"),
@@ -267,7 +343,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#545c5e"),
         .mode_line_inactive_bg = hexToColor("#252534"),
     };
-    themes[3] = (ColorScheme){
+    themes[4] = (ColorScheme){
         .name                  = "kaolin-temple",
         .bg                    = hexToColor("#2B2B2F"),
         .cursor                = hexToColor("#EEDCC1"),
@@ -333,7 +409,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#697375"),
         .mode_line_inactive_bg = hexToColor("#303035"),
     };
-    themes[4] = (ColorScheme){
+    themes[5] = (ColorScheme){
         .name                  = "dark+",
         .bg                    = hexToColor("#1e1e1e"),
         .cursor                = hexToColor("#237AD3"),
@@ -399,7 +475,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#339CDB"),
         .mode_line_inactive_bg = hexToColor("#1d1d1d"),
     };
-    themes[5] = (ColorScheme){
+    themes[6] = (ColorScheme){
         .name                  = "doom-one",
         .bg                    = hexToColor("#282C34"),
         .cursor                = hexToColor("#51AFEF"),
@@ -417,7 +493,7 @@ void initThemes() {
         .number                = hexToColor("#bbc2cf"),
         .function              = hexToColor("#c678dd"),
         .preprocessor          = hexToColor("#51afef"),
-        .variable              = hexToColor("#dcaeea"), 
+        .variable              = hexToColor("#dcaeea"),
         .keyword               = hexToColor("#51afef"),
         .comment               = hexToColor("#5B6268"),
         .null                  = hexToColor("#a9a1e1"),
@@ -465,7 +541,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#5B6268"),
         .mode_line_inactive_bg = hexToColor("#21242b"),
     };
-    themes[6] = (ColorScheme){
+    themes[7] = (ColorScheme){
         .name                  = "city-lights",
         .bg                    = hexToColor("#1D252C"),
         .cursor                = hexToColor("#51AFEF"),
@@ -531,7 +607,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#56697A"),
         .mode_line_inactive_bg = hexToColor("#1D252C"),
     };
-    themes[7] = (ColorScheme){
+    themes[8] = (ColorScheme){
         .name                  = "molokai",
         .bg                    = hexToColor("#1C1E1F"),
         .cursor                = hexToColor("#FB2874"),
@@ -597,7 +673,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#4e4e4e"),
         .mode_line_inactive_bg = hexToColor("#171819"),
     };
-    themes[8] = (ColorScheme){
+    themes[9] = (ColorScheme){
         .name                  = "monokai-ristretto",
         .bg                    = hexToColor("#2c2525"),
         .cursor                = hexToColor("#fff1f3"),
@@ -663,7 +739,7 @@ void initThemes() {
         .mode_line_inactive_fg = hexToColor("#fff1f3"),
         .mode_line_inactive_bg = hexToColor("#2c2525"),
     };
-    themes[9] = (ColorScheme){
+    themes[10] = (ColorScheme){
         .name                  = "nord",
         .bg                    = hexToColor("#2E3440"),
         .cursor                = hexToColor("#81A1C1"),
@@ -730,7 +806,7 @@ void initThemes() {
         .mode_line_inactive_bg = hexToColor("#292e39"),
     };
 
-    themes[10] = (ColorScheme){
+    themes[11] = (ColorScheme){
         .name                  = "modus-vivendi",
         .bg                    = hexToColor("#000000"),
         .cursor                = hexToColor("#ffffff"),

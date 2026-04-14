@@ -916,14 +916,33 @@ void quad2D(vec2 position, vec2 size, Color color) {
     float x = position[0], y = position[1];
     float w = size[0], h = size[1];
 
-    /* textureIndex = -1: shader outputs fragColor directly, no texture sample */
+    /* We pass 'color' to the unused border param so C doesn't complain about uninitialized fields */
     Vertex2D quad[6] = {
-        {{x,     y    }, color, {0.0f, 0.0f}, -1},
-        {{x + w, y    }, color, {1.0f, 0.0f}, -1},
-        {{x + w, y + h}, color, {1.0f, 1.0f}, -1},
-        {{x,     y    }, color, {0.0f, 0.0f}, -1},
-        {{x + w, y + h}, color, {1.0f, 1.0f}, -1},
-        {{x,     y + h}, color, {0.0f, 1.0f}, -1}
+        {{x,     y    }, color, {0.0f, 0.0f}, -1, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{x + w, y    }, color, {1.0f, 0.0f}, -1, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{x + w, y + h}, color, {1.0f, 1.0f}, -1, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{x,     y    }, color, {0.0f, 0.0f}, -1, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{x + w, y + h}, color, {1.0f, 1.0f}, -1, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{x,     y + h}, color, {0.0f, 1.0f}, -1, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color}
+    };
+
+    memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+    vertexCount2D += 6;
+}
+
+void exQuad2D(vec2 position, vec2 size, vec4 radii, float borderThickness, Color borderColor, Color color) {
+    if (vertexCount2D + 6 > MAX_VERTICES) return;
+
+    float x = position[0], y = position[1];
+    float w = size[0], h = size[1];
+
+    Vertex2D quad[6] = {
+        {{x,     y    }, color, {0.0f, 0.0f}, -2, {w, h}, {radii[0], radii[1], radii[2], radii[3]}, borderThickness, borderColor},
+        {{x + w, y    }, color, {1.0f, 0.0f}, -2, {w, h}, {radii[0], radii[1], radii[2], radii[3]}, borderThickness, borderColor},
+        {{x + w, y + h}, color, {1.0f, 1.0f}, -2, {w, h}, {radii[0], radii[1], radii[2], radii[3]}, borderThickness, borderColor},
+        {{x,     y    }, color, {0.0f, 0.0f}, -2, {w, h}, {radii[0], radii[1], radii[2], radii[3]}, borderThickness, borderColor},
+        {{x + w, y + h}, color, {1.0f, 1.0f}, -2, {w, h}, {radii[0], radii[1], radii[2], radii[3]}, borderThickness, borderColor},
+        {{x,     y + h}, color, {0.0f, 1.0f}, -2, {w, h}, {radii[0], radii[1], radii[2], radii[3]}, borderThickness, borderColor}
     };
 
     memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
@@ -944,12 +963,12 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
 
     int32_t slot = (int32_t)texture->bindlessSlot;
     Vertex2D quad[6] = {
-        {{x,     y    }, tint, {0.0f, 1.0f}, slot},
-        {{x + w, y    }, tint, {1.0f, 1.0f}, slot},
-        {{x + w, y + h}, tint, {1.0f, 0.0f}, slot},
-        {{x,     y    }, tint, {0.0f, 1.0f}, slot},
-        {{x + w, y + h}, tint, {1.0f, 0.0f}, slot},
-        {{x,     y + h}, tint, {0.0f, 0.0f}, slot}
+        {{x,     y    }, tint, {0.0f, 1.0f}, slot, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, tint},
+        {{x + w, y    }, tint, {1.0f, 1.0f}, slot, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, tint},
+        {{x + w, y + h}, tint, {1.0f, 0.0f}, slot, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, tint},
+        {{x,     y    }, tint, {0.0f, 1.0f}, slot, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, tint},
+        {{x + w, y + h}, tint, {1.0f, 0.0f}, slot, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, tint},
+        {{x,     y + h}, tint, {0.0f, 0.0f}, slot, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, tint}
     };
 
     memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));

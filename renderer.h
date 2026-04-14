@@ -62,13 +62,20 @@ typedef struct {
     vec2 pos;
     Color color;
     vec2 texCoord;
-    int32_t textureIndex;  // Which texture to use
+    int32_t textureIndex;  // -1 = color, -2 = exQuad, >= 0 = texture
+    vec2 size;
+    vec4 cornerRadius;     // TL, TR, BR, BL (Exactly fills the old padding!)
+    float borderThickness;
+    Color borderColor;
 } Vertex2D;
 
-void renderer2D_init(void);
 void renderer2D_clear(void);
 void quad2D(vec2 position, vec2 size, Color color);
+void exQuad2D(vec2 position, vec2 size, vec4 radii, float borderThickness, Color borderColor, Color color);
 void renderer2D_upload();
+void renderer2D_init();
+
+
 void renderer2D_draw(VkCommandBuffer cmd);
 
 typedef struct {

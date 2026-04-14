@@ -544,7 +544,7 @@ void vertico_render() {
         int idx = vertico.scroll_offset + i;
         if (idx >= (int)vertico.filtered_count) break;
 
-        bool is_selected = (idx == vertico.selected_index);
+        bool is_selected = ((int)idx == vertico.selected_index);
 
         // Selection highlight
         if (is_selected) {

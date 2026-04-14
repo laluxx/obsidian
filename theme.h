@@ -6,8 +6,19 @@
 typedef struct {
     char *name;
     Color bg;
-    Color cursor;
+    Color bg_alt;
+    Color bg_deep;
     Color text;
+    Color text_dim;
+    Color border;
+    Color accent;
+    Color x;
+    Color y;
+    Color z;
+    Color x_alt;
+    Color y_alt;
+    Color z_alt;
+    Color cursor;
     Color minibuffer;
     Color modeline_border;
     Color show_paren_match;

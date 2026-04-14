@@ -103,7 +103,7 @@ static VkShaderModule createShaderModule(VkDevice device,
 static void fill2DVertexInput(VkPipelineVertexInputStateCreateInfo* vi,
                                VkPipelineInputAssemblyStateCreateInfo* ia,
                                VkVertexInputBindingDescription* bind,
-                               VkVertexInputAttributeDescription       attrs[4])
+                               VkVertexInputAttributeDescription        attrs[8])
 {
     *bind = (VkVertexInputBindingDescription){
         .binding   = 0,
@@ -114,12 +114,16 @@ static void fill2DVertexInput(VkPipelineVertexInputStateCreateInfo* vi,
     attrs[1] = (VkVertexInputAttributeDescription){.location=1, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex2D, color)};
     attrs[2] = (VkVertexInputAttributeDescription){.location=2, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,       .offset=offsetof(Vertex2D, texCoord)};
     attrs[3] = (VkVertexInputAttributeDescription){.location=3, .binding=0, .format=VK_FORMAT_R32G32_SINT,         .offset=offsetof(Vertex2D, textureIndex)};
+    attrs[4] = (VkVertexInputAttributeDescription){.location=4, .binding=0, .format=VK_FORMAT_R32G32_SFLOAT,       .offset=offsetof(Vertex2D, size)};
+    attrs[5] = (VkVertexInputAttributeDescription){.location=5, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex2D, cornerRadius)};
+    attrs[6] = (VkVertexInputAttributeDescription){.location=6, .binding=0, .format=VK_FORMAT_R32_SFLOAT,          .offset=offsetof(Vertex2D, borderThickness)};
+    attrs[7] = (VkVertexInputAttributeDescription){.location=7, .binding=0, .format=VK_FORMAT_R32G32B32A32_SFLOAT, .offset=offsetof(Vertex2D, borderColor)};
 
     *vi = (VkPipelineVertexInputStateCreateInfo){
         .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount   = 1,
         .pVertexBindingDescriptions      = bind,
-        .vertexAttributeDescriptionCount = 4,
+        .vertexAttributeDescriptionCount = 8,
         .pVertexAttributeDescriptions    = attrs
     };
     *ia = (VkPipelineInputAssemblyStateCreateInfo){
@@ -680,7 +684,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
     VkPipelineInputAssemblyStateCreateInfo iaLine = makeIA(VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
 
     VkVertexInputBindingDescription        bind2D;
-    VkVertexInputAttributeDescription      attr2D[4];
+    VkVertexInputAttributeDescription      attr2D[8];
     VkPipelineVertexInputStateCreateInfo   vi2D;
     VkPipelineInputAssemblyStateCreateInfo ia2D;
     fill2DVertexInput(&vi2D, &ia2D, &bind2D, attr2D);
@@ -3050,6 +3054,63 @@ void destroyIBL(VulkanContext* ctx)
     if (ctx->iblBrdfLutSampler)   { vkDestroySampler  (ctx->device, ctx->iblBrdfLutSampler,   NULL); ctx->iblBrdfLutSampler   = VK_NULL_HANDLE; }
 
     ctx->iblLoaded = false;
+}
+
+float renderer_read_depth_at(VulkanContext* ctx, uint32_t x, uint32_t y) {
+    if (x >= ctx->swapChainExtent.width || y >= ctx->swapChainExtent.height) return 1.0f;
+
+    vkDeviceWaitIdle(ctx->device); // Sync to ensure the frame finishes rendering
+
+    VkBuffer stagingBuf;
+    VkDeviceMemory stagingMem;
+    createBuffer(ctx, 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+
+    // Transition depth image to TRANSFER_SRC
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = ctx->depthImage,
+        .subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 },
+        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    // Copy exactly 1 pixel
+    VkBufferImageCopy region = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
+        .imageOffset = { (int32_t)x, (int32_t)y, 0 },
+        .imageExtent = { 1, 1, 1 }
+    };
+    vkCmdCopyImageToBuffer(cmd, ctx->depthImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 1, &region);
+
+    // Transition back to optimal depth stencil layout
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+
+    float depth = 1.0f;
+    void* mapped;
+    vkMapMemory(ctx->device, stagingMem, 0, 4, 0, &mapped);
+    memcpy(&depth, mapped, 4);
+    vkUnmapMemory(ctx->device, stagingMem);
+
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+    vkFreeMemory(ctx->device, stagingMem, NULL);
+
+    return depth;
 }
 
 void clear_background(Color color)  { context.clearColor = color; }
