@@ -19,6 +19,8 @@ typedef struct {
     Color y_alt;
     Color z_alt;
     Color gizmo_inner_circle;
+    Color gizmo_outer_circle;
+    Color gizmo_outer_circle_selected;
     Color cursor;
     Color minibuffer;
     Color modeline_border;

@@ -26,6 +26,9 @@ extern void markMeshesSSBODirty(void* ctx);
 #define GIZMO_AXIS_HIT_PX     10.0f    // pixel tolerance for axis hit test
 #define GIZMO_PLANE_HIT_PX    14.0f    // pixel tolerance for plane hit test
 #define GIZMO_ARC_HIT_PX      12.0f    // pixel tolerance for arc hit test
+#define GIZMO_PART_RS         128      // Screen-space rotation ring
+#define GIZMO_LINE_THICK      4.0f     // Inner 3D rotation arcs
+#define GIZMO_LINE_THIN       2.0f     // Outer white 2D ring and defaults
 
 GizmoState gizmo = {0};
 
@@ -234,9 +237,9 @@ static void draw_arc(vec3 origin, vec3 normal, float scale, Color col) {
     glm_vec3_cross(normal, ref, u); glm_vec3_normalize(u);
     glm_vec3_cross(normal, u,   v); glm_vec3_normalize(v);
 
-    // Rotate start so the arc faces the camera
+    // Rotate start so the arc faces away from the camera (convex dome look)
     vec3 to_cam;
-    glm_vec3_sub(camera.position, origin, to_cam);
+    glm_vec3_sub(origin, camera.position, to_cam);
     // Project to_cam onto the arc plane (remove component along normal)
     float dot = glm_vec3_dot(to_cam, normal);
     vec3 in_plane;
@@ -333,6 +336,36 @@ static float hit_plane_square(vec3 origin, vec3 aa, vec3 ab, float scale,
     return sqrtf(dx*dx+dy*dy);
 }
 
+static float hit_full_ring(vec3 origin, vec3 normal, float scale, float mx, float my) {
+    vec3 u, v;
+    vec3 ref = {0,1,0};
+    if (fabsf(normal[1]) > 0.9f) { ref[0]=1; ref[1]=0; ref[2]=0; }
+    glm_vec3_cross(normal, ref, u); glm_vec3_normalize(u);
+    glm_vec3_cross(normal, u,   v); glm_vec3_normalize(v);
+
+    float min_dist = 1e9f;
+    vec2 prev_s;
+    bool prev_valid = false;
+    for (int i = 0; i <= 64; i++) {
+        float ang = (float)i / 64.0f * GLM_PI * 2.0f;
+        vec3 pt;
+        for (int k=0;k<3;k++) pt[k] = origin[k] + (cosf(ang)*u[k] + sinf(ang)*v[k]) * scale;
+        vec2 sc;
+        if (world_to_screen(pt, sc)) {
+            if (prev_valid) {
+                vec2 mouse = {(float)mx, (float)my};
+                float d = pt_seg_dist2d(mouse, prev_s, sc);
+                if (d < min_dist) min_dist = d;
+            }
+            glm_vec2_copy(sc, prev_s);
+            prev_valid = true;
+        } else {
+            prev_valid = false;
+        }
+    }
+    return min_dist;
+}
+
 static float hit_arc(vec3 origin, vec3 normal, float scale, float mx, float my) {
     // Sample the arc points and find closest to mouse
     vec3 u, v;
@@ -342,7 +375,7 @@ static float hit_arc(vec3 origin, vec3 normal, float scale, float mx, float my) 
     glm_vec3_cross(normal, u,   v); glm_vec3_normalize(v);
 
     vec3 to_cam;
-    glm_vec3_sub(camera.position, origin, to_cam);
+    glm_vec3_sub(origin, camera.position, to_cam);
     float dot = glm_vec3_dot(to_cam, normal);
     vec3 in_plane;
     glm_vec3_copy(to_cam, in_plane);
@@ -402,7 +435,7 @@ static void gizmo_update_hover(vec3 origin, float scale, double mx, double my) {
         if (dz < GIZMO_AXIS_HIT_PX && dz < best_dist) { best_dist=dz; best=GIZMO_PART_Z; }
     }
 
-    if (gizmo.mode == GIZMO_MODE_TRANSLATE) {
+    if (gizmo.mode == GIZMO_MODE_TRANSLATE || gizmo.mode == GIZMO_MODE_SCALE) {
         float dxy = hit_plane_square(origin, ax, ay, scale, mx, my);
         float dxz = hit_plane_square(origin, ax, az, scale, mx, my);
         float dyz = hit_plane_square(origin, ay, az, scale, mx, my);
@@ -415,9 +448,16 @@ static void gizmo_update_hover(vec3 origin, float scale, double mx, double my) {
         float rx = hit_arc(origin, ax, scale, mx, my);
         float ry = hit_arc(origin, ay, scale, mx, my);
         float rz = hit_arc(origin, az, scale, mx, my);
+
+        vec3 to_cam;
+        glm_vec3_sub(camera.position, origin, to_cam);
+        glm_vec3_normalize(to_cam);
+        float rs = hit_full_ring(origin, to_cam, scale * 1.2f, mx, my);
+
         if (rx < GIZMO_ARC_HIT_PX && rx < best_dist) { best_dist=rx; best=GIZMO_PART_RX; }
         if (ry < GIZMO_ARC_HIT_PX && ry < best_dist) { best_dist=ry; best=GIZMO_PART_RY; }
         if (rz < GIZMO_ARC_HIT_PX && rz < best_dist) { best_dist=rz; best=GIZMO_PART_RZ; }
+        if (rs < GIZMO_ARC_HIT_PX && rs < best_dist) { best_dist=rs; best=GIZMO_PART_RS; }
     }
 
     gizmo.hovered = best;
@@ -524,6 +564,10 @@ static void apply_drag(int mesh_index, double mx, double my) {
         if      (part == GIZMO_PART_RX) n[0] = 1.0f;
         else if (part == GIZMO_PART_RY) n[1] = 1.0f;
         else if (part == GIZMO_PART_RZ) n[2] = 1.0f;
+        else if (part == GIZMO_PART_RS) {
+            glm_vec3_sub(camera.position, gizmo.drag_start_pivot, n);
+            glm_vec3_normalize(n);
+        }
 
         vec2 sc;
         if (world_to_screen(gizmo.drag_start_pivot, sc)) {
@@ -535,7 +579,11 @@ static void apply_drag(int mesh_index, double mx, double my) {
             while (d_ang >  GLM_PI) d_ang -= 2.0 * GLM_PI;
             while (d_ang < -GLM_PI) d_ang += 2.0 * GLM_PI;
 
-            s_rot_angle += (float)(d_ang * s_rot_sign);
+            if (gizmo.dragging == GIZMO_PART_RS) {
+                s_rot_angle -= (float)(d_ang * s_rot_sign);
+            } else {
+                s_rot_angle += (float)(d_ang * s_rot_sign);
+            }
             s_last_angle_2d = curr_angle_2d;
 
             // Constrain visual pie to ±360 limits so it resets correctly
@@ -550,7 +598,11 @@ static void apply_drag(int mesh_index, double mx, double my) {
         vec3 neg_pivot = {-gizmo.drag_start_pivot[0], -gizmo.drag_start_pivot[1], -gizmo.drag_start_pivot[2]};
         glm_translate(Tinv, neg_pivot);
         glm_mat4_identity(R);
-        glm_rotate(R, s_rot_angle, n);
+
+        // Invert the mesh rotation angle specifically for the screen-space ring
+        // so the physical mesh rotates in sync with our visual pie slice!
+        float mesh_angle = (part == GIZMO_PART_RS) ? -s_rot_angle : s_rot_angle;
+        glm_rotate(R, mesh_angle, n);
 
         glm_mat4_mul(T, R, result);
         glm_mat4_mul(result, Tinv, result);
@@ -558,12 +610,91 @@ static void apply_drag(int mesh_index, double mx, double my) {
     }
 
     else if (gizmo.mode == GIZMO_MODE_SCALE) {
-        float scale_delta = 1.0f + (dx_px - dy_px) * 0.005f;
-        vec3 scale_v = {1,1,1};
-        if      (part == GIZMO_PART_X) scale_v[0] = scale_delta;
-        else if (part == GIZMO_PART_Y) scale_v[1] = scale_delta;
-        else if (part == GIZMO_PART_Z) scale_v[2] = scale_delta;
-        else    { scale_v[0] = scale_v[1] = scale_v[2] = scale_delta; } // all axes
+        vec3 delta = {0,0,0};
+
+        if (part >= GIZMO_PART_X && part <= GIZMO_PART_Z) {
+            vec3 axis_dir = {0,0,0};
+            if (part == GIZMO_PART_X) axis_dir[0] = 1.0f;
+            if (part == GIZMO_PART_Y) axis_dir[1] = 1.0f;
+            if (part == GIZMO_PART_Z) axis_dir[2] = 1.0f;
+
+            vec3 perp, plane_n;
+            glm_vec3_cross(camera.front, axis_dir, perp);
+            glm_vec3_cross(perp, axis_dir, plane_n);
+            glm_vec3_normalize(plane_n);
+
+            vec3 ro_start, rd_start, ro_curr, rd_curr;
+            screen_to_ray(gizmo.drag_start_x, gizmo.drag_start_y, ro_start, rd_start);
+            screen_to_ray(mx, my, ro_curr, rd_curr);
+
+            float denom_start = glm_vec3_dot(rd_start, plane_n);
+            float denom_curr  = glm_vec3_dot(rd_curr, plane_n);
+
+            if (fabsf(denom_start) > 1e-5f && fabsf(denom_curr) > 1e-5f) {
+                vec3 p2ro_s, p2ro_c;
+                glm_vec3_sub(gizmo.drag_start_pivot, ro_start, p2ro_s);
+                glm_vec3_sub(gizmo.drag_start_pivot, ro_curr, p2ro_c);
+
+                float t_start = glm_vec3_dot(p2ro_s, plane_n) / denom_start;
+                float t_curr  = glm_vec3_dot(p2ro_c, plane_n) / denom_curr;
+
+                vec3 hit_start, hit_curr, hit_diff;
+                glm_vec3_copy(ro_start, hit_start);
+                glm_vec3_muladds(rd_start, t_start, hit_start);
+
+                glm_vec3_copy(ro_curr, hit_curr);
+                glm_vec3_muladds(rd_curr, t_curr, hit_curr);
+
+                glm_vec3_sub(hit_curr, hit_start, hit_diff);
+                float proj = glm_vec3_dot(hit_diff, axis_dir);
+                glm_vec3_scale(axis_dir, proj, delta);
+            }
+        } else if (part >= GIZMO_PART_XY && part <= GIZMO_PART_YZ) {
+            vec3 n = {0,0,0};
+            if (part == GIZMO_PART_XY) n[2] = 1.0f;
+            if (part == GIZMO_PART_XZ) n[1] = 1.0f;
+            if (part == GIZMO_PART_YZ) n[0] = 1.0f;
+
+            vec3 ro_start, rd_start, ro_curr, rd_curr;
+            screen_to_ray(gizmo.drag_start_x, gizmo.drag_start_y, ro_start, rd_start);
+            screen_to_ray(mx, my, ro_curr, rd_curr);
+
+            float denom_start = glm_vec3_dot(rd_start, n);
+            float denom_curr  = glm_vec3_dot(rd_curr, n);
+
+            if (fabsf(denom_start) > 1e-5f && fabsf(denom_curr) > 1e-5f) {
+                vec3 p2ro_s, p2ro_c;
+                glm_vec3_sub(gizmo.drag_start_pivot, ro_start, p2ro_s);
+                glm_vec3_sub(gizmo.drag_start_pivot, ro_curr, p2ro_c);
+
+                float t_start = glm_vec3_dot(p2ro_s, n) / denom_start;
+                float t_curr  = glm_vec3_dot(p2ro_c, n) / denom_curr;
+
+                vec3 hit_start, hit_curr;
+                glm_vec3_copy(ro_start, hit_start);
+                glm_vec3_muladds(rd_start, t_start, hit_start);
+
+                glm_vec3_copy(ro_curr, hit_curr);
+                glm_vec3_muladds(rd_curr, t_curr, hit_curr);
+
+                glm_vec3_sub(hit_curr, hit_start, delta);
+            }
+        }
+
+        // Scale proportionally to the visual size of the gizmo on screen!
+        float gizmo_scale = gizmo_world_scale(gizmo.drag_start_pivot);
+        vec3 scale_v = {
+            1.0f + (delta[0] / gizmo_scale),
+            1.0f - (delta[1] / gizmo_scale),
+            1.0f + (delta[2] / gizmo_scale)
+        };
+
+        if (part == GIZMO_PART_X) { scale_v[1] = 1.0f; scale_v[2] = 1.0f; }
+        else if (part == GIZMO_PART_Y) { scale_v[0] = 1.0f; scale_v[2] = 1.0f; }
+        else if (part == GIZMO_PART_Z) { scale_v[0] = 1.0f; scale_v[1] = 1.0f; }
+        else if (part == GIZMO_PART_XY) { scale_v[2] = 1.0f; }
+        else if (part == GIZMO_PART_XZ) { scale_v[1] = 1.0f; }
+        else if (part == GIZMO_PART_YZ) { scale_v[0] = 1.0f; }
 
         mat4 T, Tinv, S, result;
         glm_mat4_identity(T);
@@ -598,8 +729,8 @@ void gizmo_init(void) {
 
     keychord_bind(&keymap, "q", cb_mode_select,    "Gizmo: Select",   PRESS);
     keychord_bind(&keymap, "w", cb_mode_translate, "Gizmo: Translate",PRESS);
-    keychord_bind(&keymap, "e", cb_mode_rotate,    "Gizmo: Rotate",   PRESS);
-    keychord_bind(&keymap, "r", cb_mode_scale,     "Gizmo: Scale",    PRESS);
+    keychord_bind(&keymap, "e", cb_mode_scale,     "Gizmo: Scale",    PRESS);
+    keychord_bind(&keymap, "r", cb_mode_rotate,    "Gizmo: Rotate",   PRESS);
 }
 
 void gizmo_cycle_mode(void) {
@@ -751,22 +882,30 @@ void gizmo_render(int mesh_index) {
         draw_plane_square(origin, ay, az, scale, cyz);
     }
     else if (gizmo.mode == GIZMO_MODE_ROTATE) {
-        if (gizmo.dragging >= GIZMO_PART_RX && gizmo.dragging <= GIZMO_PART_RZ) {
+        if ((gizmo.dragging >= GIZMO_PART_RX && gizmo.dragging <= GIZMO_PART_RZ) || gizmo.dragging == GIZMO_PART_RS) {
             vec3 n = {0,0,0};
             Color alt_c = CT.x_alt;
             Color base_c = CT.x;
 
             if (gizmo.dragging == GIZMO_PART_RX) { n[0] = 1.0f; alt_c = CT.x_alt; base_c = CT.x; }
-            if (gizmo.dragging == GIZMO_PART_RY) { n[1] = 1.0f; alt_c = CT.y_alt; base_c = CT.y; }
-            if (gizmo.dragging == GIZMO_PART_RZ) { n[2] = 1.0f; alt_c = CT.z_alt; base_c = CT.z; }
+            else if (gizmo.dragging == GIZMO_PART_RY) { n[1] = 1.0f; alt_c = CT.y_alt; base_c = CT.y; }
+            else if (gizmo.dragging == GIZMO_PART_RZ) { n[2] = 1.0f; alt_c = CT.z_alt; base_c = CT.z; }
+            else if (gizmo.dragging == GIZMO_PART_RS) { glm_vec3_copy(to_cam, n); alt_c = CT.gizmo_outer_circle_selected; base_c = CT.gizmo_outer_circle_selected; }
+
+            float active_scale = (gizmo.dragging == GIZMO_PART_RS) ? scale * 1.2f : scale;
+            float active_width = (gizmo.dragging == GIZMO_PART_RS) ? GIZMO_LINE_THIN : GIZMO_LINE_THICK;
+
+            line_set_width(active_width);
 
             // 1. Draw full closed background ring
-            draw_full_ring(origin, n, scale, base_c);
+            draw_full_ring(origin, n, active_scale, base_c);
 
             // 2. Fill rotated slice (starts exactly at the drag origin, sweeps to current angle)
-            draw_pie(origin, n, s_rot_v_start, s_rot_angle, scale, CT.gizmo_inner_circle);
+            draw_pie(origin, n, s_rot_v_start, s_rot_angle, active_scale, CT.gizmo_inner_circle);
 
             // 3. Draw lines at the two edges of the pie slice (extended slightly)
+            Color line_c = (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_selected : base_c;
+
             vec3 pt_start, pt_curr;
             mat4 rot; glm_mat4_identity(rot);
             glm_rotate(rot, s_rot_angle, n);
@@ -774,11 +913,13 @@ void gizmo_render(int mesh_index) {
             vec4 v_curr4;
             glm_mat4_mulv(rot, v_start4, v_curr4);
 
-            for(int k=0;k<3;k++) pt_start[k] = origin[k] + s_rot_v_start[k] * scale;
-            for(int k=0;k<3;k++) pt_curr[k]  = origin[k] + v_curr4[k] * scale;
+            for(int k=0;k<3;k++) pt_start[k] = origin[k] + s_rot_v_start[k] * active_scale;
+            for(int k=0;k<3;k++) pt_curr[k]  = origin[k] + v_curr4[k] * active_scale;
 
-            line(origin, pt_start, base_c);
-            line(origin, pt_curr, base_c);
+            line(origin, pt_start, line_c);
+            if (gizmo.dragging != GIZMO_PART_RS) {
+                line(origin, pt_curr, line_c);
+            }
 
             // 4. Draw a 2D screen-space line from the center perfectly to the cursor
             // Unproject cursor to the camera-facing plane passing through the gizmo origin
@@ -792,22 +933,33 @@ void gizmo_render(int mesh_index) {
                 vec3 hit;
                 glm_vec3_copy(ro, hit);
                 glm_vec3_muladds(rd, t, hit);
-                line(origin, hit, alt_c);
+                line(origin, hit, (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_selected : alt_c);
             }
+
+            line_set_width(GIZMO_LINE_THIN); // Reset for standard lines
         } else {
             // Draw normal arcs when not actively dragging
             Color cx = AXIS_COL(GIZMO_PART_RX, CT.x, CT.x_alt);
             Color cy = AXIS_COL(GIZMO_PART_RY, CT.y, CT.y_alt);
             Color cz = AXIS_COL(GIZMO_PART_RZ, CT.z, CT.z_alt);
+            Color crs = AXIS_COL(GIZMO_PART_RS, CT.gizmo_outer_circle, CT.gizmo_outer_circle_selected);
+
+            line_set_width(GIZMO_LINE_THICK);
             draw_arc(origin, ax, scale, cx);
             draw_arc(origin, ay, scale, cy);
             draw_arc(origin, az, scale, cz);
+
+            line_set_width(GIZMO_LINE_THIN);
+            draw_full_ring(origin, to_cam, scale * 1.2f, crs);
         }
     }
     else if (gizmo.mode == GIZMO_MODE_SCALE) {
         Color cx = AXIS_COL(GIZMO_PART_X, CT.x, CT.x_alt);
         Color cy = AXIS_COL(GIZMO_PART_Y, CT.y, CT.y_alt);
         Color cz = AXIS_COL(GIZMO_PART_Z, CT.z, CT.z_alt);
+        Color cxy = AXIS_COL(GIZMO_PART_XY, CT.z, CT.z_alt);
+        Color cxz = AXIS_COL(GIZMO_PART_XZ, CT.y, CT.y_alt);
+        Color cyz = AXIS_COL(GIZMO_PART_YZ, CT.x, CT.x_alt);
 
         float tip_t = GIZMO_ARROW_TIP * scale;
         float cube_h = scale * 0.06f;
@@ -823,6 +975,10 @@ void gizmo_render(int mesh_index) {
         line(origin, tip_x, cx); draw_cube_tip(tip_x, cube_h, cx);
         line(origin, tip_y, cy); draw_cube_tip(tip_y, cube_h, cy);
         line(origin, tip_z, cz); draw_cube_tip(tip_z, cube_h, cz);
+
+        draw_plane_square(origin, ax, ay, scale, cxy);
+        draw_plane_square(origin, az, ax, scale, cxz);
+        draw_plane_square(origin, ay, az, scale, cyz);
     }
 
     #undef AXIS_COL
@@ -883,6 +1039,10 @@ void gizmo_mouse_button(int button, int action, int mods, double xpos, double yp
                     if      (gizmo.dragging == GIZMO_PART_RX) n[0] = 1.0f;
                     else if (gizmo.dragging == GIZMO_PART_RY) n[1] = 1.0f;
                     else if (gizmo.dragging == GIZMO_PART_RZ) n[2] = 1.0f;
+                    else if (gizmo.dragging == GIZMO_PART_RS) {
+                        glm_vec3_sub(camera.position, gizmo.drag_start_pivot, n);
+                        glm_vec3_normalize(n);
+                    }
 
                     // Initialize 2D screen tracking bounds for perfect mouse follow
                     vec2 sc;

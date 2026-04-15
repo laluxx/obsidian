@@ -443,7 +443,7 @@ void begin_frame(void) {
     frame_index = context.currentFrame;
     dynamic_draw_count = 0;
     vertex_count = 0;
-    lineVertexCount = 0;
+    line_renderer_clear();
     context.indirectDrawCount = (uint32_t)scene.meshes.count;
 
     // AAA FIX: Sort meshes every single frame!
@@ -1263,6 +1263,15 @@ void renderer_shutdown() {
 /// LINE
 
 // --- Line Renderer ---
+typedef struct {
+    uint32_t first;
+    uint32_t count;
+    float width;
+} LineBatch;
+static LineBatch      lineBatches[128];
+static uint32_t       lineBatchCount = 0;
+static float          currentLineWidth = 2.0f;
+
 static Vertex         lineVertices[MAX_VERTICES];
 uint32_t              lineVertexCount = 0;
 static VkBuffer       lineVertexBuffer[MAX_FRAMES_IN_FLIGHT];
@@ -1287,6 +1296,14 @@ void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cm
 void line(vec3 start, vec3 end, Color color) {
     if (lineVertexCount + 2 >= MAX_VERTICES) return;
 
+    if (lineBatchCount == 0 || fabsf(lineBatches[lineBatchCount - 1].width - currentLineWidth) > 0.01f) {
+        if (lineBatchCount >= 128) return; // Safeguard
+        lineBatches[lineBatchCount].first = lineVertexCount;
+        lineBatches[lineBatchCount].count = 0;
+        lineBatches[lineBatchCount].width = currentLineWidth;
+        lineBatchCount++;
+    }
+
     vec4 colorVec4 = {color.r, color.g, color.b, color.a};
     vec3 normal = {0.0f, 1.0f, 0.0f}; // Default normal
 
@@ -1302,6 +1319,12 @@ void line(vec3 start, vec3 end, Color color) {
     glm_vec3_copy(normal, lineVertices[lineVertexCount].normal);
     glm_vec2_copy((vec2){0.0f, 0.0f}, lineVertices[lineVertexCount].texCoord);
     lineVertexCount++;
+
+    lineBatches[lineBatchCount - 1].count += 2;
+}
+
+void line_set_width(float width) {
+    currentLineWidth = width;
 }
 
 void line_renderer_upload() {
@@ -1359,13 +1382,17 @@ void line_renderer_draw(VkCommandBuffer cmd) {
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
 
-    // Explicitly set the dynamic line width for the gizmo/debug lines!
-    vkCmdSetLineWidth(cmd, 2.0f);
-    vkCmdDraw(cmd, lineVertexCount, 1, 0, 0);
+    // Loop through batches and explicitly set the dynamic line width per batch!
+    for (uint32_t i = 0; i < lineBatchCount; i++) {
+        vkCmdSetLineWidth(cmd, lineBatches[i].width);
+        vkCmdDraw(cmd, lineBatches[i].count, 1, lineBatches[i].first, 0);
+    }
 }
 
 void line_renderer_clear() {
     lineVertexCount = 0;
+    lineBatchCount = 0;
+    currentLineWidth = 2.0f;
 }
 
 void line_renderer_shutdown() {

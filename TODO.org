@@ -16,6 +16,7 @@ Check quad utilization
 
 * TODO Features [0/1]
 - [ ] Parallax Occlusion Mapping - Togglable per material.
+- [ ] GPU IK
 
 * TODO Performance [2/7]
 - [ ] Serialize IBLs, Materials, GLTFs and Pipelines on quit so it restarts istantly

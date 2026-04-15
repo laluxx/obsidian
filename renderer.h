@@ -319,6 +319,7 @@ extern uint32_t lineVertexCount;
 
 void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev, VkCommandPool cmdPool, VkQueue queue);
 void line(vec3 start, vec3 end, Color color);
+void line_set_width(float width);
 void line_renderer_upload();
 void line_renderer_draw(VkCommandBuffer cmd);
 void line_renderer_clear();
