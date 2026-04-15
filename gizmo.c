@@ -856,10 +856,40 @@ void gizmo_render(int mesh_index) {
     glm_vec3_copy(camera.position, render_origin);
     glm_vec3_muladds(to_cam, render_dist, render_origin);
 
+    vec3 ax = {1,0,0}, ay = {0,1,0}, az = {0,0,1};
+
+    // --- Draw Infinite Guide Lines while dragging ---
+    if (gizmo.dragging != GIZMO_PART_NONE) {
+        float inf = 10000.0f;
+        vec3 px1, px2, py1, py2, pz1, pz2;
+        for(int k=0; k<3; k++) {
+            px1[k] = origin[k] - ax[k] * inf; px2[k] = origin[k] + ax[k] * inf;
+            py1[k] = origin[k] - ay[k] * inf; py2[k] = origin[k] + ay[k] * inf;
+            pz1[k] = origin[k] - az[k] * inf; pz2[k] = origin[k] + az[k] * inf;
+        }
+
+        bool draw_x = (gizmo.dragging == GIZMO_PART_X || gizmo.dragging == GIZMO_PART_RX || gizmo.dragging == GIZMO_PART_XY || gizmo.dragging == GIZMO_PART_XZ);
+        bool draw_y = (gizmo.dragging == GIZMO_PART_Y || gizmo.dragging == GIZMO_PART_RY || gizmo.dragging == GIZMO_PART_XY || gizmo.dragging == GIZMO_PART_YZ);
+        bool draw_z = (gizmo.dragging == GIZMO_PART_Z || gizmo.dragging == GIZMO_PART_RZ || gizmo.dragging == GIZMO_PART_XZ || gizmo.dragging == GIZMO_PART_YZ);
+
+        line_set_width(GIZMO_LINE_THIN);
+
+        if (draw_x) line(px1, px2, CT.x_alt);
+        if (draw_y) line(py1, py2, CT.y_alt);
+        if (draw_z) line(pz1, pz2, CT.z_alt);
+
+        if (gizmo.dragging == GIZMO_PART_RS) {
+            vec3 prs1, prs2;
+            for(int k=0; k<3; k++) {
+                prs1[k] = origin[k] - to_cam[k] * inf;
+                prs2[k] = origin[k] + to_cam[k] * inf;
+            }
+            line(prs1, prs2, CT.gizmo_outer_circle_selected);
+        }
+    }
+
     float scale = true_scale * (render_dist / true_dist);
     glm_vec3_copy(render_origin, origin); // Override origin for the drawing functions
-
-    vec3 ax = {1,0,0}, ay = {0,1,0}, az = {0,0,1};
 
     // --- Helper: choose colour (highlight if hovered/dragging) ---
     #define AXIS_COL(part, base_col, alt_col) \
@@ -922,6 +952,8 @@ void gizmo_render(int mesh_index) {
             }
 
             // 4. Draw a 2D screen-space line from the center perfectly to the cursor
+            line_set_width(GIZMO_LINE_THIN); // Force the tracking line to always be thin
+
             // Unproject cursor to the camera-facing plane passing through the gizmo origin
             vec3 ro, rd;
             screen_to_ray(s_curr_mx, s_curr_my, ro, rd);
@@ -936,7 +968,6 @@ void gizmo_render(int mesh_index) {
                 line(origin, hit, (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_selected : alt_c);
             }
 
-            line_set_width(GIZMO_LINE_THIN); // Reset for standard lines
         } else {
             // Draw normal arcs when not actively dragging
             Color cx = AXIS_COL(GIZMO_PART_RX, CT.x, CT.x_alt);

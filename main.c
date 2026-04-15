@@ -17,6 +17,7 @@
 #include "vertico.h"
 #include "editor.h"
 #include "gizmo.h"
+#include "easing.h"
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -40,6 +41,13 @@ float orbitDistance = 10.0f;           // Distance from pivot
 bool keyW = false, keyA = false, keyS = false, keyD = false;
 bool keyQ = false, keyE = false;
 bool keySpace = false, keyShift = false;
+
+// Camera framing animation state
+bool is_framing = false;
+vec3 frame_start_pos = {0};
+vec3 frame_target_pos = {0};
+float frame_anim_time = 0.0f;
+const float FRAME_ANIM_DURATION = 0.4f; // 400ms for a snappy pop
 
 
 void key_callback(int key, int action, int mods) {
@@ -96,9 +104,47 @@ void key_callback(int key, int action, int mods) {
     }
 
     if (key == KEY_F && action == PRESS) {
-        vec3 world_origin = {0.0f, 0.0f, 0.0f};
-        camera_set_look_at(&camera, world_origin);
-        printf("Looking at world origin (0, 0, 0)\n");
+        vec3 target_center = {0.0f, 0.0f, 0.0f};
+        float target_dist = 10.0f;
+
+        if (editor.inspector.selected_mesh_index >= 0 && editor.inspector.selected_mesh_index < (int)scene.meshes.count) {
+            Mesh* m = &scene.meshes.items[editor.inspector.selected_mesh_index];
+
+            // Calculate local center
+            vec3 local_center;
+            glm_vec3_add(m->aabbMin, m->aabbMax, local_center);
+            glm_vec3_scale(local_center, 0.5f, local_center);
+
+            // Transform to world space
+            vec4 lc4 = {local_center[0], local_center[1], local_center[2], 1.0f};
+            vec4 wc4;
+            glm_mat4_mulv(m->model, lc4, wc4);
+            glm_vec3_copy(wc4, target_center);
+
+            // Estimate radius for distance
+            vec3 extents;
+            glm_vec3_sub(m->aabbMax, m->aabbMin, extents);
+            float scale = glm_vec3_norm((vec3){m->model[0][0], m->model[0][1], m->model[0][2]});
+            target_dist = glm_vec3_norm(extents) * scale * 1.2f;
+            if (target_dist < 2.0f) target_dist = 2.0f;
+
+            printf("Framing selected mesh %d at (%.2f, %.2f, %.2f)\n", editor.inspector.selected_mesh_index, target_center[0], target_center[1], target_center[2]);
+        } else {
+            printf("Framing world origin (0, 0, 0)\n");
+        }
+
+        // New camera position: target_center - (camera.front * target_dist)
+        glm_vec3_copy(camera.position, frame_start_pos);
+        glm_vec3_copy(camera.front, frame_target_pos);
+        glm_vec3_scale(frame_target_pos, -target_dist, frame_target_pos);
+        glm_vec3_add(target_center, frame_target_pos, frame_target_pos);
+
+        // Set orbit pivot to the framed center so orbiting is perfectly centered around it!
+        glm_vec3_copy(target_center, orbitPivot);
+        orbitDistance = target_dist;
+
+        is_framing = true;
+        frame_anim_time = 0.0f;
     }
 
     // Track WASD key states
@@ -128,11 +174,24 @@ void mouse_button_callback(int button, int action, int mods) {
 
                 shiftMiddleMousePressed = (mods & GLFW_MOD_SHIFT);
 
-                // 1If not panning, calculate the pivot point for orbiting
+                // If not panning, calculate the pivot point for orbiting
                 if (!shiftMiddleMousePressed) {
-                    vec3 hitPoint;
-                    bool hitGround = raycast_to_ground(&camera, hitPoint);
-                    glm_vec3_copy(hitPoint, orbitPivot);
+                    // If a mesh is selected, always orbit perfectly around its true center
+                    if (editor.inspector.selected_mesh_index >= 0 && editor.inspector.selected_mesh_index < (int)scene.meshes.count) {
+                        Mesh* m = &scene.meshes.items[editor.inspector.selected_mesh_index];
+                        vec3 local_center;
+                        glm_vec3_add(m->aabbMin, m->aabbMax, local_center);
+                        glm_vec3_scale(local_center, 0.5f, local_center);
+                        vec4 lc4 = {local_center[0], local_center[1], local_center[2], 1.0f};
+                        vec4 wc4;
+                        glm_mat4_mulv(m->model, lc4, wc4);
+                        glm_vec3_copy(wc4, orbitPivot);
+                    } else {
+                        // Otherwise fallback to the ground plane raycast
+                        vec3 hitPoint;
+                        bool hitGround = raycast_to_ground(&camera, hitPoint);
+                        glm_vec3_copy(hitPoint, orbitPivot);
+                    }
 
                     // Calculate distance from camera to pivot
                     vec3 toPivot;
@@ -347,7 +406,30 @@ int main() {
     keymap_print_bindings(&keymap);
 
 
+    ease_init(); // Initialize the easing lookup tables
+
+    // Variables for delta time
+    double lastFrameTime = glfwGetTime();
+
     while (!windowShouldClose()) {
+        double currentFrameTime = glfwGetTime();
+        float deltaTime = (float)(currentFrameTime - lastFrameTime);
+        lastFrameTime = currentFrameTime;
+
+        if (is_framing) {
+            frame_anim_time += deltaTime;
+            float t = frame_anim_time / FRAME_ANIM_DURATION;
+            if (t >= 1.0f) {
+                t = 1.0f;
+                is_framing = false;
+            }
+
+            // EASE_EXPO_OUT gives that fast snap and smooth settle exactly like Godot
+            float ease_t = ease_expo_out(t);
+
+            glm_vec3_lerp(frame_start_pos, frame_target_pos, ease_t, camera.position);
+        }
+
         beginFrame();
 
         vertico_render();
