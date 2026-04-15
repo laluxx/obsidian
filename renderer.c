@@ -89,6 +89,7 @@ static Material currentMaterial = {
     .roughnessFactor    = 0.5f,
     .emissiveStrength   = 1.0f,
     .isUnlit            = 0,
+    .alphaMode          = 2,
     .emissiveFactor     = {0.0f, 0.0f, 0.0f},
     .albedoIndex        = -1,
     .normalMapIndex     = -1,
@@ -106,6 +107,7 @@ void reset_material(void) {
         .roughnessFactor    = 0.5f,
         .emissiveStrength   = 1.0f,
         .isUnlit            = 0,
+        .alphaMode          = 2,
         .emissiveFactor     = {0.0f, 0.0f, 0.0f},
         .albedoIndex        = -1,
         .normalMapIndex     = -1,
@@ -406,7 +408,7 @@ int alloc_slot(mat4 model) {
     d->roughnessFactor    = currentMaterial.roughnessFactor;
     d->emissiveStrength   = currentMaterial.emissiveStrength;
     d->isUnlit            = currentMaterial.isUnlit;
-    d->alphaMode          = 0;
+    d->alphaMode          = currentMaterial.alphaMode;
     d->alphaCutoff        = 0.5f;
     glm_vec3_copy(currentMaterial.emissiveFactor, d->emissiveFactor);
     d->albedoIndex        = currentMaterial.albedoIndex;
@@ -1320,6 +1322,7 @@ void line_renderer_draw(VkCommandBuffer cmd) {
     lineMat.baseColorFactor[2] = 1.0f;
     lineMat.baseColorFactor[3] = 1.0f;
     lineMat.isUnlit = 1;
+    lineMat.alphaMode = 2;
     lineMat.albedoIndex = -1;
     lineMat.normalMapIndex = -1;
     lineMat.metallicRoughIndex = -1;
@@ -1356,6 +1359,8 @@ void line_renderer_draw(VkCommandBuffer cmd) {
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
 
+    // Explicitly set the dynamic line width for the gizmo/debug lines!
+    vkCmdSetLineWidth(cmd, 2.0f);
     vkCmdDraw(cmd, lineVertexCount, 1, 0, 0);
 }
 

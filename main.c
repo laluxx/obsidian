@@ -1,5 +1,6 @@
 #include "gltf_loader.h"
 #include "font.h"
+#include "theme.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -18,12 +19,6 @@
 #include "gizmo.h"
 #include <stdio.h>
 #include <inttypes.h>
-
-
-/// TODO Stuff [0/2]
-// - [ ] Panning up and down when loooking from upside down is wrong
-// - [ ] ALL Textures are inversed!
-
 
 double lastX = WIDTH / 2.0f, lastY = HEIGHT / 2.0f;
 bool firstMouse = true;
@@ -422,18 +417,11 @@ int main() {
         /* texture2D((vec2){500, 200}, (vec2){150, 150}, texture2, WHITE); */
         /* texture2D((vec2){300, 300}, (vec2){600, 600}, texture2, WHITE); */
 
-        vec4 radii = {0.0, 100.0, 10.0, 0.0};
-        exQuad2D((vec2){300, 900}, (vec2){300, 300}, radii, 10, (Color){0.937f, 0.310f, 0.420f, 1.0f}, BLACK);
-
-
         // Render axes
         float lineLength = 10000.0f; // Very long lines to appear "infinite"
-        Color xColor = {0.937f, 0.310f, 0.420f, 1.0f}; // #EF4F6B X
-        Color yColor = {0.529f, 0.839f, 0.008f, 1.0f}; // #87D602 Y
-        Color zColor = {0.161f, 0.549f, 0.961f, 1.0f}; // #298CF5 Z
-        line((vec3){-lineLength, 0.0f, 0.0f}, (vec3){lineLength, 0.0f, 0.0f}, xColor);
-        line((vec3){0.0f, -lineLength, 0.0f}, (vec3){0.0f, lineLength, 0.0f}, yColor);
-        line((vec3){0.0f, 0.0f, -lineLength}, (vec3){0.0f, 0.0f, lineLength}, zColor);
+        line((vec3){-lineLength, 0.0f, 0.0f}, (vec3){lineLength, 0.0f, 0.0f}, CT.x);
+        line((vec3){0.0f, -lineLength, 0.0f}, (vec3){0.0f, lineLength, 0.0f}, CT.y);
+        line((vec3){0.0f, 0.0f, -lineLength}, (vec3){0.0f, 0.0f, lineLength}, CT.z);
 
         endFrame();
     }

@@ -191,6 +191,18 @@ static const VkPipelineDynamicStateCreateInfo kDynamicState = {
     .pDynamicStates    = kDynStates
 };
 
+static const VkDynamicState kDynStatesLine[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+    VK_DYNAMIC_STATE_DEPTH_BIAS,
+    VK_DYNAMIC_STATE_LINE_WIDTH
+};
+static const VkPipelineDynamicStateCreateInfo kDynamicStateLine = {
+    .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    .dynamicStateCount = 4,
+    .pDynamicStates    = kDynStatesLine
+};
+
 static const VkPipelineViewportStateCreateInfo kViewportState = {
     .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
     .viewportCount = 1,
@@ -761,12 +773,12 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages               = ssPBR,
+            .stageCount          = 2, .pStages                = ssPBR,
             .pVertexInputState   = &viEmpty, .pInputAssemblyState = &iaLine,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastLW, .pMultisampleState = &kMultisampling,
             .pColorBlendState    = &blend,  .pDepthStencilState= &depth3D,
-            .pDynamicState       = &kDynamicState,
+            .pDynamicState       = &kDynamicStateLine,
             .layout              = ctx->pipelineLayout,
         },
         /* 2: 2D unified (color + texture, driven by textureIndex) */
@@ -2761,13 +2773,21 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             }
             glm_mat4_copy(m->model, dst[i].model);
 
+            /* Helper macro to safely resolve texture pool index to bindless slot */
+            #define GET_BINDLESS(pool_idx) ((pool_idx >= 0 && texture_pool_get(pool_idx) && texture_pool_get(pool_idx)->loaded) ? (int)texture_pool_get(pool_idx)->bindlessSlot : -1)
+
             /* PBR texture slots */
             dst[i].albedoIndex        = (m->texture && m->texture->loaded)
                                         ? (int)m->texture->bindlessSlot : -1;
-            dst[i].normalMapIndex     = m->normalMapIndex;
-            dst[i].metallicRoughIndex = m->metallicRoughIndex;
-            dst[i].aoIndex            = m->aoIndex;
-            dst[i].emissiveIndex      = m->emissiveIndex;
+            dst[i].normalMapIndex     = GET_BINDLESS(m->normalMapIndex);
+            dst[i].metallicRoughIndex = GET_BINDLESS(m->metallicRoughIndex);
+            dst[i].aoIndex            = GET_BINDLESS(m->aoIndex);
+            dst[i].emissiveIndex      = GET_BINDLESS(m->emissiveIndex);
+
+            /* Initialize displacement data to prevent uninitialized memory
+               from sampling garbage textures and blowing up vertices! */
+            dst[i].displacementIndex  = -1;
+            dst[i].displacementScale  = 0.0f;
 
             /* Material constant factors */
             glm_vec4_copy(m->baseColorFactor,  dst[i].baseColorFactor);
@@ -2791,13 +2811,15 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].transmissionFactor = m->transmissionFactor;
             dst[i].ior                = m->ior;
             dst[i].thicknessFactor    = m->thicknessFactor;
-            dst[i].transmissionIndex  = m->transmissionIndex;
-            dst[i].thicknessIndex     = m->thicknessIndex;
+            dst[i].transmissionIndex  = GET_BINDLESS(m->transmissionIndex);
+            dst[i].thicknessIndex     = GET_BINDLESS(m->thicknessIndex);
             dst[i].attenuationColorR  = m->attenuationColor[0];
             dst[i].attenuationColorG  = m->attenuationColor[1];
             dst[i].attenuationColorB  = m->attenuationColor[2];
             dst[i].attenuationDistance = m->attenuationDistance;
             dst[i].dispersion         = m->dispersion;
+
+            #undef GET_BINDLESS
         }
 
         /* Clear the entire 64-bit block for this frame instantly */

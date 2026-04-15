@@ -8,7 +8,7 @@ Check quad utilization
 
 * TODO Bugs [0/1]
 - [ ] Until i move the position of the camera, gltf loaded meshes will flicker
-
+- [ ] Panning up and down when loooking from upside down is wrong
 
 * TODO Correctness [1/2]
 - [ ] The ease_table64 Bézier entries casting float function pointers to EaseFn64 is a known smell — worth a note.

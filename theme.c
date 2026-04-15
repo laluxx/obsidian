@@ -85,6 +85,7 @@ void initThemes() {
         .x_alt                 = hexToColor("#FFDCE2"),
         .y_alt                 = hexToColor("#F4FFDC"),
         .z_alt                 = hexToColor("#DCEFFF"),
+        .gizmo_inner_circle    = hexToColor("#FFFFFF59"),
         .show_paren_match      = hexToColor(""),
         .isearch_highlight     = hexToColor(""),
         .minibuffer_prompt     = hexToColor(""),

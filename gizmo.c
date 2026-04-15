@@ -132,6 +132,57 @@ static float gizmo_world_scale(vec3 origin) {
     return GIZMO_SCREEN_SIZE * world_per_pixel;
 }
 
+static vec3   s_rot_v_start;
+static float  s_rot_angle;
+static double s_last_angle_2d;
+static float  s_rot_sign;
+static double s_curr_mx;
+static double s_curr_my;
+static vec3   s_rot_v_prev; // The missing declaration!
+
+static void draw_full_ring(vec3 origin, vec3 normal, float scale, Color col) {
+    vec3 u, v;
+    vec3 ref = {0,1,0};
+    if (fabsf(normal[1]) > 0.9f) { ref[0]=1; ref[1]=0; ref[2]=0; }
+    glm_vec3_cross(normal, ref, u); glm_vec3_normalize(u);
+    glm_vec3_cross(normal, u, v);   glm_vec3_normalize(v);
+
+    vec3 prev;
+    for (int i = 0; i <= 64; i++) {
+        float ang = (float)i / 64.0f * GLM_PI * 2.0f;
+        vec3 pt;
+        for (int k=0;k<3;k++) pt[k] = origin[k] + (cosf(ang)*u[k] + sinf(ang)*v[k]) * scale;
+        if (i > 0) line(prev, pt, col);
+        glm_vec3_copy(pt, prev);
+    }
+}
+
+static void draw_pie(vec3 origin, vec3 normal, vec3 v_start, float angle, float scale, Color col) {
+    if (fabsf(angle) < 0.01f) return;
+
+    vec3 u; glm_vec3_copy(v_start, u);
+    vec3 v; glm_vec3_cross(normal, u, v); glm_vec3_normalize(v);
+
+    int segments = (int)(fabsf(angle) / (GLM_PI * 2.0f) * 64.0f) + 1;
+    if (segments > 64) segments = 64;
+
+    vec3 prev_pt;
+    glm_vec3_copy(origin, prev_pt);
+    glm_vec3_muladds(u, scale, prev_pt);
+
+    for (int i = 1; i <= segments; i++) {
+        float t = (float)i / segments;
+        float ang = angle * t;
+        vec3 pt;
+        for (int k=0;k<3;k++) pt[k] = origin[k] + (cosf(ang)*u[k] + sinf(ang)*v[k]) * scale;
+
+        // Double-sided rendering so it never disappears based on viewing angle
+        triangle(origin, prev_pt, pt, col);
+        triangle(origin, pt, prev_pt, col);
+        glm_vec3_copy(pt, prev_pt);
+    }
+}
+
 /// Draw
 
 // Draw an arrow (shaft + arrowhead cone approximated as fan) in world space.
@@ -243,13 +294,18 @@ static void draw_cube_tip(vec3 tip, float half, Color col) {
         c[i][1] = tip[1] + ((i&2)?half:-half);
         c[i][2] = tip[2] + ((i&4)?half:-half);
     }
-    // 12 edges
-    int edges[12][2] = {
-        {0,1},{2,3},{4,5},{6,7},
-        {0,2},{1,3},{4,6},{5,7},
-        {0,4},{1,5},{2,6},{3,7}
+    // 12 triangles (6 faces) with CCW winding for outward normals
+    int indices[36] = {
+        0, 1, 5, 0, 5, 4, // Bottom (y-)
+        2, 6, 7, 2, 7, 3, // Top (y+)
+        0, 4, 6, 0, 6, 2, // Left (x-)
+        1, 3, 7, 1, 7, 5, // Right (x+)
+        0, 2, 3, 0, 3, 1, // Front (z-)
+        4, 5, 7, 4, 7, 6  // Back (z+)
     };
-    for (int e=0;e<12;e++) line(c[edges[e][0]], c[edges[e][1]], col);
+    for (int i=0; i<36; i+=3) {
+        triangle(c[indices[i]], c[indices[i+1]], c[indices[i+2]], col);
+    }
 }
 
 /// Hit-test
@@ -376,16 +432,6 @@ static void apply_drag(int mesh_index, double mx, double my) {
     float dx_px = (float)(mx - gizmo.drag_start_x);
     float dy_px = (float)(my - gizmo.drag_start_y);
 
-    // Scale: 1 pixel = how many world units?
-    float sh    = (float)context.swapChainExtent.height;
-    // Use fabsf to prevent a negative world_per_px multiplier due to Vulkan's Y-flip
-    float inv_t = fabsf(camera.projection_matrix[1][1]);
-    vec3 diff;
-    glm_vec3_sub(gizmo.drag_start_pivot, camera.position, diff);
-    float dist          = glm_vec3_norm(diff);
-    if (dist < 0.01f) dist = 0.01f;
-    float world_per_px  = (2.0f * dist) / (sh * inv_t);
-
     GizmoPart part = gizmo.dragging;
 
     // Restore mesh to its state at drag start, then apply accumulated delta
@@ -474,13 +520,29 @@ static void apply_drag(int mesh_index, double mx, double my) {
     }
 
     else if (gizmo.mode == GIZMO_MODE_ROTATE) {
-        float angle = (dx_px + dy_px) * 0.01f; // radians per pixel
-        vec3 rot_axis = {0,0,0};
-        if      (part == GIZMO_PART_RX) rot_axis[0] = 1;
-        else if (part == GIZMO_PART_RY) rot_axis[1] = 1;
-        else if (part == GIZMO_PART_RZ) rot_axis[2] = 1;
+        vec3 n = {0,0,0};
+        if      (part == GIZMO_PART_RX) n[0] = 1.0f;
+        else if (part == GIZMO_PART_RY) n[1] = 1.0f;
+        else if (part == GIZMO_PART_RZ) n[2] = 1.0f;
 
-        // Rotate around the gizmo pivot (mesh position)
+        vec2 sc;
+        if (world_to_screen(gizmo.drag_start_pivot, sc)) {
+            // Track purely in 2D Screen Space for continuous wrapping rotation
+            double curr_angle_2d = atan2(my - sc[1], mx - sc[0]);
+            double d_ang = curr_angle_2d - s_last_angle_2d;
+
+            // Unwrap rotation diff
+            while (d_ang >  GLM_PI) d_ang -= 2.0 * GLM_PI;
+            while (d_ang < -GLM_PI) d_ang += 2.0 * GLM_PI;
+
+            s_rot_angle += (float)(d_ang * s_rot_sign);
+            s_last_angle_2d = curr_angle_2d;
+
+            // Constrain visual pie to ±360 limits so it resets correctly
+            if (s_rot_angle >  GLM_PI * 2.0f) s_rot_angle -= GLM_PI * 2.0f;
+            if (s_rot_angle < -GLM_PI * 2.0f) s_rot_angle += GLM_PI * 2.0f;
+        }
+
         mat4 T, Tinv, R, result;
         glm_mat4_identity(T);
         glm_translate(T, gizmo.drag_start_pivot);
@@ -488,9 +550,8 @@ static void apply_drag(int mesh_index, double mx, double my) {
         vec3 neg_pivot = {-gizmo.drag_start_pivot[0], -gizmo.drag_start_pivot[1], -gizmo.drag_start_pivot[2]};
         glm_translate(Tinv, neg_pivot);
         glm_mat4_identity(R);
-        glm_rotate(R, angle, rot_axis);
+        glm_rotate(R, s_rot_angle, n);
 
-        // result = T * R * Tinv * drag_start_model
         glm_mat4_mul(T, R, result);
         glm_mat4_mul(result, Tinv, result);
         glm_mat4_mul(result, gizmo.drag_start_model, m->model);
@@ -523,7 +584,10 @@ static void apply_drag(int mesh_index, double mx, double my) {
 
 /// API
 
-static void cb_cycle_mode(void) { gizmo_cycle_mode(); }
+static void cb_mode_translate(void) { gizmo.mode = GIZMO_MODE_TRANSLATE; printf("[Gizmo] Mode: Translate\n"); }
+static void cb_mode_rotate(void)    { gizmo.mode = GIZMO_MODE_ROTATE;    printf("[Gizmo] Mode: Rotate\n"); }
+static void cb_mode_scale(void)     { gizmo.mode = GIZMO_MODE_SCALE;     printf("[Gizmo] Mode: Scale\n"); }
+static void cb_mode_select(void)    { inspector_deselect(); printf("[Gizmo] Mode: Select (Gizmo Hidden)\n"); }
 
 void gizmo_init(void) {
     memset(&gizmo, 0, sizeof(GizmoState));
@@ -532,8 +596,10 @@ void gizmo_init(void) {
     gizmo.dragging = GIZMO_PART_NONE;
     gizmo.active   = false;
 
-    // Bind R key to cycle gizmo mode (matches Godot's R for rotate etc.)
-    keychord_bind(&keymap, "g", cb_cycle_mode, "Cycle gizmo mode (translate/rotate/scale)", PRESS);
+    keychord_bind(&keymap, "q", cb_mode_select,    "Gizmo: Select",   PRESS);
+    keychord_bind(&keymap, "w", cb_mode_translate, "Gizmo: Translate",PRESS);
+    keychord_bind(&keymap, "e", cb_mode_rotate,    "Gizmo: Rotate",   PRESS);
+    keychord_bind(&keymap, "r", cb_mode_scale,     "Gizmo: Scale",    PRESS);
 }
 
 void gizmo_cycle_mode(void) {
@@ -685,12 +751,58 @@ void gizmo_render(int mesh_index) {
         draw_plane_square(origin, ay, az, scale, cyz);
     }
     else if (gizmo.mode == GIZMO_MODE_ROTATE) {
-        Color cx = AXIS_COL(GIZMO_PART_RX, CT.x, CT.x_alt);
-        Color cy = AXIS_COL(GIZMO_PART_RY, CT.y, CT.y_alt);
-        Color cz = AXIS_COL(GIZMO_PART_RZ, CT.z, CT.z_alt);
-        draw_arc(origin, ax, scale, cx);
-        draw_arc(origin, ay, scale, cy);
-        draw_arc(origin, az, scale, cz);
+        if (gizmo.dragging >= GIZMO_PART_RX && gizmo.dragging <= GIZMO_PART_RZ) {
+            vec3 n = {0,0,0};
+            Color alt_c = CT.x_alt;
+            Color base_c = CT.x;
+
+            if (gizmo.dragging == GIZMO_PART_RX) { n[0] = 1.0f; alt_c = CT.x_alt; base_c = CT.x; }
+            if (gizmo.dragging == GIZMO_PART_RY) { n[1] = 1.0f; alt_c = CT.y_alt; base_c = CT.y; }
+            if (gizmo.dragging == GIZMO_PART_RZ) { n[2] = 1.0f; alt_c = CT.z_alt; base_c = CT.z; }
+
+            // 1. Draw full closed background ring
+            draw_full_ring(origin, n, scale, base_c);
+
+            // 2. Fill rotated slice (starts exactly at the drag origin, sweeps to current angle)
+            draw_pie(origin, n, s_rot_v_start, s_rot_angle, scale, CT.gizmo_inner_circle);
+
+            // 3. Draw lines at the two edges of the pie slice (extended slightly)
+            vec3 pt_start, pt_curr;
+            mat4 rot; glm_mat4_identity(rot);
+            glm_rotate(rot, s_rot_angle, n);
+            vec4 v_start4 = {s_rot_v_start[0], s_rot_v_start[1], s_rot_v_start[2], 0.0f};
+            vec4 v_curr4;
+            glm_mat4_mulv(rot, v_start4, v_curr4);
+
+            for(int k=0;k<3;k++) pt_start[k] = origin[k] + s_rot_v_start[k] * scale;
+            for(int k=0;k<3;k++) pt_curr[k]  = origin[k] + v_curr4[k] * scale;
+
+            line(origin, pt_start, base_c);
+            line(origin, pt_curr, base_c);
+
+            // 4. Draw a 2D screen-space line from the center perfectly to the cursor
+            // Unproject cursor to the camera-facing plane passing through the gizmo origin
+            vec3 ro, rd;
+            screen_to_ray(s_curr_mx, s_curr_my, ro, rd);
+            float denom = glm_vec3_dot(rd, to_cam);
+            if (fabsf(denom) > 1e-4f) {
+                vec3 p2ro;
+                glm_vec3_sub(origin, ro, p2ro);
+                float t = glm_vec3_dot(p2ro, to_cam) / denom;
+                vec3 hit;
+                glm_vec3_copy(ro, hit);
+                glm_vec3_muladds(rd, t, hit);
+                line(origin, hit, alt_c);
+            }
+        } else {
+            // Draw normal arcs when not actively dragging
+            Color cx = AXIS_COL(GIZMO_PART_RX, CT.x, CT.x_alt);
+            Color cy = AXIS_COL(GIZMO_PART_RY, CT.y, CT.y_alt);
+            Color cz = AXIS_COL(GIZMO_PART_RZ, CT.z, CT.z_alt);
+            draw_arc(origin, ax, scale, cx);
+            draw_arc(origin, ay, scale, cy);
+            draw_arc(origin, az, scale, cz);
+        }
     }
     else if (gizmo.mode == GIZMO_MODE_SCALE) {
         Color cx = AXIS_COL(GIZMO_PART_X, CT.x, CT.x_alt);
@@ -714,16 +826,15 @@ void gizmo_render(int mesh_index) {
     }
 
     #undef AXIS_COL
-
-    // Update hover from the last mouse position (stored in gizmo state)
-    // We re-compute every frame since camera may have moved.
-    // The actual mouse coords are fed from gizmo_mouse_move().
 }
 
 void gizmo_mouse_move(double xpos, double ypos) {
     // Convert to bottom-left Y-up
     float sh  = (float)context.swapChainExtent.height;
     double my = sh - ypos;
+
+    s_curr_mx = xpos;
+    s_curr_my = my;
 
     if (gizmo.dragging != GIZMO_PART_NONE) {
         apply_drag(editor.inspector.selected_mesh_index, xpos, my);
@@ -748,6 +859,9 @@ void gizmo_mouse_button(int button, int action, int mods, double xpos, double yp
     float sh  = (float)context.swapChainExtent.height;
     double my = sh - ypos;
 
+    s_curr_mx = xpos;
+    s_curr_my = my;
+
     if (action == GLFW_PRESS) {
         // If over a gizmo part → start drag
         if (gizmo.active && gizmo.hovered != GIZMO_PART_NONE) {
@@ -762,6 +876,57 @@ void gizmo_mouse_button(int button, int action, int mods, double xpos, double yp
                 gizmo.drag_start_pivot[0] = m->model[3][0];
                 gizmo.drag_start_pivot[1] = m->model[3][1];
                 gizmo.drag_start_pivot[2] = m->model[3][2];
+
+                if (gizmo.mode == GIZMO_MODE_ROTATE) {
+                    s_rot_angle = 0.0f;
+                    vec3 n = {0,0,0};
+                    if      (gizmo.dragging == GIZMO_PART_RX) n[0] = 1.0f;
+                    else if (gizmo.dragging == GIZMO_PART_RY) n[1] = 1.0f;
+                    else if (gizmo.dragging == GIZMO_PART_RZ) n[2] = 1.0f;
+
+                    // Initialize 2D screen tracking bounds for perfect mouse follow
+                    vec2 sc;
+                    world_to_screen(gizmo.drag_start_pivot, sc);
+                    s_last_angle_2d = atan2(my - sc[1], xpos - sc[0]);
+
+                    vec3 to_cam;
+                    glm_vec3_sub(camera.position, gizmo.drag_start_pivot, to_cam);
+                    s_rot_sign = glm_vec3_dot(to_cam, n) >= 0.0f ? 1.0f : -1.0f;
+
+                    // Calculate optical illusion render_origin to fix parallax!
+                    vec3 from_cam;
+                    glm_vec3_sub(gizmo.drag_start_pivot, camera.position, from_cam);
+                    float true_dist = glm_vec3_norm(from_cam);
+                    glm_vec3_normalize(from_cam);
+
+                    float render_dist = 0.5f;
+                    if (true_dist < render_dist) render_dist = true_dist;
+
+                    vec3 render_origin;
+                    glm_vec3_copy(camera.position, render_origin);
+                    glm_vec3_muladds(from_cam, render_dist, render_origin);
+
+                    // Raycast against the rotation plane AT THE RENDER ORIGIN to find EXACT visual start point
+                    vec3 ro, rd;
+                    screen_to_ray(xpos, my, ro, rd);
+                    float denom = glm_vec3_dot(rd, n);
+                    if (fabsf(denom) > 1e-4f) {
+                        vec3 p2ro;
+                        glm_vec3_sub(render_origin, ro, p2ro);
+                        float t = glm_vec3_dot(p2ro, n) / denom;
+                        vec3 hit;
+                        glm_vec3_copy(ro, hit);
+                        glm_vec3_muladds(rd, t, hit);
+                        glm_vec3_sub(render_origin, hit, s_rot_v_start);
+                        glm_vec3_normalize(s_rot_v_start);
+                    } else {
+                        vec3 up = {0,1,0};
+                        if (fabsf(n[1]) > 0.9f) { up[0] = 1; up[1] = 0; }
+                        glm_vec3_cross(n, up, s_rot_v_start);
+                        glm_vec3_normalize(s_rot_v_start);
+                    }
+                    glm_vec3_copy(s_rot_v_start, s_rot_v_prev);
+                }
             }
         } else {
             // Not over gizmo → pick mesh

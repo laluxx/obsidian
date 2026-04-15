@@ -260,9 +260,10 @@ typedef struct {
     vec4  baseColorFactor;   /* default {1,1,1,1} */
     float metallicFactor;    /* default 0.0       */
     float roughnessFactor;   /* default 0.5       */
-    float emissiveStrength;  /* default 1.0       */
-    int   isUnlit;           /* default 0         */
-    vec3  emissiveFactor;    /* default {0,0,0}   */
+    float emissiveStrength;  /* default 1.0        */
+    int   isUnlit;           /* default 0          */
+    int   alphaMode;         /* default 2 (BLEND)  */
+    vec3  emissiveFactor;    /* default {0,0,0}    */
     int   albedoIndex;       /* default -1        */
     int   normalMapIndex;    /* default -1        */
     int   metallicRoughIndex;/* default -1        */
