@@ -6,6 +6,7 @@
 #include "keychords.h"
 #include "theme.h"
 #include "gizmo.h"
+#include "colorpicker.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -17,6 +18,74 @@
 
 Editor editor = {0};
 
+// UI Input State
+static double s_ui_mx = 0.0;
+static double s_ui_my = 0.0;
+static bool   s_ui_mdown = false;
+static bool   s_ui_mclicked = false;
+static void* s_ui_active_id = NULL;
+static float  s_ui_drag_start_x = 0.0f;
+static float  s_ui_drag_start_val = 0.0f;
+
+static ColorPickerState s_color_picker;
+
+static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
+
+static void on_color_picked(float r, float g, float b, float a, void* user) {
+    (void)r; (void)g; (void)b; (void)a; (void)user;
+    extern VulkanContext context;
+    extern void markMeshesSSBODirty(void* ctx);
+    markMeshesSSBODirty(&context);
+}
+
+bool editor_wants_mouse(void) {
+    float sh = (float)context.swapChainExtent.height;
+    double raw_y = sh - s_ui_my;
+    if (s_color_picker.visible && colorpicker_wants_mouse(&s_color_picker, s_ui_mx, raw_y)) return true;
+
+    if (s_ui_active_id != NULL) return true; // Actively dragging UI
+    for (int i = 0; i < PANEL_COUNT; i++) {
+        Panel* p = &editor.panels[i];
+        if (p->t < 0.0005f) continue;
+        float x, y, w, h;
+        panel_get_rect(p, &x, &y, &w, &h);
+        if (s_ui_mx >= x && s_ui_mx <= x + w && s_ui_my >= y && s_ui_my <= y + h) {
+            return true; // Hovering an open panel
+        }
+    }
+    return false;
+}
+
+void editor_mouse_move(double xpos, double ypos) {
+    float sh = (float)context.swapChainExtent.height;
+    s_ui_mx = xpos;
+    s_ui_my = sh - ypos; // Align with panel Y-up coordinates
+    if (s_color_picker.visible) {
+        colorpicker_mouse_move(&s_color_picker, xpos, ypos);
+    }
+}
+
+void editor_mouse_button(int button, int action) {
+    float sh = (float)context.swapChainExtent.height;
+    double raw_y = sh - s_ui_my;
+
+    if (s_color_picker.visible) {
+        if (colorpicker_mouse_button(&s_color_picker, button, action, s_ui_mx, raw_y)) {
+            return; // Input consumed by the color picker
+        }
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        if (action == GLFW_PRESS) {
+            s_ui_mdown = true;
+            s_ui_mclicked = true;
+        } else if (action == GLFW_RELEASE) {
+            s_ui_mdown = false;
+            s_ui_active_id = NULL; // Release drag
+        }
+    }
+}
+
 // Animation constants
 #define EDITOR_MAX_DT      0.05f   // cap dt to avoid jumps after focus loss
 #define EDITOR_ANIM_SPEED  12.0f   // how fast t chases target_t
@@ -25,17 +94,6 @@ Editor editor = {0};
 #define TITLE_H       32.0f  // Title-bar height
 #define PAD           14.0f  // Inner padding
 #define LH_EXTRA       5.0f  // Line height multiplier
-
-
-///  Math helpers
-
-static float clampf(float v, float lo, float hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
-static float lerpf(float a, float b, float t) {
-    return a + (b - a) * t;
-}
 
 /// Panel layout
 //
@@ -179,9 +237,10 @@ static void content_area(Panel* p, float px, float py, float pw, float ph,
 
 /// Inspector  (Right panel)
 
-static void field_vec3(float cx, float row, float col2_x, float cw,
-                       const char* label, vec3 v, const char* unit) {
-    if (!editor.font) return;
+static bool field_vec3(float cx, float row, float col2_x, float cw,
+                       const char* label, float* v, const char* unit, float speed) {
+    if (!editor.font) return false;
+    bool changed = false;
     text(editor.font, label, cx, row, CT.text_dim);
 
     float box_x = col2_x;
@@ -193,39 +252,72 @@ static void field_vec3(float cx, float row, float col2_x, float cw,
 
     float sec_w = box_w / 3.0f;
     Color axis_colors[3] = {CT.x_dark, CT.y_dark, CT.z_dark};
+    Color axis_colors_active[3] = {CT.x, CT.y, CT.z};
     const char* axis_labels[3] = {"X", "Y", "Z"};
 
     for (int i = 0; i < 3; i++) {
-        float px = box_x + i * sec_w + 6.0f;
-        text(editor.font, axis_labels[i], px, row, axis_colors[i]);
+        float hit_x = box_x + i * sec_w;
+        bool hovered = (s_ui_mx >= hit_x && s_ui_mx <= hit_x + sec_w && s_ui_my >= box_y && s_ui_my <= box_y + box_h);
+        void* id = (void*)&v[i];
+
+        if (hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+            s_ui_active_id = id;
+            s_ui_drag_start_x = (float)s_ui_mx;
+        }
+
+        if (s_ui_active_id == id) {
+            float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
+            GLFWwindow* win = glfwGetCurrentContext();
+            if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
+                delta *= 0.1f;
+            }
+            v[i] += delta;
+            s_ui_drag_start_x = (float)s_ui_mx;
+            changed = true;
+        }
+
+        Color label_col = (s_ui_active_id == id || (hovered && s_ui_active_id == NULL)) ? axis_colors_active[i] : axis_colors[i];
+
+        float px = hit_x + 6.0f;
+        text(editor.font, axis_labels[i], px, row, label_col);
 
         char num[32];
-        // The space flag '% .2f' perfectly aligns positive and negative numbers!
         snprintf(num, sizeof(num), "% .2f", v[i]);
         float num_x = px + 14.0f;
         text(editor.font, num, num_x, row, CT.text);
 
         if (unit) {
-            // Fixed pixel offset perfectly distances the unit from the number
             float unit_x = num_x + 58.0f;
             text(editor.font, unit, unit_x, row, CT.text_dim);
         }
     }
+    return changed;
 }
 
-static void field_vec4_color(float cx, float row, float col2_x, float cw,
-                             const char* label, vec4 c) {
-    if (!editor.font) return;
+static bool field_vec4_color(float cx, float row, float col2_x, float cw,
+                             const char* label, float* c) {
+    if (!editor.font) return false;
+    bool changed = false;
     text(editor.font, label, cx, row, CT.text_dim);
 
     float box_h = editor.font->ascent - editor.font->descent + 6.0f;
     float box_y = row - editor.font->descent - 3.0f;
 
     float swatch_size = box_h - 4.0f;
-    // Shift swatch and box to the left to pull them closer to the label
-    float swatch_x = col2_x - 20.0f;
+    float swatch_x = col2_x - 25.0f;
     Color actual_color = {c[0], c[1], c[2], c[3]};
     exQuad2D((vec2){swatch_x, box_y + 2.0f}, (vec2){swatch_size, swatch_size}, (vec4){3.0f, 3.0f, 3.0f, 3.0f}, 0.0f, actual_color, actual_color);
+
+    bool swatch_hovered = (s_ui_mx >= swatch_x && s_ui_mx <= swatch_x + swatch_size &&
+                           s_ui_my >= box_y + 2.0f && s_ui_my <= box_y + 2.0f + swatch_size);
+
+    if (swatch_hovered && s_ui_mclicked) {
+        extern VulkanContext context;
+        float sh = (float)context.swapChainExtent.height;
+        float anchor_x = swatch_x - 10.0f; // Open to the left of the swatch to keep it on-screen
+        float anchor_y = sh - (box_y + 2.0f + swatch_size * 0.5f);
+        colorpicker_open(&s_color_picker, anchor_x, anchor_y, c, c, on_color_picked, NULL);
+    }
 
     float box_x = swatch_x + swatch_size + 8.0f;
     float box_w = (cx + cw) - box_x + 8.0f;
@@ -234,25 +326,74 @@ static void field_vec4_color(float cx, float row, float col2_x, float cw,
 
     float sec_w = box_w / 4.0f;
     Color axis_colors[4] = {CT.x_dark, CT.y_dark, CT.z_dark, CT.text_dim};
+    Color axis_colors_active[4] = {CT.x, CT.y, CT.z, CT.text};
     const char* axis_labels[4] = {"R", "G", "B", "A"};
 
     for (int i = 0; i < 4; i++) {
-        // Pushed the starting point slightly right to center the whole block in the sector
-        float px = box_x + i * sec_w + 8.0f;
-        text(editor.font, axis_labels[i], px, row, axis_colors[i]);
+        float hit_x = box_x + i * sec_w;
+        bool hovered = (s_ui_mx >= hit_x && s_ui_mx <= hit_x + sec_w && s_ui_my >= box_y && s_ui_my <= box_y + box_h);
+        void* id = (void*)&c[i];
+
+        if (hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+            s_ui_active_id = id;
+            s_ui_drag_start_x = (float)s_ui_mx;
+        }
+
+        if (s_ui_active_id == id) {
+            float delta = ((float)s_ui_mx - s_ui_drag_start_x) * 0.005f;
+            GLFWwindow* win = glfwGetCurrentContext();
+            if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
+                delta *= 0.1f;
+            }
+            c[i] = clampf(c[i] + delta, 0.0f, 1.0f);
+            s_ui_drag_start_x = (float)s_ui_mx;
+            changed = true;
+        }
+
+        Color label_col = (s_ui_active_id == id || (hovered && s_ui_active_id == NULL)) ? axis_colors_active[i] : axis_colors[i];
+
+        float px = hit_x + 8.0f;
+        text(editor.font, axis_labels[i], px, row, label_col);
 
         char num[32];
         snprintf(num, sizeof(num), "%.2f", c[i]);
-        // Increased the offset from 12.0f to 18.0f to give the number more breathing room
-        // from its label and reduce the empty space before the next letter
         text(editor.font, num, px + 18.0f, row, CT.text);
     }
+    return changed;
 }
 
-static void field_float(float cx, float row, float col2_x, float cw,
-                        const char* label, float val) {
-    if (!editor.font) return;
-    text(editor.font, label, cx, row, CT.text_dim);
+static bool field_float(float cx, float row, float col2_x, float cw,
+                        const char* label, float* val, float speed,
+                        bool clamp_val, float min_v, float max_v) {
+    if (!editor.font) return false;
+    bool changed = false;
+
+    bool hovered = (s_ui_mx >= cx && s_ui_mx <= cx + cw &&
+                    s_ui_my >= row - editor.font->descent - 3.0f &&
+                    s_ui_my <= row + editor.font->ascent + 3.0f);
+    void* id = (void*)val;
+
+    if (hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+        s_ui_active_id = id;
+        s_ui_drag_start_x = (float)s_ui_mx;
+    }
+
+    if (s_ui_active_id == id) {
+        float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
+        GLFWwindow* win = glfwGetCurrentContext();
+        if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
+            delta *= 0.1f;
+        }
+        *val += delta;
+        if (clamp_val) {
+            *val = clampf(*val, min_v, max_v);
+        }
+        s_ui_drag_start_x = (float)s_ui_mx;
+        changed = true;
+    }
+
+    Color label_col = (s_ui_active_id == id || (hovered && s_ui_active_id == NULL)) ? CT.text : CT.text_dim;
+    text(editor.font, label, cx, row, label_col);
 
     float box_x = col2_x;
     float box_w = 80.0f; // Compact width for single float fields
@@ -262,12 +403,14 @@ static void field_float(float cx, float row, float col2_x, float cw,
     exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
 
     char num[32];
-    snprintf(num, sizeof(num), "% .3f", val); // Aligned spacing
+    snprintf(num, sizeof(num), "% .3f", *val); // Aligned spacing
     text(editor.font, num, box_x + 8.0f, row, CT.text);
+    return changed;
 }
 
 static void field_text(float cx, float row, float col2_x, float cw,
                        const char* label, const char* value) {
+    (void)cw;
     if (!editor.font) return;
     text(editor.font, label, cx, row, CT.text_dim);
 
@@ -313,47 +456,70 @@ static void render_inspector(Panel* panel,
     SECTION("Transform");
 
     vec3 pos = {m->model[3][0], m->model[3][1], m->model[3][2]};
-    field_vec3(cx, row, col2, cw, "Position", pos, "m");
-    row -= lh + 6.0f;
-
     vec3 euler;
     glm_euler_angles(m->model, euler);
     vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
-    field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°");
-    row -= lh + 6.0f;
-
     vec3 scale = {
         glm_vec3_norm((vec3){m->model[0][0], m->model[1][0], m->model[2][0]}),
         glm_vec3_norm((vec3){m->model[0][1], m->model[1][1], m->model[2][1]}),
         glm_vec3_norm((vec3){m->model[0][2], m->model[1][2], m->model[2][2]})
     };
-    field_vec3(cx, row, col2, cw, "Scale", scale, "m");
+
+    bool transform_changed = false;
+    transform_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f);
+    row -= lh + 6.0f;
+    transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f);
+    row -= lh + 6.0f;
+    transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "m", 0.02f);
     row -= lh + 12.0f;
+
+    if (transform_changed) {
+        glm_mat4_identity(m->model);
+        glm_translate(m->model, pos);
+        // Reapply rotation: Z, Y, X to maintain standard euler composition
+        glm_rotate_z(m->model, glm_rad(rot_deg[2]), m->model);
+        glm_rotate_y(m->model, glm_rad(rot_deg[1]), m->model);
+        glm_rotate_x(m->model, glm_rad(rot_deg[0]), m->model);
+        glm_scale(m->model, scale);
+        extern void markMeshesSSBODirty(void* ctx);
+        markMeshesSSBODirty(&context);
+    }
 
     // ── Material ───────────────────────────────────────────────────────────
     SECTION("Material");
 
-    field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor);
+    bool mat_changed = false;
+    mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor);
     row -= lh + 6.0f;
 
     vec4 emissive = {m->emissiveFactor[0], m->emissiveFactor[1], m->emissiveFactor[2], 1.0f};
-    field_vec4_color(cx, row, col2, cw, "Emissive", emissive);
+    if (field_vec4_color(cx, row, col2, cw, "Emissive", emissive)) {
+        m->emissiveFactor[0] = emissive[0];
+        m->emissiveFactor[1] = emissive[1];
+        m->emissiveFactor[2] = emissive[2];
+        mat_changed = true;
+    }
     row -= lh + 6.0f;
 
-    field_float(cx, row, col2_mat, cw, "Emissive Strength", m->emissiveStrength);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f);
     row -= lh + 6.0f;
 
-    field_float(cx, row, col2_mat, cw, "Metallic", m->metallicFactor);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f);
     row -= lh + 6.0f;
 
-    field_float(cx, row, col2_mat, cw, "Roughness", m->roughnessFactor);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f);
     row -= lh + 6.0f;
 
-    field_float(cx, row, col2_mat, cw, "Transmission", m->transmissionFactor);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f);
     row -= lh + 6.0f;
 
-    field_float(cx, row, col2_mat, cw, "IOR", m->ior);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f);
     row -= lh + 12.0f;
+
+    if (mat_changed) {
+        extern void markMeshesSSBODirty(void* ctx);
+        markMeshesSSBODirty(&context);
+    }
 
     // ── Geometry ───────────────────────────────────────────────────────────
     SECTION("Geometry");
@@ -383,9 +549,9 @@ static void render_inspector(Panel* panel,
     SECTION("Bounds");
     vec3 bmin = {m->aabbMin[0], m->aabbMin[1], m->aabbMin[2]};
     vec3 bmax = {m->aabbMax[0], m->aabbMax[1], m->aabbMax[2]};
-    field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m");
+    field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m", 0.0f);
     row -= lh + 6.0f;
-    field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m");
+    field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m", 0.0f);
     row -= lh + 12.0f;
 
     // ── Animation ──────────────────────────────────────────────────────────
@@ -406,7 +572,10 @@ static void render_inspector(Panel* panel,
                 for (int i = 0; i < m->morphCount && i < 8; i++) {
                     char wlbl[16];
                     snprintf(wlbl, sizeof wlbl, "  [%d]", i);
-                    field_float(cx, row, col2_anim, cw, wlbl, m->morph_data->weights[i]);
+                    if (field_float(cx, row, col2_anim, cw, wlbl, &m->morph_data->weights[i], 0.01f, true, 0.0f, 1.0f)) {
+                        extern void markMeshesSSBODirty(void* ctx);
+                        markMeshesSSBODirty(&context);
+                    }
                     row -= lh + 6.0f;
                 }
             }
@@ -714,6 +883,8 @@ void editor_init(void) {
     keychord_bind(&keymap, "M-k", toggle_top,    "Toggle console",      PRESS);
     keychord_bind(&keymap, "M-h", toggle_left,   "Toggle hierarchy",    PRESS);
 
+    colorpicker_init(&s_color_picker);
+
     editor.last_time   = glfwGetTime();
     editor.initialized = true;
 
@@ -767,6 +938,10 @@ void editor_render(void) {
         if (p->render_content)
             p->render_content(p, x, y, w, h);
     }
+
+    colorpicker_render(&s_color_picker, editor.font);
+
+    s_ui_mclicked = false; // Reset one-frame click flag
 }
 
 /// Panel Control

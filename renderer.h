@@ -324,3 +324,10 @@ void line_renderer_upload();
 void line_renderer_draw(VkCommandBuffer cmd);
 void line_renderer_clear();
 void line_renderer_shutdown();
+
+
+
+void circle2D(vec2 center, float radius, Color color);
+void line2D(vec2 start, vec2 end, Color color);
+void triangle_col(vec2 p0, Color c0, vec2 p1, Color c1, vec2 p2, Color c2);
+void shaderQuad2D(vec2 position, vec2 size, int shaderId, vec4 customParams);

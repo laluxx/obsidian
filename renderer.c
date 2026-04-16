@@ -932,6 +932,23 @@ void quad2D(vec2 position, vec2 size, Color color) {
     vertexCount2D += 6;
 }
 
+void shaderQuad2D(vec2 position, vec2 size, int shaderId, vec4 customParams) {
+    if (vertexCount2D + 6 > MAX_VERTICES) return;
+    float x = position[0], y = position[1];
+    float w = size[0], h = size[1];
+    Color col = {1.0f, 1.0f, 1.0f, 1.0f}; // Default color
+    Vertex2D quad[6] = {
+        {{x,     y    }, col, {0.0f, 0.0f}, shaderId, {w, h}, {customParams[0], customParams[1], customParams[2], customParams[3]}, 0.0f, col},
+        {{x + w, y    }, col, {1.0f, 0.0f}, shaderId, {w, h}, {customParams[0], customParams[1], customParams[2], customParams[3]}, 0.0f, col},
+        {{x + w, y + h}, col, {1.0f, 1.0f}, shaderId, {w, h}, {customParams[0], customParams[1], customParams[2], customParams[3]}, 0.0f, col},
+        {{x,     y    }, col, {0.0f, 0.0f}, shaderId, {w, h}, {customParams[0], customParams[1], customParams[2], customParams[3]}, 0.0f, col},
+        {{x + w, y + h}, col, {1.0f, 1.0f}, shaderId, {w, h}, {customParams[0], customParams[1], customParams[2], customParams[3]}, 0.0f, col},
+        {{x,     y + h}, col, {0.0f, 1.0f}, shaderId, {w, h}, {customParams[0], customParams[1], customParams[2], customParams[3]}, 0.0f, col}
+    };
+    memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+    vertexCount2D += 6;
+}
+
 void exQuad2D(vec2 position, vec2 size, vec4 radii, float borderThickness, Color borderColor, Color color) {
     if (vertexCount2D + 6 > MAX_VERTICES) return;
 
@@ -973,8 +990,49 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint) {
         {{x,     y + h}, tint, {0.0f, 0.0f}, slot, {w, h}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, tint}
     };
 
+memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+    vertexCount2D += 6;
+}
+
+void circle2D(vec2 center, float radius, Color color) {
+    float d = radius * 2.0f;
+    vec2 pos = {center[0] - radius, center[1] - radius};
+    vec4 radii = {radius, radius, radius, radius};
+    exQuad2D(pos, (vec2){d, d}, radii, 0.0f, color, color);
+}
+
+void line2D(vec2 start, vec2 end, Color color) {
+    float thickness = 1.0f;
+    vec2 dir = {end[0] - start[0], end[1] - start[1]};
+    float len = sqrtf(dir[0]*dir[0] + dir[1]*dir[1]);
+    if (len < 0.0001f) return;
+    dir[0] /= len; dir[1] /= len;
+
+    vec2 perp = {-dir[1] * (thickness * 0.5f), dir[0] * (thickness * 0.5f)};
+
+    if (vertexCount2D + 6 > MAX_VERTICES) return;
+
+    Vertex2D quad[6] = {
+        {{start[0] - perp[0], start[1] - perp[1]}, color, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{end[0] - perp[0], end[1] - perp[1]}, color, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{end[0] + perp[0], end[1] + perp[1]}, color, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{start[0] - perp[0], start[1] - perp[1]}, color, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{end[0] + perp[0], end[1] + perp[1]}, color, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color},
+        {{start[0] + perp[0], start[1] + perp[1]}, color, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, color}
+    };
     memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
     vertexCount2D += 6;
+}
+
+void triangle_col(vec2 p0, Color c0, vec2 p1, Color c1, vec2 p2, Color c2) {
+    if (vertexCount2D + 3 > MAX_VERTICES) return;
+    Vertex2D tri[3] = {
+        {{p0[0], p0[1]}, c0, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, c0},
+        {{p1[0], p1[1]}, c1, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, c1},
+        {{p2[0], p2[1]}, c2, {0.0f, 0.0f}, -1, {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, c2}
+    };
+    memcpy(&vertices2D[vertexCount2D], tri, sizeof(tri));
+    vertexCount2D += 3;
 }
 
 void renderer2D_upload() {

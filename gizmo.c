@@ -33,10 +33,6 @@ extern void markMeshesSSBODirty(void* ctx);
 
 GizmoState gizmo = {0};
 
-//  Math helpers
-static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
-static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
 // Project a 3-D world point to 2-D screen coordinates.
 // Returns false if the point is behind the camera.
 static bool world_to_screen(vec3 world, vec2 out_screen) {
@@ -1017,7 +1013,10 @@ void gizmo_render(int mesh_index) {
     #undef AXIS_COL
 }
 
+extern void editor_mouse_move(double xpos, double ypos);
+
 void gizmo_mouse_move(double xpos, double ypos) {
+    editor_mouse_move(xpos, ypos);
     // Convert to bottom-left Y-up
     float sh  = (float)context.swapChainExtent.height;
     double my = sh - ypos;
@@ -1041,8 +1040,13 @@ void gizmo_mouse_move(double xpos, double ypos) {
     gizmo_update_hover(origin, scale, xpos, my);
 }
 
+extern void editor_mouse_button(int button, int action);
+extern bool editor_wants_mouse(void);
+
 void gizmo_mouse_button(int button, int action, int mods, double xpos, double ypos) {
     (void)mods;
+    editor_mouse_button(button, action);
+
     if (button != GLFW_MOUSE_BUTTON_LEFT) return;
 
     float sh  = (float)context.swapChainExtent.height;
@@ -1052,6 +1056,8 @@ void gizmo_mouse_button(int button, int action, int mods, double xpos, double yp
     s_curr_my = my;
 
     if (action == GLFW_PRESS) {
+        if (editor_wants_mouse()) return; // Block scene picking/gizmo click when interacting with UI panels
+
         // If over a gizmo part → start drag
         if (gizmo.active && gizmo.hovered != GIZMO_PART_NONE) {
             gizmo.dragging      = gizmo.hovered;

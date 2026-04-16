@@ -22,6 +22,8 @@ typedef struct {
 
 Color hexToColor(const char *hex);
 
+float clampf(float v, float lo, float hi);
+float lerpf(float a, float b, float t);
 
 
 uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties);

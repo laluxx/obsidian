@@ -2,6 +2,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+///  Math helpers
+
+float clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+float lerpf(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
 uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
