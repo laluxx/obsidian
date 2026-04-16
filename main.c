@@ -49,6 +49,14 @@ vec3 frame_target_pos = {0};
 float frame_anim_time = 0.0f;
 const float FRAME_ANIM_DURATION = 0.4f; // 400ms for a snappy pop
 
+// Smooth scroll wheel zooming state
+bool lerp_scroll_wheel_zoom = true;
+bool is_zooming = false;
+vec3 zoom_start_pos = {0};
+vec3 zoom_target_pos = {0};
+float zoom_anim_time = 0.0f;
+const float ZOOM_ANIM_DURATION = 0.15f; // Fast, tactile 150ms settle
+
 
 void key_callback(int key, int action, int mods) {
     shiftPressed = mods & GLFW_MOD_SHIFT;
@@ -233,7 +241,23 @@ void scroll_callback(double xoffset, double yoffset) {
         vec3 forward;
         glm_vec3_copy(camera.front, forward);
         glm_vec3_scale(forward, yoffset * zoomSpeed, forward);
-        glm_vec3_add(camera.position, forward, camera.position);
+
+        if (lerp_scroll_wheel_zoom) {
+            if (!is_zooming) {
+                glm_vec3_copy(camera.position, zoom_start_pos);
+                glm_vec3_copy(camera.position, zoom_target_pos);
+            } else {
+                // If already zooming, branch off smoothly from current visual position
+                glm_vec3_copy(camera.position, zoom_start_pos);
+            }
+
+            // Accumulate the target position for continuous scrolling
+            glm_vec3_add(zoom_target_pos, forward, zoom_target_pos);
+            is_zooming = true;
+            zoom_anim_time = 0.0f;
+        } else {
+            glm_vec3_add(camera.position, forward, camera.position);
+        }
     }
 }
 
@@ -417,6 +441,7 @@ int main() {
         lastFrameTime = currentFrameTime;
 
         if (is_framing) {
+            is_zooming = false; // Framing gracefully overrides manual zooming
             frame_anim_time += deltaTime;
             float t = frame_anim_time / FRAME_ANIM_DURATION;
             if (t >= 1.0f) {
@@ -426,8 +451,18 @@ int main() {
 
             // EASE_EXPO_OUT gives that fast snap and smooth settle exactly like Godot
             float ease_t = ease_expo_out(t);
-
             glm_vec3_lerp(frame_start_pos, frame_target_pos, ease_t, camera.position);
+        } else if (is_zooming) {
+            zoom_anim_time += deltaTime;
+            float t = zoom_anim_time / ZOOM_ANIM_DURATION;
+            if (t >= 1.0f) {
+                t = 1.0f;
+                is_zooming = false;
+            }
+
+            // EASE_QUART_OUT is slightly less aggressive than EXPO_OUT, making consecutive mouse wheel clicks feel buttery smooth
+            float ease_t = ease_quart_out(t);
+            glm_vec3_lerp(zoom_start_pos, zoom_target_pos, ease_t, camera.position);
         }
 
         beginFrame();

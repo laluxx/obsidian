@@ -179,11 +179,100 @@ static void content_area(Panel* p, float px, float py, float pw, float ph,
 
 /// Inspector  (Right panel)
 
-static void field_row(float x, float y, float col2_x,
-                      const char* label, const char* value) {
+static void field_vec3(float cx, float row, float col2_x, float cw,
+                       const char* label, vec3 v, const char* unit) {
     if (!editor.font) return;
-    text(editor.font, label, x,       y, CT.text_dim);
-    text(editor.font, value, col2_x,  y, CT.text);
+    text(editor.font, label, cx, row, CT.text_dim);
+
+    float box_x = col2_x;
+    float box_w = (cx + cw) - box_x;
+    float box_h = editor.font->ascent - editor.font->descent + 6.0f;
+    float box_y = row - editor.font->descent - 3.0f;
+
+    exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
+
+    float sec_w = box_w / 3.0f;
+    Color axis_colors[3] = {CT.x_dark, CT.y_dark, CT.z_dark};
+    const char* axis_labels[3] = {"X", "Y", "Z"};
+
+    for (int i = 0; i < 3; i++) {
+        float px = box_x + i * sec_w + 6.0f;
+        text(editor.font, axis_labels[i], px, row, axis_colors[i]);
+
+        char num[32];
+        // The space flag '% .2f' perfectly aligns positive and negative numbers!
+        snprintf(num, sizeof(num), "% .2f", v[i]);
+        float num_x = px + 14.0f;
+        text(editor.font, num, num_x, row, CT.text);
+
+        if (unit) {
+            // Fixed pixel offset perfectly distances the unit from the number
+            float unit_x = num_x + 58.0f;
+            text(editor.font, unit, unit_x, row, CT.text_dim);
+        }
+    }
+}
+
+static void field_vec4_color(float cx, float row, float col2_x, float cw,
+                             const char* label, vec4 c) {
+    if (!editor.font) return;
+    text(editor.font, label, cx, row, CT.text_dim);
+
+    float box_h = editor.font->ascent - editor.font->descent + 6.0f;
+    float box_y = row - editor.font->descent - 3.0f;
+
+    float swatch_size = box_h - 4.0f;
+    // Shift swatch and box to the left to pull them closer to the label
+    float swatch_x = col2_x - 20.0f;
+    Color actual_color = {c[0], c[1], c[2], c[3]};
+    exQuad2D((vec2){swatch_x, box_y + 2.0f}, (vec2){swatch_size, swatch_size}, (vec4){3.0f, 3.0f, 3.0f, 3.0f}, 0.0f, actual_color, actual_color);
+
+    float box_x = swatch_x + swatch_size + 8.0f;
+    float box_w = (cx + cw) - box_x + 8.0f;
+
+    exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
+
+    float sec_w = box_w / 4.0f;
+    Color axis_colors[4] = {CT.x_dark, CT.y_dark, CT.z_dark, CT.text_dim};
+    const char* axis_labels[4] = {"R", "G", "B", "A"};
+
+    for (int i = 0; i < 4; i++) {
+        // Pushed the starting point slightly right to center the whole block in the sector
+        float px = box_x + i * sec_w + 8.0f;
+        text(editor.font, axis_labels[i], px, row, axis_colors[i]);
+
+        char num[32];
+        snprintf(num, sizeof(num), "%.2f", c[i]);
+        // Increased the offset from 12.0f to 18.0f to give the number more breathing room
+        // from its label and reduce the empty space before the next letter
+        text(editor.font, num, px + 18.0f, row, CT.text);
+    }
+}
+
+static void field_float(float cx, float row, float col2_x, float cw,
+                        const char* label, float val) {
+    if (!editor.font) return;
+    text(editor.font, label, cx, row, CT.text_dim);
+
+    float box_x = col2_x;
+    float box_w = 80.0f; // Compact width for single float fields
+    float box_h = editor.font->ascent - editor.font->descent + 6.0f;
+    float box_y = row - editor.font->descent - 3.0f;
+
+    exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
+
+    char num[32];
+    snprintf(num, sizeof(num), "% .3f", val); // Aligned spacing
+    text(editor.font, num, box_x + 8.0f, row, CT.text);
+}
+
+static void field_text(float cx, float row, float col2_x, float cw,
+                       const char* label, const char* value) {
+    if (!editor.font) return;
+    text(editor.font, label, cx, row, CT.text_dim);
+
+    // Read-only text fields (like Geometry) no longer have heavy backgrounds!
+    text(editor.font, value, col2_x + 8.0f, row, CT.text);
 }
 
 static void render_inspector(Panel* panel,
@@ -203,102 +292,128 @@ static void render_inspector(Panel* panel,
 
     Mesh* m = &scene.meshes.items[s->selected_mesh_index];
     float lh  = editor.font->ascent - editor.font->descent + LH_EXTRA;
-    float col2 = cx + 110.0f;
+    float col2 = cx + 120.0f; // Vector fields stay perfectly aligned to 120
 
-    // Draw from the top of the content area downward (Y decreases in our coord space)
-    float row = cy + ch - PAD;   // start near the top, step down
+    extern float font_width(Font* font);
+    float space_w = font_width(editor.font);
+
+    // Calculate dynamic alignments based on the longest label per section + exactly 1 space of padding!
+    float col2_mat  = cx + strlen("Emissive Strength") * space_w + space_w;
+    float col2_geo  = cx + strlen("Alpha Mode") * space_w + space_w;
+    float col2_anim = cx + strlen("Joints") * space_w + space_w;
+
+    float row = cy + ch - PAD;
 
 #define SECTION(label) do { \
     text(editor.font, label, cx, row, CT.accent); \
-    row -= lh + 4.0f; \
+    row -= lh + 6.0f; \
 } while(0)
-
-#define FIELD(lbl, val) do { \
-    field_row(cx, row, col2, lbl, val); \
-    row -= lh; \
-} while(0)
-
-    char buf[128];
 
     // ── Transform ──────────────────────────────────────────────────────────
     SECTION("Transform");
 
-    snprintf(buf, sizeof buf, "%.2f  %.2f  %.2f",
-             m->model[3][0], m->model[3][1], m->model[3][2]);
-    FIELD("Position", buf);
+    vec3 pos = {m->model[3][0], m->model[3][1], m->model[3][2]};
+    field_vec3(cx, row, col2, cw, "Position", pos, "m");
+    row -= lh + 6.0f;
 
-    snprintf(buf, sizeof buf, "%.2f  %.2f  %.2f",
-             glm_vec3_norm((vec3){m->model[0][0], m->model[1][0], m->model[2][0]}),
-             glm_vec3_norm((vec3){m->model[0][1], m->model[1][1], m->model[2][1]}),
-             glm_vec3_norm((vec3){m->model[0][2], m->model[1][2], m->model[2][2]}));
-    FIELD("Scale", buf);
+    vec3 euler;
+    glm_euler_angles(m->model, euler);
+    vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
+    field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°");
+    row -= lh + 6.0f;
 
-    row -= 8.0f;
+    vec3 scale = {
+        glm_vec3_norm((vec3){m->model[0][0], m->model[1][0], m->model[2][0]}),
+        glm_vec3_norm((vec3){m->model[0][1], m->model[1][1], m->model[2][1]}),
+        glm_vec3_norm((vec3){m->model[0][2], m->model[1][2], m->model[2][2]})
+    };
+    field_vec3(cx, row, col2, cw, "Scale", scale, "m");
+    row -= lh + 12.0f;
 
     // ── Material ───────────────────────────────────────────────────────────
     SECTION("Material");
 
-    snprintf(buf, sizeof buf, "%.2f  %.2f  %.2f  %.2f",
-             m->baseColorFactor[0], m->baseColorFactor[1],
-             m->baseColorFactor[2], m->baseColorFactor[3]);
-    FIELD("Base Color", buf);
+    field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor);
+    row -= lh + 6.0f;
 
-    snprintf(buf, sizeof buf, "%.3f", m->metallicFactor);
-    FIELD("Metallic", buf);
+    vec4 emissive = {m->emissiveFactor[0], m->emissiveFactor[1], m->emissiveFactor[2], 1.0f};
+    field_vec4_color(cx, row, col2, cw, "Emissive", emissive);
+    row -= lh + 6.0f;
 
-    snprintf(buf, sizeof buf, "%.3f", m->roughnessFactor);
-    FIELD("Roughness", buf);
+    field_float(cx, row, col2_mat, cw, "Emissive Strength", m->emissiveStrength);
+    row -= lh + 6.0f;
 
-    snprintf(buf, sizeof buf, "%.3f", m->transmissionFactor);
-    FIELD("Transmission", buf);
+    field_float(cx, row, col2_mat, cw, "Metallic", m->metallicFactor);
+    row -= lh + 6.0f;
 
-    snprintf(buf, sizeof buf, "%.3f", m->ior);
-    FIELD("IOR", buf);
+    field_float(cx, row, col2_mat, cw, "Roughness", m->roughnessFactor);
+    row -= lh + 6.0f;
 
-    row -= 8.0f;
+    field_float(cx, row, col2_mat, cw, "Transmission", m->transmissionFactor);
+    row -= lh + 6.0f;
+
+    field_float(cx, row, col2_mat, cw, "IOR", m->ior);
+    row -= lh + 12.0f;
 
     // ── Geometry ───────────────────────────────────────────────────────────
     SECTION("Geometry");
 
+    char buf[64];
     snprintf(buf, sizeof buf, "%u", m->vertexCount);
-    FIELD("Vertices", buf);
+    field_text(cx, row, col2_geo, cw, "Vertices", buf);
+    row -= lh + 6.0f;
 
     snprintf(buf, sizeof buf, "%u", m->indexCount);
-    FIELD("Indices", buf);
+    field_text(cx, row, col2_geo, cw, "Indices", buf);
+    row -= lh + 6.0f;
 
-    const char* amode = (m->alpha_mode == 0) ? "Opaque"
-                       : (m->alpha_mode == 1) ? "Mask" : "Blend";
-    FIELD("Alpha Mode", amode);
-    FIELD("Unlit", m->is_unlit ? "Yes" : "No");
+    const char* amode = (m->alpha_mode == 0) ? "Opaque" : (m->alpha_mode == 1) ? "Mask" : "Blend";
+    field_text(cx, row, col2_geo, cw, "Alpha Mode", amode);
+    row -= lh + 6.0f;
 
-    if (m->name) FIELD("Name", m->name);
+    field_text(cx, row, col2_geo, cw, "Unlit", m->is_unlit ? "Yes" : "No");
+    row -= lh + 6.0f;
+
+    if (m->name) {
+        field_text(cx, row, col2_geo, cw, "Name", m->name);
+        row -= lh + 6.0f;
+    }
+
+    // ── Bounds ─────────────────────────────────────────────────────────────
+    SECTION("Bounds");
+    vec3 bmin = {m->aabbMin[0], m->aabbMin[1], m->aabbMin[2]};
+    vec3 bmax = {m->aabbMax[0], m->aabbMax[1], m->aabbMax[2]};
+    field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m");
+    row -= lh + 6.0f;
+    field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m");
+    row -= lh + 12.0f;
 
     // ── Animation ──────────────────────────────────────────────────────────
     if (m->jointCount > 0 || m->morphCount > 0) {
-        row -= 8.0f;
         SECTION("Animation");
 
         if (m->jointCount > 0) {
             snprintf(buf, sizeof buf, "%d (off %d)", m->jointCount, m->jointOffset);
-            FIELD("Joints", buf);
+            field_text(cx, row, col2_anim, cw, "Joints", buf);
+            row -= lh + 6.0f;
         }
         if (m->morphCount > 0) {
             snprintf(buf, sizeof buf, "%d", m->morphCount);
-            FIELD("Morphs", buf);
+            field_text(cx, row, col2_anim, cw, "Morphs", buf);
+            row -= lh + 6.0f;
 
             if (m->morph_data) {
                 for (int i = 0; i < m->morphCount && i < 8; i++) {
                     char wlbl[16];
                     snprintf(wlbl, sizeof wlbl, "  [%d]", i);
-                    snprintf(buf, sizeof buf, "%.3f", m->morph_data->weights[i]);
-                    FIELD(wlbl, buf);
+                    field_float(cx, row, col2_anim, cw, wlbl, m->morph_data->weights[i]);
+                    row -= lh + 6.0f;
                 }
             }
         }
     }
 
 #undef SECTION
-#undef FIELD
 }
 
 ///  Hierarchy  (Left panel)
@@ -401,11 +516,6 @@ static void render_file_manager(Panel* panel,
         // Tile background (Borders removed entirely)
         Color tile_bg = selected ? CT.bg_alt : CT.bg_deep;
         exQuad2D((vec2){tx, ty}, (vec2){FM_TILE_W, FM_TILE_H}, (vec4){5.0f, 5.0f, 5.0f, 5.0f}, 0.0f, tile_bg, tile_bg);
-
-        /* // Type indicator stripe at top of tile */
-        /* Color stripe = (item->type == FILE_ITEM_DIR) ? ED_ORANGE : ED_MUTED; */
-        /* quad2D((vec2){tx + 5.0f + PANEL_RADIUS * 0.5f, ty + FM_TILE_H - 4.0f}, */
-        /*        (vec2){FM_TILE_W - 10.0f - PANEL_RADIUS, 3.0f}, stripe); */
 
         // Name label — truncate to fit tile width
         char display_name[32];
@@ -550,7 +660,7 @@ void editor_init(void) {
         .open           = false,
         .t              = 0.0f,
         .target_t       = 0.0f,
-        .size           = 310.0f,
+        .size           = 420.0f,
         .min_size       = 200.0f,
         .max_size       = 600.0f,
         .ease_fn        = ease_quart_out,

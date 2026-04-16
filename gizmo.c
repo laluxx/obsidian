@@ -29,6 +29,7 @@ extern void markMeshesSSBODirty(void* ctx);
 #define GIZMO_PART_RS         128      // Screen-space rotation ring
 #define GIZMO_LINE_THICK      4.0f     // Inner 3D rotation arcs
 #define GIZMO_LINE_THIN       2.0f     // Outer white 2D ring and defaults
+#define GIZMO_PIE_ALPHA       0.5f     // Transparency of the active rotation slice
 
 GizmoState gizmo = {0};
 
@@ -874,9 +875,9 @@ void gizmo_render(int mesh_index) {
 
         line_set_width(GIZMO_LINE_THIN);
 
-        if (draw_x) line(px1, px2, CT.x_alt);
-        if (draw_y) line(py1, py2, CT.y_alt);
-        if (draw_z) line(pz1, pz2, CT.z_alt);
+        if (draw_x) line(px1, px2, CT.x_bright);
+        if (draw_y) line(py1, py2, CT.y_bright);
+        if (draw_z) line(pz1, pz2, CT.z_bright);
 
         if (gizmo.dragging == GIZMO_PART_RS) {
             vec3 prs1, prs2;
@@ -884,7 +885,7 @@ void gizmo_render(int mesh_index) {
                 prs1[k] = origin[k] - to_cam[k] * inf;
                 prs2[k] = origin[k] + to_cam[k] * inf;
             }
-            line(prs1, prs2, CT.gizmo_outer_circle_selected);
+            line(prs1, prs2, CT.gizmo_outer_circle_bright);
         }
     }
 
@@ -897,12 +898,12 @@ void gizmo_render(int mesh_index) {
          (gizmo.hovered  == (part) ? (alt_col)  : (base_col)))
 
     if (gizmo.mode == GIZMO_MODE_TRANSLATE) {
-        Color cx  = AXIS_COL(GIZMO_PART_X,  CT.x, CT.x_alt);
-        Color cy  = AXIS_COL(GIZMO_PART_Y,  CT.y, CT.y_alt);
-        Color cz  = AXIS_COL(GIZMO_PART_Z,  CT.z, CT.z_alt);
-        Color cxy = AXIS_COL(GIZMO_PART_XY, CT.z, CT.z_alt); // XY plane: Z-color (blue)
-        Color cxz = AXIS_COL(GIZMO_PART_XZ, CT.y, CT.y_alt); // XZ plane: Y-color (green)
-        Color cyz = AXIS_COL(GIZMO_PART_YZ, CT.x, CT.x_alt); // YZ plane: X-color (red)
+        Color cx  = AXIS_COL(GIZMO_PART_X,  CT.x, CT.x_bright);
+        Color cy  = AXIS_COL(GIZMO_PART_Y,  CT.y, CT.y_bright);
+        Color cz  = AXIS_COL(GIZMO_PART_Z,  CT.z, CT.z_bright);
+        Color cxy = AXIS_COL(GIZMO_PART_XY, CT.z, CT.z_bright); // XY plane: Z-color (blue)
+        Color cxz = AXIS_COL(GIZMO_PART_XZ, CT.y, CT.y_bright); // XZ plane: Y-color (green)
+        Color cyz = AXIS_COL(GIZMO_PART_YZ, CT.x, CT.x_bright); // YZ plane: X-color (red)
 
         draw_arrow(origin, ax, scale, cx);
         draw_arrow(origin, ay, scale, cy);
@@ -914,13 +915,13 @@ void gizmo_render(int mesh_index) {
     else if (gizmo.mode == GIZMO_MODE_ROTATE) {
         if ((gizmo.dragging >= GIZMO_PART_RX && gizmo.dragging <= GIZMO_PART_RZ) || gizmo.dragging == GIZMO_PART_RS) {
             vec3 n = {0,0,0};
-            Color alt_c = CT.x_alt;
+            Color alt_c = CT.x_bright;
             Color base_c = CT.x;
 
-            if (gizmo.dragging == GIZMO_PART_RX) { n[0] = 1.0f; alt_c = CT.x_alt; base_c = CT.x; }
-            else if (gizmo.dragging == GIZMO_PART_RY) { n[1] = 1.0f; alt_c = CT.y_alt; base_c = CT.y; }
-            else if (gizmo.dragging == GIZMO_PART_RZ) { n[2] = 1.0f; alt_c = CT.z_alt; base_c = CT.z; }
-            else if (gizmo.dragging == GIZMO_PART_RS) { glm_vec3_copy(to_cam, n); alt_c = CT.gizmo_outer_circle_selected; base_c = CT.gizmo_outer_circle_selected; }
+            if (gizmo.dragging == GIZMO_PART_RX) { n[0] = 1.0f; alt_c = CT.x_bright; base_c = CT.x; }
+            else if (gizmo.dragging == GIZMO_PART_RY) { n[1] = 1.0f; alt_c = CT.y_bright; base_c = CT.y; }
+            else if (gizmo.dragging == GIZMO_PART_RZ) { n[2] = 1.0f; alt_c = CT.z_bright; base_c = CT.z; }
+            else if (gizmo.dragging == GIZMO_PART_RS) { glm_vec3_copy(to_cam, n); alt_c = CT.gizmo_outer_circle_bright; base_c = CT.gizmo_outer_circle_bright; }
 
             float active_scale = (gizmo.dragging == GIZMO_PART_RS) ? scale * 1.2f : scale;
             float active_width = (gizmo.dragging == GIZMO_PART_RS) ? GIZMO_LINE_THIN : GIZMO_LINE_THICK;
@@ -931,10 +932,11 @@ void gizmo_render(int mesh_index) {
             draw_full_ring(origin, n, active_scale, base_c);
 
             // 2. Fill rotated slice (starts exactly at the drag origin, sweeps to current angle)
-            draw_pie(origin, n, s_rot_v_start, s_rot_angle, active_scale, CT.gizmo_inner_circle);
+            Color pie_c = {base_c.r, base_c.g, base_c.b, GIZMO_PIE_ALPHA};
+            draw_pie(origin, n, s_rot_v_start, s_rot_angle, active_scale, pie_c);
 
             // 3. Draw lines at the two edges of the pie slice (extended slightly)
-            Color line_c = (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_selected : base_c;
+            Color line_c = (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_bright : base_c;
 
             vec3 pt_start, pt_curr;
             mat4 rot; glm_mat4_identity(rot);
@@ -965,15 +967,15 @@ void gizmo_render(int mesh_index) {
                 vec3 hit;
                 glm_vec3_copy(ro, hit);
                 glm_vec3_muladds(rd, t, hit);
-                line(origin, hit, (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_selected : alt_c);
+                line(origin, hit, (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_bright : alt_c);
             }
 
         } else {
             // Draw normal arcs when not actively dragging
-            Color cx = AXIS_COL(GIZMO_PART_RX, CT.x, CT.x_alt);
-            Color cy = AXIS_COL(GIZMO_PART_RY, CT.y, CT.y_alt);
-            Color cz = AXIS_COL(GIZMO_PART_RZ, CT.z, CT.z_alt);
-            Color crs = AXIS_COL(GIZMO_PART_RS, CT.gizmo_outer_circle, CT.gizmo_outer_circle_selected);
+            Color cx = AXIS_COL(GIZMO_PART_RX, CT.x, CT.x_bright);
+            Color cy = AXIS_COL(GIZMO_PART_RY, CT.y, CT.y_bright);
+            Color cz = AXIS_COL(GIZMO_PART_RZ, CT.z, CT.z_bright);
+            Color crs = AXIS_COL(GIZMO_PART_RS, CT.gizmo_outer_circle, CT.gizmo_outer_circle_bright);
 
             line_set_width(GIZMO_LINE_THICK);
             draw_arc(origin, ax, scale, cx);
@@ -985,12 +987,12 @@ void gizmo_render(int mesh_index) {
         }
     }
     else if (gizmo.mode == GIZMO_MODE_SCALE) {
-        Color cx = AXIS_COL(GIZMO_PART_X, CT.x, CT.x_alt);
-        Color cy = AXIS_COL(GIZMO_PART_Y, CT.y, CT.y_alt);
-        Color cz = AXIS_COL(GIZMO_PART_Z, CT.z, CT.z_alt);
-        Color cxy = AXIS_COL(GIZMO_PART_XY, CT.z, CT.z_alt);
-        Color cxz = AXIS_COL(GIZMO_PART_XZ, CT.y, CT.y_alt);
-        Color cyz = AXIS_COL(GIZMO_PART_YZ, CT.x, CT.x_alt);
+        Color cx = AXIS_COL(GIZMO_PART_X, CT.x, CT.x_bright);
+        Color cy = AXIS_COL(GIZMO_PART_Y, CT.y, CT.y_bright);
+        Color cz = AXIS_COL(GIZMO_PART_Z, CT.z, CT.z_bright);
+        Color cxy = AXIS_COL(GIZMO_PART_XY, CT.z, CT.z_bright);
+        Color cxz = AXIS_COL(GIZMO_PART_XZ, CT.y, CT.y_bright);
+        Color cyz = AXIS_COL(GIZMO_PART_YZ, CT.x, CT.x_bright);
 
         float tip_t = GIZMO_ARROW_TIP * scale;
         float cube_h = scale * 0.06f;
