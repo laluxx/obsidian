@@ -12,6 +12,47 @@
 static float cp_minf(float a, float b) { return a < b ? a : b; }
 static float cp_maxf(float a, float b) { return a > b ? a : b; }
 
+// Global Alpha Fader
+static Color fade_color(Color c, float alpha) {
+    return (Color){c.r, c.g, c.b, c.a * alpha};
+}
+
+// Global Transform for Hyprland scaling
+static float cp_scale = 1.0f;
+static float cp_cx = 0.0f;
+static float cp_cy = 0.0f;
+
+static void cp_exQuad2D(vec2 pos, vec2 size, vec4 radii, float borderThickness, Color borderColor, Color color) {
+    vec2 cpos = { cp_cx + (pos[0] - cp_cx) * cp_scale, cp_cy + (pos[1] - cp_cy) * cp_scale };
+    vec2 csize = { size[0] * cp_scale, size[1] * cp_scale };
+    vec4 cradii = { radii[0] * cp_scale, radii[1] * cp_scale, radii[2] * cp_scale, radii[3] * cp_scale };
+    exQuad2D(cpos, csize, cradii, borderThickness * cp_scale, borderColor, color);
+}
+
+static void cp_shaderQuad2D(vec2 pos, vec2 size, int shaderId, vec4 customParams) {
+    vec2 cpos = { cp_cx + (pos[0] - cp_cx) * cp_scale, cp_cy + (pos[1] - cp_cy) * cp_scale };
+    vec2 csize = { size[0] * cp_scale, size[1] * cp_scale };
+    // SDF Params (customParams) don't need scaling as they represent 0-1 fractions inside the frag shader
+    shaderQuad2D(cpos, csize, shaderId, customParams);
+}
+
+static void cp_line2D(vec2 start, vec2 end, Color color) {
+    vec2 cs = { cp_cx + (start[0] - cp_cx) * cp_scale, cp_cy + (start[1] - cp_cy) * cp_scale };
+    vec2 ce = { cp_cx + (end[0] - cp_cx) * cp_scale, cp_cy + (end[1] - cp_cy) * cp_scale };
+    line2D(cs, ce, color);
+}
+
+static void cp_circle2D(vec2 center, float radius, Color color) {
+    vec2 cc = { cp_cx + (center[0] - cp_cx) * cp_scale, cp_cy + (center[1] - cp_cy) * cp_scale };
+    circle2D(cc, radius * cp_scale, color);
+}
+
+static void cp_text(Font* font, const char* str, float x, float y, Color color) {
+    float cx = cp_cx + (x - cp_cx) * cp_scale;
+    float cy = cp_cy + (y - cp_cy) * cp_scale;
+    text(font, str, cx, cy, color);
+}
+
 /// HSV <-> RGB conversion
 
 // Convert HSV (h in [0,360), s,v in [0,1]) to RGB in [0,1]
@@ -262,101 +303,90 @@ static void cp_notify(ColorPickerState* cp) {
 
 ////  Hue ring rendering
 
-static void cp_render_hue_ring(ColorPickerState* cp) {
+static void cp_render_hue_ring(ColorPickerState* cp, float alpha) {
     float r = cp->radius;
     float d = r * 2.0f;
-    // Force alpha to 1.0f so the ring doesn't vanish if the user picks a transparent color
-    shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -3, (vec4){CP_RING_INNER_FRAC, CP_RING_OUTER_FRAC, 0.0f, 1.0f});
+    cp_shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -3, (vec4){CP_RING_INNER_FRAC, CP_RING_OUTER_FRAC, 0.0f, alpha});
 }
 
 ////  SV triangle rendering
 
-static void cp_render_sv_triangle(ColorPickerState* cp) {
+static void cp_render_sv_triangle(ColorPickerState* cp, float alpha) {
     float r = cp->radius;
     float d = r * 2.0f;
-    // Force alpha to 1.0f so the triangle doesn't vanish
-    shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -4, (vec4){cp->hue, CP_TRI_RADIUS_FRAC, 0.0f, 1.0f});
+    cp_shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -4, (vec4){cp->hue, CP_TRI_RADIUS_FRAC, 0.0f, alpha});
 }
 
 ////  Cursor dots
 
-static void cp_draw_cursor(float px, float py, float r, Color fill) {
+static void cp_draw_cursor(float px, float py, float r, Color fill, float alpha) {
     float o = CP_CURSOR_OUTLINE;
 
     // Dark outline ring
-    Color outline = {0.0f, 0.0f, 0.0f, 0.7f};
-    circle2D((vec2){px, py}, r + o, outline);
+    Color outline = fade_color((Color){0.0f, 0.0f, 0.0f, 0.7f}, alpha);
+    cp_circle2D((vec2){px, py}, r + o, outline);
 
     // White inner ring for contrast on dark backgrounds
-    Color white = {1.0f, 1.0f, 1.0f, 1.0f};
-    circle2D((vec2){px, py}, r + o * 0.5f, white);
+    Color white = fade_color((Color){1.0f, 1.0f, 1.0f, 1.0f}, alpha);
+    cp_circle2D((vec2){px, py}, r + o * 0.5f, white);
 
     // Filled centre with the actual colour
-    circle2D((vec2){px, py}, r, fill);
+    cp_circle2D((vec2){px, py}, r, fade_color(fill, alpha));
 }
 
 ////  Panel background
 
-static void cp_render_panel(ColorPickerState* cp, Font* font) {
+static void cp_render_panel(ColorPickerState* cp, Font* font, float alpha) {
     float r  = cp->radius;
     float pad = CP_PANEL_PAD;
 
     float panel_x = cp->x - r - pad;
-    float panel_y = cp->y - r - pad; // Bottom of the main panel (excluding swatch)
+    float panel_y = cp->y - r - pad;
     float panel_w = (r + pad) * 2.0f;
     float panel_h = (r + pad) * 2.0f + CP_TITLE_H;
 
     vec4 radii = {CP_PANEL_RADIUS, CP_PANEL_RADIUS,
                   CP_PANEL_RADIUS, CP_PANEL_RADIUS};
 
-    // Subtle shadow layer
-    Color shadow = {0.0f, 0.0f, 0.0f, 0.25f};
-    exQuad2D((vec2){panel_x + 3.0f, panel_y - 3.0f},
+    Color shadow = fade_color((Color){0.0f, 0.0f, 0.0f, 0.25f}, alpha);
+    cp_exQuad2D((vec2){panel_x + 3.0f, panel_y - 3.0f},
              (vec2){panel_w, panel_h},
              radii, 0.0f, shadow, shadow);
 
-    // Main background
-    exQuad2D((vec2){panel_x, panel_y},
+    cp_exQuad2D((vec2){panel_x, panel_y},
              (vec2){panel_w, panel_h},
-             radii, 0.0f, CT.bg, CT.bg);
+             radii, 0.0f, fade_color(CT.bg, alpha), fade_color(CT.bg, alpha));
 
-    // Title bar at TOP
     float bar_h = CP_TITLE_H;
     float bar_y = panel_y + panel_h - bar_h;
-    exQuad2D((vec2){panel_x, bar_y}, (vec2){panel_w, bar_h}, (vec4){radii[0], radii[1], 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
+    cp_exQuad2D((vec2){panel_x, bar_y}, (vec2){panel_w, bar_h}, (vec4){radii[0], radii[1], 0.0f, 0.0f}, 0.0f, fade_color(CT.bg_alt, alpha), fade_color(CT.bg_alt, alpha));
 
-    // Thin border (rendered BEFORE text to prevent SDF blending conflicts)
-    Color border = {CT.bg_alt.r, CT.bg_alt.g, CT.bg_alt.b, 0.6f};
-    exQuad2D((vec2){panel_x, panel_y},
+    Color border = fade_color((Color){CT.bg_alt.r, CT.bg_alt.g, CT.bg_alt.b, 0.6f}, alpha);
+    cp_exQuad2D((vec2){panel_x, panel_y},
              (vec2){panel_w, panel_h},
              radii, 1.5f, (Color){0,0,0,0}, border);
 
-    // Title text
     if (font) {
-        float ty = bar_y + bar_h * 0.5f - 2.0f; // Adjusted for visual center
-        text(font, "Color Picker", panel_x + pad, ty, CT.text);
+        float ty = bar_y + bar_h * 0.5f - 2.0f;
+        cp_text(font, "Color Picker", panel_x + pad, ty, fade_color(CT.text, alpha));
     }
 
-    // Close 'X' Button
     float close_size = 10.0f;
     float close_cx = panel_x + panel_w - pad - 6.0f;
     float close_cy = bar_y + bar_h * 0.5f;
     Color close_col = cp->close_hovered ? CT.error : CT.border;
+    close_col = fade_color(close_col, alpha);
     float hw = close_size * 0.5f;
-    line2D((vec2){close_cx - hw, close_cy - hw}, (vec2){close_cx + hw, close_cy + hw}, close_col);
-    line2D((vec2){close_cx - hw, close_cy + hw}, (vec2){close_cx + hw, close_cy - hw}, close_col);
+    cp_line2D((vec2){close_cx - hw, close_cy - hw}, (vec2){close_cx + hw, close_cy + hw}, close_col);
+    cp_line2D((vec2){close_cx - hw, close_cy + hw}, (vec2){close_cx + hw, close_cy - hw}, close_col);
 }
 
 ////  Swatch bar
-//
-//  Drawn below the wheel: left half shows previous colour (not tracked),
-//  right half shows the live current colour.
-//
-static void cp_render_swatch(ColorPickerState* cp) {
+
+static void cp_render_swatch(ColorPickerState* cp, float alpha) {
     float r   = cp->radius;
     float pad = CP_PANEL_PAD;
 
-    // Match the width of the main window perfectly
     float sw_x = cp->x - r - pad;
     float sw_y = cp->y - r - pad - CP_SWATCH_GAP - CP_SWATCH_H;
     float sw_w = (r + pad) * 2.0f;
@@ -366,27 +396,22 @@ static void cp_render_swatch(ColorPickerState* cp) {
 
     float cr, cg, cb;
     hsv_to_rgb(cp->hue, cp->saturation, cp->value, &cr, &cg, &cb);
-    Color current = {cr, cg, cb, cp->alpha};
+    Color current = {cr, cg, cb, alpha};
 
-    // Shadow for swatch
-    Color shadow = {0.0f, 0.0f, 0.0f, 0.25f};
-    exQuad2D((vec2){sw_x + 3.0f, sw_y - 3.0f}, (vec2){sw_w, sw_h}, radii, 0.0f, shadow, shadow);
+    Color shadow = fade_color((Color){0.0f, 0.0f, 0.0f, 0.25f}, alpha);
+    cp_exQuad2D((vec2){sw_x + 3.0f, sw_y - 3.0f}, (vec2){sw_w, sw_h}, radii, 0.0f, shadow, shadow);
 
-    // Full swatch = current colour
-    exQuad2D((vec2){sw_x, sw_y}, (vec2){sw_w, sw_h},
+    cp_exQuad2D((vec2){sw_x, sw_y}, (vec2){sw_w, sw_h},
              radii, 0.0f, current, current);
 
-    // Thin swatch border
-    Color border = {CT.bg_alt.r, CT.bg_alt.g, CT.bg_alt.b, 0.6f};
-    exQuad2D((vec2){sw_x, sw_y}, (vec2){sw_w, sw_h},
+    Color border = fade_color((Color){CT.bg_alt.r, CT.bg_alt.g, CT.bg_alt.b, 0.6f}, alpha);
+    cp_exQuad2D((vec2){sw_x, sw_y}, (vec2){sw_w, sw_h},
              radii, 1.5f, (Color){0,0,0,0}, border);
 }
 
 ////  Hex label
-//
-//  A small #RRGGBB label rendered inside the swatch.
-//
-static void cp_render_hex_label(ColorPickerState* cp, Font* font) {
+
+static void cp_render_hex_label(ColorPickerState* cp, Font* font, float alpha) {
     if (!font) return;
 
     float cr, cg, cb;
@@ -404,14 +429,15 @@ static void cp_render_hex_label(ColorPickerState* cp, Font* font) {
     float sw_cx = cp->x;
     float sw_y  = cp->y - r - pad - CP_SWATCH_GAP - CP_SWATCH_H * 0.5f - 2.0f;
 
-    // Choose label colour: white on dark, dark on light
     float luminance = 0.299f * cr + 0.587f * cg + 0.114f * cb;
     Color label_col = (luminance > 0.5f)
                     ? (Color){0.1f, 0.1f, 0.1f, 0.8f}
                     : (Color){0.9f, 0.9f, 0.9f, 0.8f};
 
+    label_col = fade_color(label_col, alpha);
+
     float text_w = measure_text_width(font, hex, 1.0f);
-    text(font, hex, sw_cx - text_w * 0.5f, sw_y, label_col);
+    cp_text(font, hex, sw_cx - text_w * 0.5f, sw_y, label_col);
 }
 
 ///  Hue cursor dot position
@@ -440,7 +466,7 @@ void colorpicker_update(ColorPickerState* cp, float dt, double mx, double my) {
 
     // Handle Open/Close animation
     if (cp->closing) {
-        cp->anim_t -= 6.0f * dt;
+        cp->anim_t -= 5.0f * dt; // Slightly slower, 200ms close
         if (cp->anim_t <= 0.0f) {
             cp->anim_t = 0.0f;
             cp->visible = false;
@@ -448,7 +474,7 @@ void colorpicker_update(ColorPickerState* cp, float dt, double mx, double my) {
             return;
         }
     } else if (cp->anim_t < 1.0f) {
-        cp->anim_t += 6.0f * dt;
+        cp->anim_t += 5.0f * dt; // 200ms open
         if (cp->anim_t > 1.0f) cp->anim_t = 1.0f;
     }
 
@@ -490,54 +516,56 @@ void colorpicker_update(ColorPickerState* cp, float dt, double mx, double my) {
 void colorpicker_render(ColorPickerState* cp, Font* font) {
     if (!cp->visible) return;
 
-    // Apply bounce ease to the y position for opening/closing
-    float ease_val = cp->closing ? ease_back_in(cp->anim_t) : ease_back_out(cp->anim_t);
-    float orig_y = cp->y;
-    cp->y += (1.0f - ease_val) * -40.0f; // Slide down 40px when hidden
+    float ease_val;
+    float alpha_val;
 
-    // ── 1. Panel background ───────────────────────────────────────────────
-    cp_render_panel(cp, font);
+    if (cp->closing) {
+        ease_val = ease_quart_in(cp->anim_t);
+        alpha_val = ease_quad_in(cp->anim_t);
+    } else {
+        ease_val = ease_cubic_bezier(cp->anim_t, 0.05f, 0.9f, 0.1f, 1.05f); // Hyprland Pop
+        alpha_val = ease_quad_out(cp->anim_t);
+    }
 
-    // ── 2. Hue ring ───────────────────────────────────────────────────────
-    cp_render_hue_ring(cp);
+    // Set globals so the local drawing functions scale everything from the center out
+    cp_scale = 0.70f + 0.30f * ease_val;
 
-    // ── 3. SV triangle ────────────────────────────────────────────────────
-    cp_render_sv_triangle(cp);
+    float panel_w_base = (cp->radius + CP_PANEL_PAD) * 2.0f;
+    float panel_h_base = panel_w_base + CP_TITLE_H;
+    cp_cx = cp->x;
+    cp_cy = cp->y - cp->radius - CP_PANEL_PAD + panel_h_base * 0.5f;
 
-    // ── 4. Thin separator ring between wheel and triangle ─────────────────
-    // A dark hairline at the inner edge of the hue ring to separate it from
-    // the triangle area.  Cosmetic only.
+    cp_render_panel(cp, font, alpha_val);
+    cp_render_hue_ring(cp, alpha_val);
+    cp_render_sv_triangle(cp, alpha_val);
+
     {
         float ri = cp->radius * CP_RING_INNER_FRAC;
-        Color sep = {0.0f, 0.0f, 0.0f, 0.18f};
+        Color sep = fade_color((Color){0.0f, 0.0f, 0.0f, 0.18f}, alpha_val);
         int N = 80;
         float prev_x = cp->x + ri, prev_y = cp->y;
         for (int i = 1; i <= N; i++) {
             float a = (float)i / (float)N * 2.0f * (float)GLM_PI;
             float nx = cp->x + cosf(a) * ri;
             float ny = cp->y + sinf(a) * ri;
-            line2D((vec2){prev_x, prev_y}, (vec2){nx, ny}, sep);
+            cp_line2D((vec2){prev_x, prev_y}, (vec2){nx, ny}, sep);
             prev_x = nx; prev_y = ny;
         }
     }
 
-    // ── 5. Swatch bar ─────────────────────────────────────────────────────
-    cp_render_swatch(cp);
-    cp_render_hex_label(cp, font);
+    cp_render_swatch(cp, alpha_val);
+    cp_render_hex_label(cp, font, alpha_val);
 
-    // ── 6. Hue ring cursor ────────────────────────────────────────────────
     {
         float hx, hy;
         cp_hue_cursor_pos(cp, &hx, &hy);
         float hr, hg, hb;
         hsv_to_rgb(cp->hue, 1.0f, 1.0f, &hr, &hg, &hb);
 
-        // The spring physics handles the overshoot natively, no easing functions required!
         float r = CP_CURSOR_RADIUS_MIN + (CP_CURSOR_RADIUS_MAX - CP_CURSOR_RADIUS_MIN) * cp->hue_cursor_t;
-        cp_draw_cursor(hx, hy, r, (Color){hr, hg, hb, 1.0f});
+        cp_draw_cursor(hx, hy, r, (Color){hr, hg, hb, 1.0f}, alpha_val);
     }
 
-    // ── 7. SV triangle cursor ─────────────────────────────────────────────
     {
         float sx, sy;
         cp_sv_cursor_pos(cp, &sx, &sy);
@@ -545,13 +573,9 @@ void colorpicker_render(ColorPickerState* cp, Font* font) {
         hsv_to_rgb(cp->hue, cp->saturation, cp->value, &cr, &cg, &cb);
 
         float r = CP_CURSOR_RADIUS_MIN + (CP_CURSOR_RADIUS_MAX - CP_CURSOR_RADIUS_MIN) * cp->sv_cursor_t;
-        cp_draw_cursor(sx, sy, r, (Color){cr, cg, cb, 1.0f});
+        cp_draw_cursor(sx, sy, r, (Color){cr, cg, cb, 1.0f}, alpha_val);
     }
-
-    // Restore original Y coordinate after rendering
-    cp->y = orig_y;
 }
-
 
 ////  Hit tests
 
