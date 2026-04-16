@@ -1130,6 +1130,60 @@ bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture,
     return upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
+// Zero-copy direct-to-GPU upload helper. Reads from disk directly into Vulkan mapped memory.
+static bool upload_file_to_image_direct(VulkanContext* ctx, const char* filepath,
+                                        VkDeviceSize imageSize, VkImage image,
+                                        uint32_t w, uint32_t h, VkFormat fmt)
+{
+    FILE* f = fopen(filepath, "rb");
+    if (!f) return false;
+
+    VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+    VkBufferCreateInfo bci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = imageSize, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    if (vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf) != VK_SUCCESS) { fclose(f); return false; }
+
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+    if (vkAllocateMemory(ctx->device, &mai, NULL, &stagingMem) != VK_SUCCESS) {
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL); fclose(f); return false;
+    }
+    vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+
+    void* mapped;
+    vkMapMemory(ctx->device, stagingMem, 0, imageSize, 0, &mapped);
+
+    // THE MAGIC: fread directly into Vulkan's PCIe-mapped staging buffer! Zero malloc! Zero memcpy!
+    size_t bytes_read = fread(mapped, 1, imageSize, f);
+    fclose(f);
+    vkUnmapMemory(ctx->device, stagingMem);
+
+    if (bytes_read != imageSize) {
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+        vkFreeMemory(ctx->device, stagingMem, NULL);
+        return false;
+    }
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+    transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    copyBufferToImage(cmd, stagingBuf, image, w, h);
+    transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+    vkFreeMemory(ctx->device, stagingMem, NULL);
+    return true;
+}
+
 // Shared staging buffer upload helper — stages pixels, transitions, copies, cleans up.
 // Does NOT create image/view/sampler/descriptor — caller owns those.
 static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels,
@@ -1318,29 +1372,36 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
         return -1;
     }
 
+    // Our deterministic key is the cache file path generated from the filename + resolution
     const char* cache_file = get_svg_cache_path(filename, width, height);
     size_t size = (size_t)width * height * 4;
-    unsigned char* pixels = malloc(size);
+    VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
 
-    // 1. Try blazing-fast zero-decode binary cache read
-    FILE* f = fopen(cache_file, "rb");
-    if (f) {
-        if (fread(pixels, 1, size, f) == size) {
-            fclose(f);
-            printf("[SVG] Cache Hit (0ms decode): %s\n", cache_file);
-            bool ok = load_texture_from_pixels(ctx, pixels, width, height, &texturePool[textureCount]);
-            free(pixels);
-            if (ok) {
-                texturePool[textureCount].loaded = true;
+    Texture2D* tex = &texturePool[textureCount];
+
+    // 1. Try blazing-fast ZERO-COPY binary cache read
+    if (alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory)) {
+        // Attempt to read from disk DIRECTLY into the mapped Vulkan staging buffer
+        if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width, height, fmt)) {
+            // UI Icons must use CLAMP_TO_EDGE, not REPEAT, to prevent edge bleeding!
+            if (finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)) {
+                fprintf(stdout, "\033[32m[SVG] Cache Hit (ZERO-COPY to GPU): %s\033[0m\n", cache_file);
+                tex->width = width;
+                tex->height = height;
+                tex->loaded = true;
                 return textureCount++;
             }
-            return -1;
         }
-        fclose(f); // Read failed or incomplete, fallback to rasterization
+        // Cache miss or read failure: clean up the image to prepare for rasterization
+        vkDestroyImage(ctx->device, tex->image, NULL);
+        vkFreeMemory(ctx->device, tex->memory, NULL);
+        tex->image = VK_NULL_HANDLE;
+        tex->memory = VK_NULL_HANDLE;
     }
 
     // 2. Cache Miss: Parse and Rasterize via NanoSVG
-    printf("[SVG] Cache Miss. Rasterizing: %s at %dx%d\n", filename, width, height);
+    fprintf(stdout, "\033[33m[SVG] Cache Miss. Rasterizing: %s at %dx%d\033[0m\n", filename, width, height);
+    unsigned char* pixels = malloc(size);
     NSVGimage* image = nsvgParseFromFile(filename, "px", 96.0f);
     if (!image) {
         fprintf(stderr, "[SVG] Failed to parse SVG: %s\n", filename);
@@ -1365,18 +1426,23 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
     nsvgDelete(image);
 
     // 3. Save raw RGBA binary for instant loading next time
-    f = fopen(cache_file, "wb");
+    FILE* f = fopen(cache_file, "wb");
     if (f) {
         fwrite(pixels, 1, size, f);
         fclose(f);
     }
 
-    // 4. Upload to Vulkan
-    bool ok = load_texture_from_pixels(ctx, pixels, width, height, &texturePool[textureCount]);
+    // 4. Upload to Vulkan using standard pixel upload
+    bool ok = alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory) &&
+              upload_pixels_to_image(ctx, pixels, size, tex->image, width, height, fmt, VK_IMAGE_LAYOUT_UNDEFINED) &&
+              finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+
     free(pixels);
 
     if (ok) {
-        texturePool[textureCount].loaded = true;
+        tex->width = width;
+        tex->height = height;
+        tex->loaded = true;
         return textureCount++;
     }
 
