@@ -908,6 +908,10 @@ void editor_update(void) {
     editor.last_time = now;
     if (dt > EDITOR_MAX_DT) dt = EDITOR_MAX_DT;
 
+    if (s_color_picker.visible) {
+        colorpicker_update(&s_color_picker, dt, s_ui_mx, s_ui_my);
+    }
+
     for (int i = 0; i < PANEL_COUNT; i++) {
         Panel* p    = &editor.panels[i];
         float  diff = p->target_t - p->t;

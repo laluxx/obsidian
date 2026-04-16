@@ -32,7 +32,8 @@
 #define CP_TRI_RADIUS_FRAC    0.70f   // Inscribed triangle radius fraction
 #define CP_HIT_RING_PAD       8.0f    // Extra px hit padding on hue ring
 #define CP_HIT_TRI_PAD        6.0f    // Extra px hit padding on triangle
-#define CP_CURSOR_RADIUS      7.0f    // Radius of the selection dot
+#define CP_CURSOR_RADIUS_MIN  7.0f    // Radius when released
+#define CP_CURSOR_RADIUS_MAX  12.5f   // Radius when actively dragged (25px max size)
 #define CP_CURSOR_OUTLINE     2.0f    // Outline width on selection dots
 #define CP_PANEL_RADIUS       10.0f   // Background panel corner radius
 #define CP_PANEL_PAD          14.0f   // Padding around the wheel
@@ -77,6 +78,10 @@ typedef struct {
     ColorPickerDrag drag;
     float         drag_offset_x;
     float         drag_offset_y;
+    float         hue_cursor_t; // Animation position for hue dot
+    float         hue_cursor_v; // Animation velocity for hue dot
+    float         sv_cursor_t;  // Animation position for sv dot
+    float         sv_cursor_v;  // Animation velocity for sv dot
 
     // ── Callback ─────────────────────────────────────────────────────────
     // Called every frame a value changes.  colour is {r,g,b,a} in [0,1].
@@ -112,7 +117,7 @@ void colorpicker_close(ColorPickerState* cp);
 
 // Call each frame to handle animation / hover.
 // mx, my in screen-top-left coordinates (GLFW).
-void colorpicker_update(ColorPickerState* cp, double mx, double my);
+void colorpicker_update(ColorPickerState* cp, float dt, double mx, double my);
 
 // Render the picker.  Draws nothing if !cp->visible.
 void colorpicker_render(ColorPickerState* cp, Font* font);

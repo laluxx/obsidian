@@ -176,7 +176,11 @@ static void cp_smart_position(float anchor_x, float anchor_y,
 
 void colorpicker_init(ColorPickerState* cp) {
     memset(cp, 0, sizeof(ColorPickerState));
-    cp->radius      = 130.0f;
+    cp->radius       = 130.0f;
+    cp->hue_cursor_t = 0.0f;
+    cp->hue_cursor_v = 0.0f;
+    cp->sv_cursor_t  = 0.0f;
+    cp->sv_cursor_v  = 0.0f;
     cp->hue         = 0.0f;
     cp->saturation  = 1.0f;
     cp->value       = 1.0f;
@@ -261,8 +265,7 @@ static void cp_render_sv_triangle(ColorPickerState* cp) {
 
 ////  Cursor dots
 
-static void cp_draw_cursor(float px, float py, Color fill) {
-    float r = CP_CURSOR_RADIUS;
+static void cp_draw_cursor(float px, float py, float r, Color fill) {
     float o = CP_CURSOR_OUTLINE;
 
     // Dark outline ring
@@ -408,10 +411,29 @@ static void cp_sv_cursor_pos(ColorPickerState* cp, float* out_x, float* out_y) {
 
 ///  Per-frame
 
-void colorpicker_update(ColorPickerState* cp, double mx, double my) {
+void colorpicker_update(ColorPickerState* cp, float dt, double mx, double my) {
     if (!cp->visible) return;
     (void)mx; (void)my;
-    // Could animate open/close here; reserved for future work.
+
+    // True Mass-Spring-Damper Physics (Hooke's Law)
+    // Cranked tension for a lightning-fast pop (~90ms to peak)
+    // Tuned damping for a satisfying, elastic bounce
+    float tension = 1200.0f; // Spring stiffness
+    float damp    = 18.0f;   // Air friction (lower = more bounce, higher = stiffer)
+
+    // Animate Hue Cursor
+    bool hue_active = (cp->drag == CP_DRAG_HUE);
+    float target_h = hue_active ? 1.0f : 0.0f;
+    float accel_h = (target_h - cp->hue_cursor_t) * tension - (cp->hue_cursor_v * damp);
+    cp->hue_cursor_v += accel_h * dt;
+    cp->hue_cursor_t += cp->hue_cursor_v * dt;
+
+    // Animate SV Cursor
+    bool sv_active = (cp->drag == CP_DRAG_SV);
+    float target_s = sv_active ? 1.0f : 0.0f;
+    float accel_s = (target_s - cp->sv_cursor_t) * tension - (cp->sv_cursor_v * damp);
+    cp->sv_cursor_v += accel_s * dt;
+    cp->sv_cursor_t += cp->sv_cursor_v * dt;
 }
 
 void colorpicker_render(ColorPickerState* cp, Font* font) {
@@ -453,7 +475,10 @@ void colorpicker_render(ColorPickerState* cp, Font* font) {
         cp_hue_cursor_pos(cp, &hx, &hy);
         float hr, hg, hb;
         hsv_to_rgb(cp->hue, 1.0f, 1.0f, &hr, &hg, &hb);
-        cp_draw_cursor(hx, hy, (Color){hr, hg, hb, 1.0f});
+
+        // The spring physics handles the overshoot natively, no easing functions required!
+        float r = CP_CURSOR_RADIUS_MIN + (CP_CURSOR_RADIUS_MAX - CP_CURSOR_RADIUS_MIN) * cp->hue_cursor_t;
+        cp_draw_cursor(hx, hy, r, (Color){hr, hg, hb, 1.0f});
     }
 
     // ── 7. SV triangle cursor ─────────────────────────────────────────────
@@ -462,7 +487,9 @@ void colorpicker_render(ColorPickerState* cp, Font* font) {
         cp_sv_cursor_pos(cp, &sx, &sy);
         float cr, cg, cb;
         hsv_to_rgb(cp->hue, cp->saturation, cp->value, &cr, &cg, &cb);
-        cp_draw_cursor(sx, sy, (Color){cr, cg, cb, 1.0f});
+
+        float r = CP_CURSOR_RADIUS_MIN + (CP_CURSOR_RADIUS_MAX - CP_CURSOR_RADIUS_MIN) * cp->sv_cursor_t;
+        cp_draw_cursor(sx, sy, r, (Color){cr, cg, cb, 1.0f});
     }
 }
 
