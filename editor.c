@@ -31,6 +31,7 @@ static float  s_ui_drag_start_y = 0.0f;
 static float  s_ui_drag_start_val = 0.0f;
 
 static ColorPickerState s_color_picker;
+static int32_t s_icon_lock = -1;
 
 static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
 
@@ -74,6 +75,9 @@ typedef struct {
     UIWindow window;
     int32_t  tex_idx;
     bool     visible;
+    char     filepath[256];
+    char     filename[64];
+    size_t   file_size;
 } ImageViewerState;
 
 static ImageViewerState s_image_viewer = {0};
@@ -114,9 +118,9 @@ static void image_viewer_init(ImageViewerState* iv) {
     ui_window_init(&iv->window, "Image Viewer");
 }
 
-static void image_viewer_open(ImageViewerState* iv, const char* filepath, float anchor_x, float anchor_y) {
+static void image_viewer_open(ImageViewerState* iv, const FileItem* item, float anchor_x, float anchor_y) {
     extern VulkanContext context;
-    int32_t tex_idx = texture_pool_add(&context, filepath);
+    int32_t tex_idx = texture_pool_add(&context, item->full_path);
     if (tex_idx < 0) {
         message(MSG_ERROR, "Failed to load image");
         return;
@@ -125,9 +129,14 @@ static void image_viewer_open(ImageViewerState* iv, const char* filepath, float 
     Texture2D* tex = texture_pool_get(tex_idx);
     iv->tex_idx = tex_idx;
 
-    const char* filename = strrchr(filepath, '/');
-    filename = filename ? filename + 1 : filepath;
-    strncpy(iv->window.title, filename, sizeof(iv->window.title) - 1);
+    // Cache the exact file metadata for the Inspector
+    strncpy(iv->filepath, item->full_path, sizeof(iv->filepath) - 1);
+    iv->filepath[sizeof(iv->filepath) - 1] = '\0';
+    strncpy(iv->filename, item->name, sizeof(iv->filename) - 1);
+    iv->filename[sizeof(iv->filename) - 1] = '\0';
+    iv->file_size = item->size_bytes;
+
+    strncpy(iv->window.title, iv->filename, sizeof(iv->window.title) - 1);
     iv->window.title[sizeof(iv->window.title) - 1] = '\0';
 
     float min_x, min_y, max_x, max_y;
@@ -431,11 +440,24 @@ static void content_area(Panel* p, float px, float py, float pw, float ph,
 
 /// Inspector  (Right panel)
 
+static void draw_field_lock(float cx, float row, const char* label) {
+    if (s_icon_lock >= 0) {
+        float lw = measure_text_width(editor.font, label, 1.0f);
+        Texture2D* tex = texture_pool_get(s_icon_lock);
+        if (tex && tex->loaded) {
+            // Removed the - 6.0f to move the icon exactly 6 pixels UP
+            float icon_y = row - (editor.font->ascent - editor.font->descent) * 0.5f;
+            texture2D((vec2){cx + lw + 8.0f, icon_y}, (vec2){14, 14}, tex, CT.text_dim);
+        }
+    }
+}
+
 static bool field_vec3(float cx, float row, float col2_x, float cw,
-                       const char* label, float* v, const char* unit, float speed) {
+                       const char* label, float* v, const char* unit, float speed, bool locked) {
     if (!editor.font) return false;
     bool changed = false;
     text(editor.font, label, cx, row, CT.text_dim);
+    if (locked) draw_field_lock(cx, row, label);
 
     float box_x = col2_x;
     float box_w = (cx + cw) - box_x;
@@ -454,12 +476,12 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
         bool hovered = (s_ui_mx >= hit_x && s_ui_mx <= hit_x + sec_w && s_ui_my >= box_y && s_ui_my <= box_y + box_h);
         void* id = (void*)&v[i];
 
-        if (hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+        if (!locked && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
             s_ui_active_id = id;
             s_ui_drag_start_x = (float)s_ui_mx;
         }
 
-        if (s_ui_active_id == id) {
+        if (!locked && s_ui_active_id == id) {
             float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
             GLFWwindow* win = glfwGetCurrentContext();
             if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
@@ -470,7 +492,7 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
             changed = true;
         }
 
-        Color label_col = (s_ui_active_id == id || (hovered && s_ui_active_id == NULL)) ? axis_colors_active[i] : axis_colors[i];
+        Color label_col = (!locked && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
 
         float px = hit_x + 6.0f;
         text(editor.font, axis_labels[i], px, row, label_col);
@@ -489,10 +511,11 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
 }
 
 static bool field_vec4_color(float cx, float row, float col2_x, float cw,
-                             const char* label, float* c) {
+                             const char* label, float* c, bool locked) {
     if (!editor.font) return false;
     bool changed = false;
     text(editor.font, label, cx, row, CT.text_dim);
+    if (locked) draw_field_lock(cx, row, label);
 
     float box_h = editor.font->ascent - editor.font->descent + 6.0f;
     float box_y = row - editor.font->descent - 3.0f;
@@ -505,7 +528,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
     bool swatch_hovered = (s_ui_mx >= swatch_x && s_ui_mx <= swatch_x + swatch_size &&
                            s_ui_my >= box_y + 2.0f && s_ui_my <= box_y + 2.0f + swatch_size);
 
-    if (swatch_hovered && s_ui_mclicked) {
+    if (!locked && swatch_hovered && s_ui_mclicked) {
         extern VulkanContext context;
         float sh = (float)context.swapChainExtent.height;
         float anchor_x = swatch_x - 10.0f; // Open to the left of the swatch to keep it on-screen
@@ -528,12 +551,12 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
         bool hovered = (s_ui_mx >= hit_x && s_ui_mx <= hit_x + sec_w && s_ui_my >= box_y && s_ui_my <= box_y + box_h);
         void* id = (void*)&c[i];
 
-        if (hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+        if (!locked && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
             s_ui_active_id = id;
             s_ui_drag_start_x = (float)s_ui_mx;
         }
 
-        if (s_ui_active_id == id) {
+        if (!locked && s_ui_active_id == id) {
             float delta = ((float)s_ui_mx - s_ui_drag_start_x) * 0.005f;
             GLFWwindow* win = glfwGetCurrentContext();
             if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
@@ -544,7 +567,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
             changed = true;
         }
 
-        Color label_col = (s_ui_active_id == id || (hovered && s_ui_active_id == NULL)) ? axis_colors_active[i] : axis_colors[i];
+        Color label_col = (!locked && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
 
         float px = hit_x + 8.0f;
         text(editor.font, axis_labels[i], px, row, label_col);
@@ -558,7 +581,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
 
 static bool field_float(float cx, float row, float col2_x, float cw,
                         const char* label, float* val, float speed,
-                        bool clamp_val, float min_v, float max_v) {
+                        bool clamp_val, float min_v, float max_v, bool locked) {
     if (!editor.font) return false;
     bool changed = false;
 
@@ -567,12 +590,12 @@ static bool field_float(float cx, float row, float col2_x, float cw,
                     s_ui_my <= row + editor.font->ascent + 3.0f);
     void* id = (void*)val;
 
-    if (hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+    if (!locked && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
         s_ui_active_id = id;
         s_ui_drag_start_x = (float)s_ui_mx;
     }
 
-    if (s_ui_active_id == id) {
+    if (!locked && s_ui_active_id == id) {
         float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
         GLFWwindow* win = glfwGetCurrentContext();
         if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
@@ -586,33 +609,122 @@ static bool field_float(float cx, float row, float col2_x, float cw,
         changed = true;
     }
 
-    Color label_col = (s_ui_active_id == id || (hovered && s_ui_active_id == NULL)) ? CT.text : CT.text_dim;
+    Color label_col = (!locked && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? CT.text : CT.text_dim;
     text(editor.font, label, cx, row, label_col);
+    if (locked) draw_field_lock(cx, row, label);
+
+    char num[32];
+    snprintf(num, sizeof(num), "%.3f", *val);
+    float text_w = measure_text_width(editor.font, num, 1.0f);
 
     float box_x = col2_x;
-    float box_w = 80.0f; // Compact width for single float fields
+    float box_w = text_w + 16.0f; // Exactly 8px padding on left and right!
     float box_h = editor.font->ascent - editor.font->descent + 6.0f;
     float box_y = row - editor.font->descent - 3.0f;
 
     exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
 
-    char num[32];
-    snprintf(num, sizeof(num), "% .3f", *val); // Aligned spacing
     text(editor.font, num, box_x + 8.0f, row, CT.text);
     return changed;
 }
 
 static void field_text(float cx, float row, float col2_x, float cw,
-                       const char* label, const char* value) {
+                       const char* label, const char* value, bool locked) {
     (void)cw;
     if (!editor.font) return;
     text(editor.font, label, cx, row, CT.text_dim);
+    if (locked) draw_field_lock(cx, row, label);
 
     // Read-only text fields (like Geometry) no longer have heavy backgrounds!
     text(editor.font, value, col2_x + 8.0f, row, CT.text);
 }
 
+static void render_image_inspector_content(float cx, float cy, float cw, float ch) {
+    ImageViewerState* iv = &s_image_viewer;
+    Texture2D* tex = texture_pool_get(iv->tex_idx);
+    if (!tex) return;
+
+    float lh  = editor.font->ascent - editor.font->descent + LH_EXTRA;
+    extern float font_width(Font* font);
+    float space_w = font_width(editor.font);
+
+    // Align dynamically to the longest label!
+    float col2 = cx + strlen("Formatted Mem") * space_w + space_w * 2.0f;
+    float row = cy + ch - PAD;
+
+#define SECTION(label) do { \
+    text(editor.font, label, cx, row, CT.accent); \
+    row -= lh + 6.0f; \
+} while(0)
+
+    // ── File Info ──────────────────────────────────────────────────────────
+    SECTION("File Info");
+    field_text(cx, row, col2, cw, "Name", iv->filename, false);
+    row -= lh + 6.0f;
+
+    const char* ext = strrchr(iv->filename, '.');
+    field_text(cx, row, col2, cw, "Type", ext ? ext : "Unknown", false);
+    row -= lh + 6.0f;
+
+    char size_str[64];
+    if (iv->file_size < 1024) snprintf(size_str, sizeof(size_str), "%zu Bytes", iv->file_size);
+    else if (iv->file_size < 1024 * 1024) snprintf(size_str, sizeof(size_str), "%.2f KB", iv->file_size / 1024.0f);
+    else snprintf(size_str, sizeof(size_str), "%.2f MB", iv->file_size / (1024.0f * 1024.0f));
+    field_text(cx, row, col2, cw, "Size on Disk", size_str, false);
+    row -= lh + 12.0f;
+
+    // ── Dimensions ─────────────────────────────────────────────────────────
+    SECTION("Dimensions");
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d px", tex->width);
+    field_text(cx, row, col2, cw, "Width", buf, false);
+    row -= lh + 6.0f;
+
+    snprintf(buf, sizeof(buf), "%d px", tex->height);
+    field_text(cx, row, col2, cw, "Height", buf, false);
+    row -= lh + 6.0f;
+
+    float aspect = (float)tex->width / (float)tex->height;
+    snprintf(buf, sizeof(buf), "%.3f", aspect);
+    field_text(cx, row, col2, cw, "Aspect Ratio", buf, false);
+    row -= lh + 12.0f;
+
+    // ── Texture Data ───────────────────────────────────────────────────────
+    SECTION("Texture Data");
+
+    // Exact mathematical VRAM usage for an uncompressed RGBA8 texture
+    size_t mem_size = (size_t)tex->width * (size_t)tex->height * 4;
+    snprintf(buf, sizeof(buf), "%zu Bytes", mem_size);
+    field_text(cx, row, col2, cw, "Memory Size", buf, false);
+    row -= lh + 6.0f;
+
+    if (mem_size < 1024) snprintf(size_str, sizeof(size_str), "%zu B", mem_size);
+    else if (mem_size < 1024 * 1024) snprintf(size_str, sizeof(size_str), "%.2f KB", mem_size / 1024.0f);
+    else snprintf(size_str, sizeof(size_str), "%.2f MB", mem_size / (1024.0f * 1024.0f));
+
+    field_text(cx, row, col2, cw, "Formatted Mem", size_str, false);
+    row -= lh + 6.0f;
+
+    field_text(cx, row, col2, cw, "Internal Format", "RGBA8 Unorm", false);
+    row -= lh + 6.0f;
+    field_text(cx, row, col2, cw, "Color Space", "sRGB", false);
+    row -= lh + 6.0f;
+    field_text(cx, row, col2, cw, "Bit Depth", "8-bit", false);
+    row -= lh + 6.0f;
+    field_text(cx, row, col2, cw, "Has Alpha", "Yes", false);
+    row -= lh + 6.0f;
+    field_text(cx, row, col2, cw, "Alpha Mode", "Straight", false);
+    row -= lh + 12.0f;
+
+#undef SECTION
+}
+
 static void render_inspector_content(float cx, float cy, float cw, float ch) {
+    // Smart Routing: If the Image Viewer is open AND not actively closing, it steals the focus!
+    if (s_image_viewer.visible && !s_image_viewer.window.closing) {
+        render_image_inspector_content(cx, cy, cw, ch);
+        return;
+    }
 
     InspectorState* s = &editor.inspector;
 
@@ -655,11 +767,11 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     };
 
     bool transform_changed = false;
-    transform_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f);
+    transform_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f, false);
     row -= lh + 6.0f;
-    transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f);
+    transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f, false);
     row -= lh + 6.0f;
-    transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "m", 0.02f);
+    transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "m", 0.02f, false);
     row -= lh + 12.0f;
 
     if (transform_changed) {
@@ -678,11 +790,11 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     SECTION("Material");
 
     bool mat_changed = false;
-    mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor);
+    mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor, false);
     row -= lh + 6.0f;
 
     vec4 emissive = {m->emissiveFactor[0], m->emissiveFactor[1], m->emissiveFactor[2], 1.0f};
-    if (field_vec4_color(cx, row, col2, cw, "Emissive", emissive)) {
+    if (field_vec4_color(cx, row, col2, cw, "Emissive", emissive, false)) {
         m->emissiveFactor[0] = emissive[0];
         m->emissiveFactor[1] = emissive[1];
         m->emissiveFactor[2] = emissive[2];
@@ -690,19 +802,19 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     }
     row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f, false);
     row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f, false);
     row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f, false);
     row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f, false);
     row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f);
+    mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f, false);
     row -= lh + 12.0f;
 
     if (mat_changed) {
@@ -715,22 +827,22 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
 
     char buf[64];
     snprintf(buf, sizeof buf, "%u", m->vertexCount);
-    field_text(cx, row, col2_geo, cw, "Vertices", buf);
+    field_text(cx, row, col2_geo, cw, "Vertices", buf, false);
     row -= lh + 6.0f;
 
     snprintf(buf, sizeof buf, "%u", m->indexCount);
-    field_text(cx, row, col2_geo, cw, "Indices", buf);
+    field_text(cx, row, col2_geo, cw, "Indices", buf, false);
     row -= lh + 6.0f;
 
     const char* amode = (m->alpha_mode == 0) ? "Opaque" : (m->alpha_mode == 1) ? "Mask" : "Blend";
-    field_text(cx, row, col2_geo, cw, "Alpha Mode", amode);
+    field_text(cx, row, col2_geo, cw, "Alpha Mode", amode, false);
     row -= lh + 6.0f;
 
-    field_text(cx, row, col2_geo, cw, "Unlit", m->is_unlit ? "Yes" : "No");
+    field_text(cx, row, col2_geo, cw, "Unlit", m->is_unlit ? "Yes" : "No", false);
     row -= lh + 6.0f;
 
     if (m->name) {
-        field_text(cx, row, col2_geo, cw, "Name", m->name);
+        field_text(cx, row, col2_geo, cw, "Name", m->name, false);
         row -= lh + 6.0f;
     }
 
@@ -738,9 +850,9 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     SECTION("Bounds");
     vec3 bmin = {m->aabbMin[0], m->aabbMin[1], m->aabbMin[2]};
     vec3 bmax = {m->aabbMax[0], m->aabbMax[1], m->aabbMax[2]};
-    field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m", 0.0f);
+    field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m", 0.0f, true);
     row -= lh + 6.0f;
-    field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m", 0.0f);
+    field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m", 0.0f, true);
     row -= lh + 12.0f;
 
     // ── Animation ──────────────────────────────────────────────────────────
@@ -749,19 +861,19 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
 
         if (m->jointCount > 0) {
             snprintf(buf, sizeof buf, "%d (off %d)", m->jointCount, m->jointOffset);
-            field_text(cx, row, col2_anim, cw, "Joints", buf);
+            field_text(cx, row, col2_anim, cw, "Joints", buf, true);
             row -= lh + 6.0f;
         }
         if (m->morphCount > 0) {
             snprintf(buf, sizeof buf, "%d", m->morphCount);
-            field_text(cx, row, col2_anim, cw, "Morphs", buf);
+            field_text(cx, row, col2_anim, cw, "Morphs", buf, true);
             row -= lh + 6.0f;
 
             if (m->morph_data) {
                 for (int i = 0; i < m->morphCount && i < 8; i++) {
                     char wlbl[16];
                     snprintf(wlbl, sizeof wlbl, "  [%d]", i);
-                    if (field_float(cx, row, col2_anim, cw, wlbl, &m->morph_data->weights[i], 0.01f, true, 0.0f, 1.0f)) {
+                    if (field_float(cx, row, col2_anim, cw, wlbl, &m->morph_data->weights[i], 0.01f, true, 0.0f, 1.0f, false)) {
                         extern void markMeshesSSBODirty(void* ctx);
                         markMeshesSSBODirty(&context);
                     }
@@ -873,7 +985,7 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
                                 strcasecmp(ext, ".exr") == 0) {
 
                                 float sh = (float)context.swapChainExtent.height;
-                                image_viewer_open(&s_image_viewer, item->full_path, s_ui_mx, sh - s_ui_my);
+                                image_viewer_open(&s_image_viewer, item, s_ui_mx, sh - s_ui_my);
                             } else {
                                 message(MSG_WARNING, "File format not yet supported!");
                             }
@@ -891,40 +1003,53 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
         for (int d = 0; d < D; d++) {
             float line_x = cx + d * 16.0f + 8.0f;
 
-            // Does this specific line reside inside a folder that is part of the selected path?
-            bool in_selected_folder = (current_ancestors[d] == selected_ancestors[d]);
+            bool parent_continues = false;
+            for (int j = i + 1; j < s->item_count; j++) {
+                if (s->items[j].depth <= d) break; // Parent closed
+                if (s->items[j].depth == d + 1) { parent_continues = true; break; }
+            }
 
-            if (in_selected_folder && selected_ancestors[d + 1] != -1) {
-                // RULE: Exclusive Path Rendering
-                Color line_col = CT.fs_tree;
-                int target = selected_ancestors[d + 1];
+            Color upper_col = CT.fs_tree_dimmed;
+            Color lower_col = CT.fs_tree_dimmed;
+            Color spur_col  = CT.fs_tree_dimmed;
+
+            bool in_selected_folder = (current_ancestors[d] == selected_ancestors[d]);
+            int target = selected_ancestors[d + 1];
+
+            if (in_selected_folder && target != -1) {
+                bool is_final_folder = (target == s->selected_index);
 
                 if (i < target) {
-                    quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh}, line_col); // bypass
+                    // Active line bypasses earlier siblings
+                    upper_col = CT.fs_tree;
+                    lower_col = CT.fs_tree;
+                    if (is_final_folder) spur_col = (Color){0, 0, 0, 0}; // Hide spur for unselected siblings
                 } else if (i == target) {
-                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, line_col); // horizontal spur
-                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, line_col); // upper vertical
+                    // Active line turns into the target
+                    upper_col = CT.fs_tree;
+                    spur_col  = CT.fs_tree;
+                    if (is_final_folder) lower_col = (Color){0, 0, 0, 0}; // Stop trunk at selected file
+                } else if (i > target) {
+                    if (is_final_folder) {
+                        // Completely hide tree for files after the selected one
+                        upper_col = (Color){0, 0, 0, 0};
+                        lower_col = (Color){0, 0, 0, 0};
+                        spur_col  = (Color){0, 0, 0, 0};
+                    }
+                }
+            }
+
+            if (d == D - 1) {
+                if (spur_col.a > 0.0f)  quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, spur_col); // horizontal spur
+                if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col); // upper vertical
+                if (parent_continues && lower_col.a > 0.0f) {
+                    quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col); // lower vertical
                 }
             } else {
-                // RULE: Normal Full Tree Rendering
-                Color line_col = CT.fs_tree_dimmed;
-
-                bool parent_continues = false;
-                for (int j = i + 1; j < s->item_count; j++) {
-                    if (s->items[j].depth <= d) break; // Parent closed
-                    if (s->items[j].depth == d + 1) { parent_continues = true; break; }
-                }
-
-                if (d == D - 1) {
-                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, line_col); // horizontal spur
-                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, line_col); // upper vertical
-                    if (parent_continues) {
-                        quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, line_col); // lower vertical
-                    }
-                } else {
-                    if (parent_continues) {
-                        quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh}, line_col); // bypass
-                    }
+                if (parent_continues) {
+                    // Render bypass halves separately to support two-tone lines flawlessly
+                    if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col);
+                    if (lower_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col);
                 }
             }
         }
@@ -1274,6 +1399,7 @@ void editor_init(void) {
     editor.file_manager.icon_file        = texture_pool_add_svg(&context, "./assets/icons/File.svg", 16, 16);
     editor.file_manager.icon_arrow_right = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowRight.svg", 16, 16);
     editor.file_manager.icon_arrow_down  = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowDown.svg", 16, 16);
+    s_icon_lock = texture_pool_add_svg(&context, "./assets/icons/Lock.svg", 16, 16);
 
     file_manager_navigate("./assets");
 
