@@ -63,6 +63,7 @@ typedef struct {
     float         vel_x;        // Velocity X for spring animation
     float         vel_y;        // Velocity Y for spring animation
     float         radius;       // Total wheel radius (ring outer edge)
+    int32_t       close_icon_idx; // Bindless texture slot for the SVG
 
     // ── HSV colour ──────────────────────────────────────────────────────
     float         hue;          // [0, 360)  degrees

@@ -53,6 +53,12 @@ static void cp_text(Font* font, const char* str, float x, float y, Color color) 
     text(font, str, cx, cy, color);
 }
 
+static void cp_texture2D(vec2 pos, vec2 size, Texture2D* texture, Color tint) {
+    vec2 cpos = { cp_cx + (pos[0] - cp_cx) * cp_scale, cp_cy + (pos[1] - cp_cy) * cp_scale };
+    vec2 csize = { size[0] * cp_scale, size[1] * cp_scale };
+    texture2D(cpos, csize, texture, tint);
+}
+
 /// HSV <-> RGB conversion
 
 // Convert HSV (h in [0,360), s,v in [0,1]) to RGB in [0,1]
@@ -230,6 +236,11 @@ void colorpicker_init(ColorPickerState* cp) {
     cp->saturation  = 1.0f;
     cp->value       = 1.0f;
     cp->alpha       = 1.0f;
+
+    // Rasterize at 24x24 for a perfectly crisp UI icon!
+    extern VulkanContext context;
+    cp->close_icon_idx = texture_pool_add_svg(&context, "./assets/icons/Close.svg", 24, 24); // TODO We might want to install the icons in /etc/obsidian
+
     sv_to_bary(cp->saturation, cp->value,
                &cp->bary_u, &cp->bary_v, &cp->bary_w);
 }
@@ -371,14 +382,23 @@ static void cp_render_panel(ColorPickerState* cp, Font* font, float alpha) {
         cp_text(font, "Color Picker", panel_x + pad, ty, fade_color(CT.text, alpha));
     }
 
-    float close_size = 10.0f;
+    // Close 'X' Button
+    float close_size = 14.0f; // Slightly larger for the SVG icon
     float close_cx = panel_x + panel_w - pad - 6.0f;
     float close_cy = bar_y + bar_h * 0.5f;
     Color close_col = cp->close_hovered ? CT.error : CT.border;
     close_col = fade_color(close_col, alpha);
-    float hw = close_size * 0.5f;
-    cp_line2D((vec2){close_cx - hw, close_cy - hw}, (vec2){close_cx + hw, close_cy + hw}, close_col);
-    cp_line2D((vec2){close_cx - hw, close_cy + hw}, (vec2){close_cx + hw, close_cy - hw}, close_col);
+
+    Texture2D* close_tex = texture_pool_get(cp->close_icon_idx);
+    if (close_tex && close_tex->loaded) {
+        float hw = close_size * 0.5f;
+        cp_texture2D((vec2){close_cx - hw, close_cy - hw}, (vec2){close_size, close_size}, close_tex, close_col);
+    } else {
+        // Fallback to lines if the SVG file is missing from the disk!
+        float hw = 5.0f;
+        cp_line2D((vec2){close_cx - hw, close_cy - hw}, (vec2){close_cx + hw, close_cy + hw}, close_col);
+        cp_line2D((vec2){close_cx - hw, close_cy + hw}, (vec2){close_cx + hw, close_cy - hw}, close_col);
+    }
 }
 
 ////  Swatch bar

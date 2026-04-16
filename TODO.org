@@ -28,6 +28,7 @@ Check quad utilization
 - [X] Unify immediate renderer into mega buffer - Dynamic geometry uses a resetting region; static meshes sit permanently behind it.
 
 * TODO Editor [0/2]
+- [ ] When hovering the message don't make it disapper and lerp the border color to CT.border
 - [ ] Mesh picking and highlighting.
 - [ ] Inspector (runtime property editor) - Click mesh, edit PBR properties live with sliders. Ray vs AABB, writes directly into mapped SSBO memory, zero sync needed.
 

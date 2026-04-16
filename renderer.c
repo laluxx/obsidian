@@ -10,7 +10,17 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define NANOSVG_IMPLEMENTATION
+#include "nanosvg.h"
+#define NANOSVGRAST_IMPLEMENTATION
+#include "nanosvgrast.h"
 #include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#ifndef MIN
+#define MIN(a,b) (((a)<(b))?(a):(b))
+#endif
 
 // --- Texture Pool Management ---
 static Texture2D texturePool[MAX_TEXTURES];
@@ -1273,6 +1283,103 @@ int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size) {
     if (load_texture_from_memory(&context, data, data_size, &texturePool[textureCount])) {
         return textureCount++;
     }
+    return -1;
+}
+
+// --- SVG High-Performance Caching ---
+
+// Generates: ~/.cache/obsidian/assets_icons_Close.svg_32x32.rgba
+static const char* get_svg_cache_path(const char* original_path, int w, int h) {
+    static char cache_path[512];
+    const char* home = getenv("HOME");
+    if (!home) home = "."; // Fallback
+
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
+    mkdir(dir_path, 0777); // Ignores if it already exists
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
+    mkdir(dir_path, 0777);
+
+    // Flatten original path to make a safe filesystem name
+    char safe_name[256];
+    strncpy(safe_name, original_path, sizeof(safe_name) - 1);
+    safe_name[sizeof(safe_name) - 1] = '\0';
+    for (int i = 0; safe_name[i]; i++) {
+        if (safe_name[i] == '/' || safe_name[i] == '\\') safe_name[i] = '_';
+    }
+
+    snprintf(cache_path, sizeof(cache_path), "%s/%s_%dx%d.rgba", dir_path, safe_name, w, h);
+    return cache_path;
+}
+
+int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width, int height) {
+    if (textureCount >= MAX_TEXTURES) {
+        fprintf(stderr, "Texture pool full! Cannot load SVG %s\n", filename);
+        return -1;
+    }
+
+    const char* cache_file = get_svg_cache_path(filename, width, height);
+    size_t size = (size_t)width * height * 4;
+    unsigned char* pixels = malloc(size);
+
+    // 1. Try blazing-fast zero-decode binary cache read
+    FILE* f = fopen(cache_file, "rb");
+    if (f) {
+        if (fread(pixels, 1, size, f) == size) {
+            fclose(f);
+            printf("[SVG] Cache Hit (0ms decode): %s\n", cache_file);
+            bool ok = load_texture_from_pixels(ctx, pixels, width, height, &texturePool[textureCount]);
+            free(pixels);
+            if (ok) {
+                texturePool[textureCount].loaded = true;
+                return textureCount++;
+            }
+            return -1;
+        }
+        fclose(f); // Read failed or incomplete, fallback to rasterization
+    }
+
+    // 2. Cache Miss: Parse and Rasterize via NanoSVG
+    printf("[SVG] Cache Miss. Rasterizing: %s at %dx%d\n", filename, width, height);
+    NSVGimage* image = nsvgParseFromFile(filename, "px", 96.0f);
+    if (!image) {
+        fprintf(stderr, "[SVG] Failed to parse SVG: %s\n", filename);
+        free(pixels);
+        return -1;
+    }
+
+    NSVGrasterizer* rast = nsvgCreateRasterizer();
+    if (!rast) {
+        nsvgDelete(image); free(pixels); return -1;
+    }
+
+    // Scale to fit target dimensions exactly while maintaining aspect ratio
+    float scale = MIN((float)width / image->width, (float)height / image->height);
+    float tx = (width - image->width * scale) * 0.5f;
+    float ty = (height - image->height * scale) * 0.5f;
+
+    memset(pixels, 0, size); // Clear to fully transparent
+    nsvgRasterize(rast, image, tx, ty, scale, pixels, width, height, width * 4);
+
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(image);
+
+    // 3. Save raw RGBA binary for instant loading next time
+    f = fopen(cache_file, "wb");
+    if (f) {
+        fwrite(pixels, 1, size, f);
+        fclose(f);
+    }
+
+    // 4. Upload to Vulkan
+    bool ok = load_texture_from_pixels(ctx, pixels, width, height, &texturePool[textureCount]);
+    free(pixels);
+
+    if (ok) {
+        texturePool[textureCount].loaded = true;
+        return textureCount++;
+    }
+
     return -1;
 }
 

@@ -108,6 +108,7 @@ void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint);
 void texture_pool_init();
 void texture_pool_cleanup(VulkanContext* context);
 int32_t texture_pool_add(VulkanContext* context, const char* filename);
+int32_t texture_pool_add_svg(VulkanContext* context, const char* filename, int width, int height);
 Texture2D* texture_pool_get(int32_t index);
 
 typedef struct {
