@@ -9,6 +9,7 @@
 #include "colorpicker.h"
 #include "easing.h"
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <math.h>
 #include <dirent.h>
@@ -26,20 +27,31 @@ static bool   s_ui_mdown = false;
 static bool   s_ui_mclicked = false;
 static void* s_ui_active_id = NULL;
 static float  s_ui_drag_start_x = 0.0f;
+static float  s_ui_drag_start_y = 0.0f;
 static float  s_ui_drag_start_val = 0.0f;
 
 static ColorPickerState s_color_picker;
+
+static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
 
 typedef enum { MSG_INFO, MSG_SUCCESS, MSG_WARNING, MSG_ERROR } MessageType;
 typedef struct {
     char text[128];
     MessageType type;
-    float t;
     float timer;
     bool active;
+
+    // Physics & Interaction State
+    float x, y;
+    float vel_x, vel_y;
+    bool is_dragging;
+    float drag_offset_x, drag_offset_y;
+    bool hovered;
+    float hover_t; // [0,1] for color lerping
 } EditorMessage;
 
-static EditorMessage s_message = {0};
+// Initialize deeply offscreen so the first pop springs in naturally
+static EditorMessage s_message = { .x = 20.0f, .y = -200.0f };
 
 void message(MessageType type, const char* text) {
     strncpy(s_message.text, text, sizeof(s_message.text) - 1);
@@ -47,9 +59,132 @@ void message(MessageType type, const char* text) {
     s_message.type = type;
     s_message.timer = 3.0f; // Stay on screen for 3 seconds
     s_message.active = true;
+
+    // If it was completely offscreen, snap it to the bottom to prepare for a fresh spring bounce
+    if (s_message.y < -100.0f) {
+        s_message.x = 20.0f;
+        s_message.y = -100.0f;
+        s_message.vel_x = 0.0f;
+        s_message.vel_y = 0.0f;
+    }
 }
 
-static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
+// --- Image Viewer State ---
+typedef struct {
+    UIWindow window;
+    int32_t  tex_idx;
+    bool     visible;
+} ImageViewerState;
+
+static ImageViewerState s_image_viewer = {0};
+static double s_last_item_click_time = 0.0;
+static int s_last_clicked_item = -1;
+
+static void editor_get_safe_area(float* out_min_x, float* out_min_y, float* out_max_x, float* out_max_y) {
+    extern VulkanContext context;
+    float sw = (float)context.swapChainExtent.width;
+    float sh = (float)context.swapChainExtent.height;
+
+    float min_x = 5.0f;
+    float min_y = 5.0f;
+    float max_x = sw - 5.0f;
+    float max_y = sh - 5.0f;
+    float px, py, pw, ph;
+
+    panel_get_rect(&editor.panels[PANEL_LEFT], &px, &py, &pw, &ph);
+    if (px + pw + 5.0f > min_x) min_x = px + pw + 5.0f;
+
+    panel_get_rect(&editor.panels[PANEL_RIGHT], &px, &py, &pw, &ph);
+    if (px - 5.0f < max_x) max_x = px - 5.0f;
+
+    panel_get_rect(&editor.panels[PANEL_BOTTOM], &px, &py, &pw, &ph);
+    if (py + ph + 5.0f > min_y) min_y = py + ph + 5.0f;
+
+    panel_get_rect(&editor.panels[PANEL_TOP], &px, &py, &pw, &ph);
+    if (py - 5.0f < max_y) max_y = py - 5.0f;
+
+    *out_min_x = min_x;
+    *out_min_y = min_y;
+    *out_max_x = max_x;
+    *out_max_y = max_y;
+}
+
+static void image_viewer_init(ImageViewerState* iv) {
+    memset(iv, 0, sizeof(*iv));
+    ui_window_init(&iv->window, "Image Viewer");
+}
+
+static void image_viewer_open(ImageViewerState* iv, const char* filepath, float anchor_x, float anchor_y) {
+    extern VulkanContext context;
+    int32_t tex_idx = texture_pool_add(&context, filepath);
+    if (tex_idx < 0) {
+        message(MSG_ERROR, "Failed to load image");
+        return;
+    }
+
+    Texture2D* tex = texture_pool_get(tex_idx);
+    iv->tex_idx = tex_idx;
+
+    const char* filename = strrchr(filepath, '/');
+    filename = filename ? filename + 1 : filepath;
+    strncpy(iv->window.title, filename, sizeof(iv->window.title) - 1);
+    iv->window.title[sizeof(iv->window.title) - 1] = '\0';
+
+    float min_x, min_y, max_x, max_y;
+    editor_get_safe_area(&min_x, &min_y, &max_x, &max_y);
+
+    // Restrict popup to 90% of the available safe workspace area
+    float safe_w = (max_x - min_x) * 0.9f;
+    float safe_h = (max_y - min_y) * 0.9f;
+    float cw = (float)tex->width;
+    float ch = (float)tex->height;
+
+    if (cw > safe_w || ch > safe_h) {
+        float scale = fminf(safe_w / cw, safe_h / ch);
+        cw *= scale;
+        ch *= scale;
+    }
+
+    ui_window_open(&iv->window, anchor_x, anchor_y, cw, ch, min_x, min_y, max_x, max_y);
+    iv->visible = true;
+}
+
+static void image_viewer_update(ImageViewerState* iv, float dt, double mx, double my) {
+    iv->visible = iv->window.visible;
+    if (!iv->visible) return;
+
+    // Pump the dynamic safe bounds into the UI engine every single frame!
+    float min_x, min_y, max_x, max_y;
+    editor_get_safe_area(&min_x, &min_y, &max_x, &max_y);
+    iv->window.bound_min_x = min_x;
+    iv->window.bound_min_y = min_y;
+    iv->window.bound_max_x = max_x;
+    iv->window.bound_max_y = max_y;
+
+    ui_window_update(&iv->window, dt, mx, my);
+}
+
+static void image_viewer_render(ImageViewerState* iv, Font* font) {
+    if (!ui_window_begin_render(&iv->window)) return;
+    ui_window_render_chrome(&iv->window, font);
+
+    Texture2D* tex = texture_pool_get(iv->tex_idx);
+    if (tex && tex->loaded) {
+        float cx = ui_window_content_x(&iv->window);
+        float cy = ui_window_content_y(&iv->window);
+        float cw = iv->window.content_w;
+        float ch = iv->window.content_h;
+        vec4 radii = {4.0f, 4.0f, 4.0f, 4.0f};
+
+        // Draw a dark background directly behind the image, then the image, then a thin inner border
+        ui_draw_quad(&iv->window, cx, cy, cw, ch, radii, 0.0f, (Color){0,0,0,0}, (Color){0.05f, 0.05f, 0.05f, 1.0f});
+        ui_draw_texture(&iv->window, cx, cy, cw, ch, tex, (Color){1.0f, 1.0f, 1.0f, 1.0f});
+
+        Color border = {CT.bg_alt.r, CT.bg_alt.g, CT.bg_alt.b, 0.6f};
+        ui_draw_quad(&iv->window, cx, cy, cw, ch, radii, 1.5f, border, (Color){0,0,0,0});
+    }
+    ui_window_end_render(&iv->window);
+}
 
 static void on_color_picked(float r, float g, float b, float a, void* user) {
     (void)r; (void)g; (void)b; (void)a; (void)user;
@@ -61,7 +196,18 @@ static void on_color_picked(float r, float g, float b, float a, void* user) {
 bool editor_wants_mouse(void) {
     float sh = (float)context.swapChainExtent.height;
     double raw_y = sh - s_ui_my;
+    if (s_image_viewer.visible && ui_window_wants_mouse(&s_image_viewer.window, s_ui_mx, raw_y)) return true;
     if (s_color_picker.visible && colorpicker_wants_mouse(&s_color_picker, s_ui_mx, raw_y)) return true;
+
+    if (editor.font) {
+        float h = editor.font->ascent - editor.font->descent + 32.0f;
+        if (s_message.active || s_message.y > -(h + 5.0f)) {
+            float w = measure_text_width(editor.font, s_message.text, 1.0f) + 32.0f;
+            if (s_ui_mx >= s_message.x && s_ui_mx <= s_message.x + w &&
+                s_ui_my >= s_message.y && s_ui_my <= s_message.y + h) return true;
+            if (s_message.is_dragging) return true;
+        }
+    }
 
     if (s_ui_active_id != NULL) return true; // Actively dragging UI
     for (int i = 0; i < PANEL_COUNT; i++) {
@@ -80,6 +226,9 @@ void editor_mouse_move(double xpos, double ypos) {
     float sh = (float)context.swapChainExtent.height;
     s_ui_mx = xpos;
     s_ui_my = sh - ypos; // Align with panel Y-up coordinates
+    if (s_image_viewer.visible) {
+        ui_window_mouse_move(&s_image_viewer.window, xpos, ypos);
+    }
     if (s_color_picker.visible) {
         colorpicker_mouse_move(&s_color_picker, xpos, ypos);
     }
@@ -89,6 +238,12 @@ void editor_mouse_button(int button, int action) {
     float sh = (float)context.swapChainExtent.height;
     double raw_y = sh - s_ui_my;
 
+    // Highest Z-order popup gets first priority
+    if (s_image_viewer.visible) {
+        if (ui_window_mouse_button(&s_image_viewer.window, button, action, s_ui_mx, raw_y)) {
+            return;
+        }
+    }
     if (s_color_picker.visible) {
         if (colorpicker_mouse_button(&s_color_picker, button, action, s_ui_mx, raw_y)) {
             return; // Input consumed by the color picker
@@ -97,9 +252,28 @@ void editor_mouse_button(int button, int action) {
 
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
         if (action == GLFW_PRESS) {
+            // Check Message Drag
+            if (editor.font && (s_message.active || s_message.y > -80.0f)) {
+                float w = measure_text_width(editor.font, s_message.text, 1.0f) + 32.0f;
+                float h = editor.font->ascent - editor.font->descent + 32.0f;
+                if (s_ui_mx >= s_message.x && s_ui_mx <= s_message.x + w &&
+                    s_ui_my >= s_message.y && s_ui_my <= s_message.y + h) {
+                    s_message.is_dragging = true;
+                    s_message.drag_offset_x = (float)s_ui_mx - s_message.x;
+                    s_message.drag_offset_y = (float)s_ui_my - s_message.y;
+                    s_ui_mdown = true;
+                    s_ui_mclicked = true;
+                    return; // Consumed!
+                }
+            }
+
             s_ui_mdown = true;
             s_ui_mclicked = true;
         } else if (action == GLFW_RELEASE) {
+            if (s_message.is_dragging) {
+                s_message.is_dragging = false;
+                return; // Consumed!
+            }
             s_ui_mdown = false;
             s_ui_active_id = NULL; // Release drag
         }
@@ -438,12 +612,7 @@ static void field_text(float cx, float row, float col2_x, float cw,
     text(editor.font, value, col2_x + 8.0f, row, CT.text);
 }
 
-static void render_inspector(Panel* panel,
-                              float px, float py, float pw, float ph) {
-    if (!editor.font) return;
-
-    float cx, cy, cw, ch;
-    content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
+static void render_inspector_content(float cx, float cy, float cw, float ch) {
 
     InspectorState* s = &editor.inspector;
 
@@ -605,6 +774,248 @@ static void render_inspector(Panel* panel,
 #undef SECTION
 }
 
+void file_manager_refresh(void);
+
+static void render_filesystem_content(float cx, float cy, float cw, float ch) {
+    FileManagerState* s = &editor.file_manager;
+
+    // Solid background to hide the inspector underneath when dragged up
+    exQuad2D((vec2){cx - PAD, cy}, (vec2){cw + PAD*2.0f, ch}, (vec4){0,0,0,0}, 0.0f, CT.bg, CT.bg);
+
+    // Tab / Title Bar for FileSystem
+    float tab_h = TITLE_H;
+    float tab_y = cy + ch - tab_h;
+    exQuad2D((vec2){cx - PAD, tab_y}, (vec2){cw + PAD*2.0f, tab_h}, (vec4){8.0f, 8.0f, 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
+    text(editor.font, "FileSystem", cx, tab_y + tab_h * 0.5f - 2.0f, CT.text);
+
+    if (editor.fs_collapsed && editor.fs_anim_t >= 1.0f) return;
+
+    float list_y = tab_y - PAD;
+    float lh = editor.font->ascent - editor.font->descent + LH_EXTRA + 6.0f;
+
+    // Track the target item at each depth for the selected path
+    int selected_ancestors[32];
+    for (int i = 0; i < 32; i++) selected_ancestors[i] = -1;
+
+    if (s->selected_index >= 0 && s->selected_index < s->item_count) {
+        int trace_idx = s->selected_index;
+        while (trace_idx >= 0) {
+            int d = s->items[trace_idx].depth;
+            if (d < 32) selected_ancestors[d] = trace_idx;
+
+            if (d == 0) break;
+            int parent = -1;
+            for (int p = trace_idx - 1; p >= 0; p--) {
+                if (s->items[p].depth < d) { parent = p; break; }
+            }
+            trace_idx = parent;
+        }
+    }
+
+    // Track the ancestors of the current item being drawn
+    int current_ancestors[32];
+    for (int i = 0; i < 32; i++) current_ancestors[i] = -1;
+
+    for (int i = 0; i < s->item_count; i++) {
+        FileItem* item = &s->items[i];
+        if (list_y < cy) break; // Hard clip at bottom
+
+        int D = item->depth;
+        if (D < 32) current_ancestors[D] = i;
+
+        float indent = D * 16.0f;
+        float row_x = cx + indent;
+
+        // Hover & Selection
+        bool hovered = (s_ui_mx >= cx && s_ui_mx <= cx + cw && s_ui_my >= list_y - lh && s_ui_my <= list_y);
+        bool selected = (s->selected_index == i);
+
+        float sel_x = cx + D * 16.0f + 14.0f;
+        float sel_w = cw - (sel_x - cx) + PAD;
+
+        if (selected) {
+            exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_hovered, CT.fs_hovered);
+        } else if (hovered) {
+            exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_selected, CT.fs_selected);
+        }
+
+        // Input
+        if (hovered && s_ui_mclicked) {
+            s->selected_index = i;
+            if (item->type == FILE_ITEM_DIR && s_ui_mx < row_x + 18.0f) {
+                if (item->expanded) {
+                    for (int e = 0; e < s->expanded_count; e++) {
+                        if (strcmp(s->expanded_paths[e], item->full_path) == 0) {
+                            s->expanded_paths[e][0] = '\0';
+                            strcpy(s->expanded_paths[e], s->expanded_paths[s->expanded_count - 1]);
+                            s->expanded_count--;
+                            break;
+                        }
+                    }
+                } else {
+                    if (s->expanded_count < 64) {
+                        strcpy(s->expanded_paths[s->expanded_count++], item->full_path);
+                    }
+                }
+                extern void file_manager_refresh(void);
+                file_manager_refresh();
+                return; // Tree rebuilt, stop rendering this frame
+            } else {
+                double now = glfwGetTime();
+                if (s_last_clicked_item == i && (now - s_last_item_click_time) < 0.3) {
+                    // It's a double click!
+                    if (item->type == FILE_ITEM_FILE) {
+                        const char* ext = strrchr(item->name, '.');
+                        if (ext) {
+                            if (strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0 ||
+                                strcasecmp(ext, ".jpeg") == 0 || strcasecmp(ext, ".bmp") == 0 ||
+                                strcasecmp(ext, ".tga") == 0 || strcasecmp(ext, ".hdr") == 0 ||
+                                strcasecmp(ext, ".exr") == 0) {
+
+                                float sh = (float)context.swapChainExtent.height;
+                                image_viewer_open(&s_image_viewer, item->full_path, s_ui_mx, sh - s_ui_my);
+                            } else {
+                                message(MSG_WARNING, "File format not yet supported!");
+                            }
+                        }
+                    }
+                    s_last_clicked_item = -1;
+                } else {
+                    s_last_clicked_item = i;
+                    s_last_item_click_time = now;
+                }
+            }
+        }
+
+        // Draw Godot-style Tree Lines
+        for (int d = 0; d < D; d++) {
+            float line_x = cx + d * 16.0f + 8.0f;
+
+            // Does this specific line reside inside a folder that is part of the selected path?
+            bool in_selected_folder = (current_ancestors[d] == selected_ancestors[d]);
+
+            if (in_selected_folder && selected_ancestors[d + 1] != -1) {
+                // RULE: Exclusive Path Rendering
+                Color line_col = CT.fs_tree;
+                int target = selected_ancestors[d + 1];
+
+                if (i < target) {
+                    quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh}, line_col); // bypass
+                } else if (i == target) {
+                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, line_col); // horizontal spur
+                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, line_col); // upper vertical
+                }
+            } else {
+                // RULE: Normal Full Tree Rendering
+                Color line_col = CT.fs_tree_dimmed;
+
+                bool parent_continues = false;
+                for (int j = i + 1; j < s->item_count; j++) {
+                    if (s->items[j].depth <= d) break; // Parent closed
+                    if (s->items[j].depth == d + 1) { parent_continues = true; break; }
+                }
+
+                if (d == D - 1) {
+                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, line_col); // horizontal spur
+                    quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, line_col); // upper vertical
+                    if (parent_continues) {
+                        quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, line_col); // lower vertical
+                    }
+                } else {
+                    if (parent_continues) {
+                        quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh}, line_col); // bypass
+                    }
+                }
+            }
+        }
+
+        // Draw Icons
+        float icon_y = list_y - lh * 0.5f - 8.0f;
+        float current_x = row_x;
+
+        if (item->type == FILE_ITEM_DIR) {
+            Texture2D* arrow = texture_pool_get(item->expanded ? s->icon_arrow_down : s->icon_arrow_right);
+            if (arrow) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, arrow, (Color){1.0f,1.0f,1.0f,1.0f});
+            current_x += 18.0f;
+
+            Texture2D* folder = texture_pool_get(s->icon_folder);
+            if (folder) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, folder, CT.accent);
+            current_x += 20.0f;
+        } else {
+            current_x += 18.0f; // Align with folders
+            Texture2D* file_icon = texture_pool_get(s->icon_file);
+            if (file_icon) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, file_icon, (Color){1.0f,1.0f,1.0f,1.0f});
+            current_x += 20.0f;
+        }
+
+        // Text
+        text(editor.font, item->name, current_x, list_y - lh * 0.5f - 2.0f, selected ? CT.text : CT.text_dim);
+
+        list_y -= lh;
+    }
+}
+
+static void render_right_panel(Panel* panel, float px, float py, float pw, float ph) {
+    if (!editor.font) return;
+    float cx, cy, cw, ch;
+    content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
+
+    // split_y represents the exact pixel boundary between the two views
+    float split_y = cy + ch * (1.0f - editor.inspector_fs_split);
+
+    // Splitter Interaction (Mapped directly to the FileSystem titlebar)
+    bool split_hovered = (s_ui_mx >= cx - PAD && s_ui_mx <= cx + cw + PAD &&
+                          s_ui_my >= split_y - TITLE_H && s_ui_my <= split_y);
+
+    if (split_hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+        double now = glfwGetTime();
+        if (editor.fs_collapsed) {
+            // Single click to expand
+            editor.fs_collapsed = false;
+            editor.fs_split_start = editor.inspector_fs_split;
+            editor.fs_split_target = editor.fs_split_saved > 0.0f ? editor.fs_split_saved : 0.5f;
+            editor.fs_anim_t = 0.0f;
+        } else if (now - editor.last_tab_click_time < 0.3) {
+            // Double click to collapse
+            editor.fs_collapsed = true;
+            editor.fs_split_saved = editor.inspector_fs_split;
+            editor.fs_split_start = editor.inspector_fs_split;
+            // Target split pushes the tab to the very bottom
+            editor.fs_split_target = 1.0f - (TITLE_H / ch);
+            editor.fs_anim_t = 0.0f;
+        } else {
+            // Start drag
+            s_ui_active_id = &editor.inspector_fs_split;
+            s_ui_drag_start_val = editor.inspector_fs_split;
+            s_ui_drag_start_y = (float)s_ui_my;
+        }
+        editor.last_tab_click_time = now;
+    }
+
+    if (s_ui_active_id == &editor.inspector_fs_split) {
+        float delta = ((float)s_ui_my - s_ui_drag_start_y) / ch;
+        // Limit drag so tab doesn't go below the screen
+        float max_split = 1.0f - (TITLE_H / ch);
+        editor.inspector_fs_split = clampf(s_ui_drag_start_val - delta, 0.1f, max_split);
+        editor.fs_split_target = editor.inspector_fs_split;
+        editor.fs_anim_t = 1.0f;
+        editor.fs_collapsed = false;
+        split_y = cy + ch * (1.0f - editor.inspector_fs_split);
+    }
+
+    // Render Inspector (Top Half)
+    float insp_ch = (cy + ch) - split_y;
+    if (insp_ch > 20.0f) {
+        render_inspector_content(cx, split_y, cw, insp_ch);
+    }
+
+    // Render FileSystem (Bottom Half)
+    float fs_ch = split_y - cy;
+    if (fs_ch > 20.0f) {
+        render_filesystem_content(cx, cy, cw, fs_ch);
+    }
+}
+
 ///  Hierarchy  (Left panel)
 
 static void render_hierarchy(Panel* panel,
@@ -663,82 +1074,11 @@ static void render_hierarchy(Panel* panel,
 #define FM_TILE_H     52.0f
 #define FM_TILE_GAP    8.0f
 
-static void render_file_manager(Panel* panel,
-                                 float px, float py, float pw, float ph) {
+static void render_file_manager(Panel* panel, float px, float py, float pw, float ph) {
     if (!editor.font) return;
-
-    FileManagerState* s = &editor.file_manager;
-
     float cx, cy, cw, ch;
     content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
-
-    // Path breadcrumb — drawn at the very top of the content area
-    float breadcrumb_y = cy + ch - PAD;
-    text(editor.font, s->current_path, cx, breadcrumb_y, CT.text_dim);
-
-    float grid_top = breadcrumb_y - (editor.font->ascent - editor.font->descent) - 10.0f;
-
-    if (s->item_count == 0) {
-        text(editor.font, "Empty directory", cx, grid_top, CT.text_dim);
-        return;
-    }
-
-    // How many tiles fit in a row
-    int cols = (int)((cw + FM_TILE_GAP) / (FM_TILE_W + FM_TILE_GAP));
-    if (cols < 1) cols = 1;
-
-    // Tiles are laid out left-to-right, top-to-bottom (decreasing y)
-    for (int i = 0; i < s->item_count; i++) {
-        int col = i % cols;
-        int row = i / cols;
-
-        float tx = cx + col * (FM_TILE_W + FM_TILE_GAP);
-        float ty = grid_top - row * (FM_TILE_H + FM_TILE_GAP) - FM_TILE_H;
-
-        // Clip tiles that scroll out of the content area
-        if (ty + FM_TILE_H < cy) break;
-        if (ty > grid_top)       continue;
-
-        FileItem* item     = &s->items[i];
-        bool      selected = (i == s->selected_index);
-
-        // Tile background (Borders removed entirely)
-        Color tile_bg = selected ? CT.bg_alt : CT.bg_deep;
-        exQuad2D((vec2){tx, ty}, (vec2){FM_TILE_W, FM_TILE_H}, (vec4){5.0f, 5.0f, 5.0f, 5.0f}, 0.0f, tile_bg, tile_bg);
-
-        // Name label — truncate to fit tile width
-        char display_name[32];
-        strncpy(display_name, item->name, sizeof(display_name) - 1);
-        display_name[sizeof(display_name) - 1] = '\0';
-        // simple character truncation (font metrics would be ideal but this is fast)
-        const int MAX_CHARS = 14;
-        if ((int)strlen(display_name) > MAX_CHARS) {
-            display_name[MAX_CHARS - 1] = '\xe2'; // UTF-8 ellipsis …
-            display_name[MAX_CHARS]     = '\x80';
-            display_name[MAX_CHARS + 1] = '\xa6';
-            display_name[MAX_CHARS + 2] = '\0';
-        }
-
-        Color name_col = selected ? CT.text : CT.text_dim;
-        float name_y   = ty + (FM_TILE_H - (editor.font->ascent - editor.font->descent)) * 0.5f;
-        text(editor.font, display_name, tx + 8.0f, name_y, name_col);
-
-        // Size label (files only)
-        if (item->type == FILE_ITEM_FILE && item->size_bytes > 0) {
-            char sz[16];
-            if      (item->size_bytes >= 1024 * 1024)
-                snprintf(sz, sizeof sz, "%.1fM", (double)item->size_bytes / (1024.0 * 1024.0));
-            else if (item->size_bytes >= 1024)
-                snprintf(sz, sizeof sz, "%.0fK", (double)item->size_bytes / 1024.0);
-            else
-                snprintf(sz, sizeof sz, "%zuB", item->size_bytes);
-
-            text(editor.font, sz,
-                 tx + FM_TILE_W - 8.0f - 40.0f,   // right-align approximation
-                 ty + 6.0f,
-                 CT.text_dim);
-        }
-    }
+    text(editor.font, "— bottom panel coming soon —", cx, cy + ch - PAD, CT.text_dim);
 }
 
 ///  Console
@@ -755,66 +1095,86 @@ static void render_placeholder(Panel* panel,
 
 /// File Manager
 
-bool file_manager_navigate(const char* path) {
-    FileManagerState* s = &editor.file_manager;
+// Native POSIX case-insensitive sort, prioritizing folders
+static int compare_file_items(const void* a, const void* b) {
+    const FileItem* fa = (const FileItem*)a;
+    const FileItem* fb = (const FileItem*)b;
+    if (fa->type != fb->type) return fa->type == FILE_ITEM_DIR ? -1 : 1;
+    return strcasecmp(fa->name, fb->name);
+}
 
+// Deep recursive scanner matching the Godot Tree topology
+static void scan_dir_recursive(FileManagerState* s, const char* path, int depth) {
     DIR* dir = opendir(path);
-    if (!dir) {
-        fprintf(stderr, "[Editor] Cannot open directory: %s\n", path);
-        return false;
-    }
+    if (!dir) return;
 
-    strncpy(s->current_path, path, FILE_MANAGER_MAX_PATH - 1);
-    s->current_path[FILE_MANAGER_MAX_PATH - 1] = '\0';
-    s->item_count     = 0;
-    s->selected_index = 0;
-    s->scroll_offset  = 0;
-
-    // Always include ".." as first entry
-    if (s->item_count < FILE_MANAGER_MAX_ITEMS) {
-        FileItem* up = &s->items[s->item_count++];
-        strncpy(up->name,      "..",  sizeof(up->name)      - 1);
-        strncpy(up->full_path, path,  sizeof(up->full_path) - 1);
-        up->type       = FILE_ITEM_DIR;
-        up->size_bytes = 0;
-    }
+    FileItem local_items[256];
+    int local_count = 0;
 
     struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL &&
-           s->item_count < FILE_MANAGER_MAX_ITEMS) {
-        if (entry->d_name[0] == '.') continue;  // skip hidden + . ..
+    while ((entry = readdir(dir)) != NULL && local_count < 256) {
+        if (entry->d_name[0] == '.') continue; // skip hidden
 
-        FileItem* item = &s->items[s->item_count++];
+        FileItem* item = &local_items[local_count++];
         strncpy(item->name, entry->d_name, sizeof(item->name) - 1);
         item->name[sizeof(item->name) - 1] = '\0';
         snprintf(item->full_path, sizeof(item->full_path), "%s/%s", path, entry->d_name);
+        item->depth = depth;
 
         struct stat st;
         if (stat(item->full_path, &st) == 0) {
-            item->type       = S_ISDIR(st.st_mode) ? FILE_ITEM_DIR : FILE_ITEM_FILE;
+            item->type = S_ISDIR(st.st_mode) ? FILE_ITEM_DIR : FILE_ITEM_FILE;
             item->size_bytes = (size_t)st.st_size;
         } else {
-            item->type       = FILE_ITEM_FILE;
+            item->type = FILE_ITEM_FILE;
             item->size_bytes = 0;
+        }
+
+        item->expanded = false;
+        if (item->type == FILE_ITEM_DIR) {
+            for (int i = 0; i < s->expanded_count; i++) {
+                if (strcmp(s->expanded_paths[i], item->full_path) == 0) {
+                    item->expanded = true;
+                    break;
+                }
+            }
         }
     }
     closedir(dir);
+
+    if (local_count > 1) {
+        qsort(local_items, local_count, sizeof(FileItem), compare_file_items);
+    }
+
+    // Append sorted items to master list, and immediately recurse if expanded!
+    for (int i = 0; i < local_count; i++) {
+        if (s->item_count >= FILE_MANAGER_MAX_ITEMS) break;
+        s->items[s->item_count] = local_items[i];
+        s->item_count++;
+
+        if (local_items[i].expanded) {
+            scan_dir_recursive(s, local_items[i].full_path, depth + 1);
+        }
+    }
+}
+
+bool file_manager_navigate(const char* path) {
+    FileManagerState* s = &editor.file_manager;
+    s->item_count = 0;
+    strncpy(s->current_path, path, sizeof(s->current_path) - 1);
+    s->current_path[sizeof(s->current_path) - 1] = '\0';
+    scan_dir_recursive(s, s->current_path, 0);
     return true;
 }
 
-void file_manager_navigate_up(void) {
+void file_manager_refresh(void) {
     FileManagerState* s = &editor.file_manager;
-    char parent[FILE_MANAGER_MAX_PATH];
-    strncpy(parent, s->current_path, sizeof(parent) - 1);
-    parent[sizeof(parent) - 1] = '\0';
-
-    char* last_slash = strrchr(parent, '/');
-    if (last_slash && last_slash != parent) {
-        *last_slash = '\0';
-    } else if (last_slash == parent) {
-        parent[1] = '\0';  // filesystem root "/"
+    s->item_count = 0;
+    // Default to the project assets folder if no path is set
+    if (s->current_path[0] == '\0') {
+        strncpy(s->current_path, "./assets", sizeof(s->current_path) - 1);
     }
-    file_manager_navigate(parent);
+    scan_dir_recursive(s, s->current_path, 0);
 }
 
 /// Keybinding callbacks
@@ -865,7 +1225,7 @@ void editor_init(void) {
         .max_size       = 600.0f,
         .ease_fn        = ease_quart_out,
         .title          = "Inspector",
-        .render_content = render_inspector,
+        .render_content = render_right_panel,
     };
 
     // ── Top — Console ─────────────────────────────────────────────────────
@@ -900,6 +1260,20 @@ void editor_init(void) {
     editor.inspector.selected_mesh_index = -1;
     editor.hierarchy.selected_index      = -1;
     editor.hierarchy.show_hidden         = false;
+    editor.inspector_fs_split            = 0.5f; // Split inspector/filesystem at 50%
+    editor.fs_split_target               = 0.5f;
+    editor.fs_split_start                = 0.5f;
+    editor.fs_split_saved                = 0.5f;
+    editor.fs_anim_t                     = 1.0f;
+    editor.fs_collapsed                  = false;
+    editor.last_tab_click_time           = 0.0;
+
+    // Cache SVGs instantly via our zero-copy binary pipeline
+    extern VulkanContext context;
+    editor.file_manager.icon_folder      = texture_pool_add_svg(&context, "./assets/icons/Folder.svg", 16, 16);
+    editor.file_manager.icon_file        = texture_pool_add_svg(&context, "./assets/icons/File.svg", 16, 16);
+    editor.file_manager.icon_arrow_right = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowRight.svg", 16, 16);
+    editor.file_manager.icon_arrow_down  = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowDown.svg", 16, 16);
 
     file_manager_navigate("./assets");
 
@@ -916,6 +1290,7 @@ void editor_init(void) {
     keychord_bind(&keymap, "c", cb_open_color_picker, "Pick Mesh Color", PRESS);
 
     colorpicker_init(&s_color_picker);
+    image_viewer_init(&s_image_viewer);
 
     editor.last_time   = glfwGetTime();
     editor.initialized = true;
@@ -943,18 +1318,81 @@ void editor_update(void) {
     if (s_color_picker.visible) {
         colorpicker_update(&s_color_picker, dt, s_ui_mx, s_ui_my);
     }
+    if (s_image_viewer.visible) {
+        image_viewer_update(&s_image_viewer, dt, s_ui_mx, s_ui_my);
+    }
 
-    if (s_message.active) {
-        if (s_message.timer > 0.0f) {
-            s_message.timer -= dt;
-            s_message.t += 4.0f * dt; // Slide in quickly
-            if (s_message.t > 1.0f) s_message.t = 1.0f;
+    float msg_h = editor.font ? (editor.font->ascent - editor.font->descent + 32.0f) : 50.0f;
+    if (s_message.active || s_message.y > -(msg_h + 5.0f)) {
+        float w = measure_text_width(editor.font, s_message.text, 1.0f) + 32.0f;
+
+        s_message.hovered = (s_ui_mx >= s_message.x && s_ui_mx <= s_message.x + w &&
+                             s_ui_my >= s_message.y && s_ui_my <= s_message.y + msg_h);
+
+        // Pause timer and lerp color on hover/drag
+        if (s_message.hovered || s_message.is_dragging) {
+            s_message.timer = 3.0f;
+            s_message.hover_t += 10.0f * dt;
+            if (s_message.hover_t > 1.0f) s_message.hover_t = 1.0f;
         } else {
-            s_message.t -= 4.0f * dt; // Slide out
-            if (s_message.t <= 0.0f) {
-                s_message.t = 0.0f;
-                s_message.active = false;
+            s_message.hover_t -= 10.0f * dt;
+            if (s_message.hover_t < 0.0f) s_message.hover_t = 0.0f;
+
+            if (s_message.active) {
+                s_message.timer -= dt;
+                if (s_message.timer <= 0.0f) s_message.active = false;
             }
+        }
+
+        float target_x = 20.0f;
+        float target_y = s_message.active ? 20.0f : -(msg_h + 20.0f);
+
+        if (s_message.is_dragging) {
+            float raw_x = (float)s_ui_mx - s_message.drag_offset_x;
+            float raw_y = (float)s_ui_my - s_message.drag_offset_y;
+
+            float dx = raw_x - target_x;
+            float dy = raw_y - target_y;
+            float dist = sqrtf(dx * dx + dy * dy);
+
+            // Radial rubber-band physics: pure circular clamping
+            // Multiplying the previous 250.0 radius by sqrt(2) gives exactly double the area!
+            float limit = 353.5f;
+            float pull_dist = dist / (1.0f + dist / limit);
+
+            if (dist > 0.0001f) {
+                s_message.x = target_x + (dx / dist) * pull_dist;
+                s_message.y = target_y + (dy / dist) * pull_dist;
+            } else {
+                s_message.x = target_x;
+                s_message.y = target_y;
+            }
+            s_message.vel_x = 0.0f;
+            s_message.vel_y = 0.0f;
+        } else {
+            // Hooke's Law spring physics!
+            float tension = 800.0f;
+            float damp    = 24.0f;
+
+            float ax = (target_x - s_message.x) * tension - s_message.vel_x * damp;
+            float ay = (target_y - s_message.y) * tension - s_message.vel_y * damp;
+
+            s_message.vel_x += ax * dt;
+            s_message.vel_y += ay * dt;
+            s_message.x += s_message.vel_x * dt;
+            s_message.y += s_message.vel_y * dt;
+        }
+    }
+
+    // Animate FileSystem Splitter
+    if (editor.fs_anim_t < 1.0f) {
+        editor.fs_anim_t += 4.0f * dt; // 250ms duration
+        if (editor.fs_anim_t >= 1.0f) {
+            editor.fs_anim_t = 1.0f;
+            editor.inspector_fs_split = editor.fs_split_target;
+        } else {
+            float e = ease_quart_in_out(editor.fs_anim_t);
+            editor.inspector_fs_split = editor.fs_split_start + (editor.fs_split_target - editor.fs_split_start) * e;
         }
     }
 
@@ -990,21 +1428,18 @@ void editor_render(void) {
     }
 
     colorpicker_render(&s_color_picker, editor.font);
+    image_viewer_render(&s_image_viewer, editor.font);
 
     // Render the active notification popup
-    if (s_message.active || s_message.t > 0.0f) {
-        // Use back_out to pop up, and back_in to drop down!
-        float ease_t = (s_message.timer > 0.0f) ? ease_back_out(s_message.t) : ease_back_in(s_message.t);
-
-        float text_w = measure_text_width(editor.font, s_message.text, 1.0);
+    float msg_h = editor.font ? (editor.font->ascent - editor.font->descent + 32.0f) : 50.0f;
+    if (s_message.active || s_message.y > -(msg_h + 5.0f)) {
+        float text_w = measure_text_width(editor.font, s_message.text, 1.0f);
         float pad = 16.0f;
         float w = text_w + pad * 2.0f;
-        float h = editor.font->ascent - editor.font->descent + pad * 2.0f;
+        float h = msg_h;
 
-        float target_y = 20.0f;
-        float offscreen_y = - (h + 20.0f);
-        float y = offscreen_y + (target_y - offscreen_y) * ease_t;
-        float x = 20.0f;
+        float x = s_message.x;
+        float y = s_message.y;
 
         vec4 radii = {8.0f, 8.0f, 8.0f, 8.0f};
 
@@ -1013,10 +1448,16 @@ void editor_render(void) {
         exQuad2D((vec2){x + 4.0f, y - 4.0f}, (vec2){w, h}, radii, 0.0f, shadow, shadow);
 
         // Themed Border
-        Color border = CT.text_dim;
-        if (s_message.type == MSG_ERROR) border = CT.error;
-        else if (s_message.type == MSG_WARNING) border = CT.warning;
-        else if (s_message.type == MSG_SUCCESS) border = CT.success;
+        Color base_border = CT.text_dim;
+        if (s_message.type == MSG_ERROR) base_border = CT.error;
+        else if (s_message.type == MSG_WARNING) base_border = CT.warning;
+        else if (s_message.type == MSG_SUCCESS) base_border = CT.success;
+
+        Color border;
+        border.r = base_border.r + (CT.border.r - base_border.r) * s_message.hover_t;
+        border.g = base_border.g + (CT.border.g - base_border.g) * s_message.hover_t;
+        border.b = base_border.b + (CT.border.b - base_border.b) * s_message.hover_t;
+        border.a = base_border.a + (CT.border.a - base_border.a) * s_message.hover_t;
 
         // Background and Border in a single call
         exQuad2D((vec2){x, y}, (vec2){w, h}, radii, 2.0f, border, CT.bg);

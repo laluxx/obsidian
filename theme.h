@@ -21,6 +21,10 @@ typedef struct {
     Color x_dark;
     Color y_dark;
     Color z_dark;
+    Color fs_hovered;
+    Color fs_selected;
+    Color fs_tree;
+    Color fs_tree_dimmed;
     Color gizmo_outer_circle;
     Color gizmo_outer_circle_bright;
     Color cursor;

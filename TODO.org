@@ -5,10 +5,33 @@ One thing to keep an eye on: the magic constant (16384 + 4096) appears four time
 
 Check quad utilization
 
+#E07E3D - Folder
+#372E2F - H1
+missing
 
-* TODO Bugs [0/1]
-- [ ] Until i move the position of the camera, gltf loaded meshes will flicker
+#70E03E - Folder
+#313F37 - H1
+missing
+
+#3DBDDF - Folder
+#2B3C4A - H1
+#283542 - H2
+
+#703DDF - Folder
+#312D49 - H1
+#2D2B42 - H2
+
+
+* TODO Editor [2/3]
+- [ ] When moving position/rotation/scale from the inspector also show the guide lines
+- [ ] When hovering the message don't make it disapper and lerp the border color to CT.border
+- [X] Mesh picking and highlighting.
+- [X] Inspector (runtime property editor) - Click mesh, edit PBR properties live with sliders. Ray vs AABB, writes directly into mapped SSBO memory, zero sync needed.
+
+* TODO Bugs [1/3]
+- [ ] The more time i'm alt tabbed from the engine the more time it will load once i tab back to it
 - [ ] Panning up and down when loooking from upside down is wrong
+- [X] Until i move the position of the camera, gltf loaded meshes will flicker
 
 * TODO Correctness [1/2]
 - [ ] The ease_table64 Bézier entries casting float function pointers to EaseFn64 is a known smell — worth a note.
@@ -26,11 +49,6 @@ Check quad utilization
 - [ ] Split MeshGPUData SSBO - Separate static material data (textures, PBR factors) from dynamic transform data (`model`, `normalMatrix`) to save PCIe bandwidth during animations.
 - [X] Hardware Skinning - Compute bone matrices and deform vertices in the vertex shader for skeletal meshes.
 - [X] Unify immediate renderer into mega buffer - Dynamic geometry uses a resetting region; static meshes sit permanently behind it.
-
-* TODO Editor [0/2]
-- [ ] When hovering the message don't make it disapper and lerp the border color to CT.border
-- [ ] Mesh picking and highlighting.
-- [ ] Inspector (runtime property editor) - Click mesh, edit PBR properties live with sliders. Ray vs AABB, writes directly into mapped SSBO memory, zero sync needed.
 
 * TODO Gltf 2.0 [7/18]
 - [X] Static meshes (Box, Corset, Avocado, Sponza).

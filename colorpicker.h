@@ -1,7 +1,7 @@
 #pragma once
-
 #include "font.h"
 #include "theme.h"
+#include "ui.h"
 #include <stdbool.h>
 
 ///  Color Picker
@@ -55,15 +55,11 @@ typedef enum {
 ////  Color Picker State
 
 typedef struct {
-    // ── Position & geometry ─────────────────────────────────────────────
-    float         x;            // Centre X in screen coords (Y-up)
-    float         y;            // Centre Y in screen coords (Y-up)
-    float         target_x;     // Target X for spring animation
-    float         target_y;     // Target Y for spring animation
-    float         vel_x;        // Velocity X for spring animation
-    float         vel_y;        // Velocity Y for spring animation
+    // ── Unified Window State ────────────────────────────────────────────
+    UIWindow      window;
+
+    // ── Geometry ────────────────────────────────────────────────────────
     float         radius;       // Total wheel radius (ring outer edge)
-    int32_t       close_icon_idx; // Bindless texture slot for the SVG
 
     // ── HSV colour ──────────────────────────────────────────────────────
     float         hue;          // [0, 360)  degrees
@@ -78,14 +74,8 @@ typedef struct {
     float         bary_w;       // weight toward white vertex
 
     // ── Interaction ──────────────────────────────────────────────────────
-    bool          visible;
-    bool          closing;
-    bool          hovered;
-    bool          close_hovered;
+    bool          visible;      // Synced with window.visible for backwards compatibility
     ColorPickerDrag drag;
-    float         drag_offset_x;
-    float         drag_offset_y;
-    float         anim_t;       // Animation state for panel open/close
     float         hue_cursor_t; // Animation position for hue dot
     float         hue_cursor_v; // Animation velocity for hue dot
     float         sv_cursor_t;  // Animation position for sv dot

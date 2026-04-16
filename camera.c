@@ -52,7 +52,6 @@ void camera_update(Camera* cam) {
 void camera_set_look_at(Camera* cam, vec3 look_at) {
     glm_vec3_copy(look_at, cam->look_at);
     cam->use_look_at = true;
-    printf("Look at point set to: (%.2f, %.2f, %.2f)\n", look_at[0], look_at[1], look_at[2]);
     camera_update(cam);
 }
 

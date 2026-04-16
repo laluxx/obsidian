@@ -58,6 +58,8 @@ typedef struct {
     char          full_path[FILE_MANAGER_MAX_PATH];
     FileItemType  type;
     size_t        size_bytes;
+    int           depth;     // Tree indentation level
+    bool          expanded;  // Is this folder open?
 } FileItem;
 
 typedef struct {
@@ -67,6 +69,15 @@ typedef struct {
     int       selected_index;
     int       scroll_offset;
     int       visible_rows;
+
+    char      expanded_paths[64][FILE_MANAGER_MAX_PATH]; // Track which folders are open
+    int       expanded_count;
+
+    // SVG bindless texture slots
+    int32_t   icon_folder;
+    int32_t   icon_file;
+    int32_t   icon_arrow_right;
+    int32_t   icon_arrow_down;
 } FileManagerState;
 
 /// Editor (top-level aggregate)
@@ -76,9 +87,16 @@ typedef struct {
     InspectorState   inspector;
     HierarchyState   hierarchy;
     FileManagerState file_manager;
-    Font*            font;
+    Font* font;
     bool             initialized;
     double           last_time;
+    float            inspector_fs_split; // Dynamic layout splitter [0.0 - 1.0]
+    float            fs_split_target;
+    float            fs_split_start;
+    float            fs_split_saved;
+    float            fs_anim_t;
+    bool             fs_collapsed;
+    double           last_tab_click_time;
 } Editor;
 
 extern Editor editor;
