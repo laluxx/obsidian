@@ -7,6 +7,7 @@
 #include "theme.h"
 #include "gizmo.h"
 #include "colorpicker.h"
+#include "easing.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -28,6 +29,25 @@ static float  s_ui_drag_start_x = 0.0f;
 static float  s_ui_drag_start_val = 0.0f;
 
 static ColorPickerState s_color_picker;
+
+typedef enum { MSG_INFO, MSG_SUCCESS, MSG_WARNING, MSG_ERROR } MessageType;
+typedef struct {
+    char text[128];
+    MessageType type;
+    float t;
+    float timer;
+    bool active;
+} EditorMessage;
+
+static EditorMessage s_message = {0};
+
+void message(MessageType type, const char* text) {
+    strncpy(s_message.text, text, sizeof(s_message.text) - 1);
+    s_message.text[sizeof(s_message.text) - 1] = '\0';
+    s_message.type = type;
+    s_message.timer = 3.0f; // Stay on screen for 3 seconds
+    s_message.active = true;
+}
 
 static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
 
@@ -804,6 +824,17 @@ static void toggle_right(void)  { editor_toggle_panel(PANEL_RIGHT);  }
 static void toggle_top(void)    { editor_toggle_panel(PANEL_TOP);    }
 static void toggle_left(void)   { editor_toggle_panel(PANEL_LEFT);   }
 
+static void cb_open_color_picker(void) {
+    if (editor.inspector.selected_mesh_index < 0 || editor.inspector.selected_mesh_index >= (int)scene.meshes.count) {
+        message(MSG_ERROR, "No mesh selected! Cannot pick color.");
+        return;
+    }
+    Mesh* m = &scene.meshes.items[editor.inspector.selected_mesh_index];
+    float sh = (float)context.swapChainExtent.height;
+    float raw_y = sh - s_ui_my;
+    colorpicker_open(&s_color_picker, s_ui_mx, raw_y, m->baseColorFactor, m->baseColorFactor, on_color_picked, NULL);
+}
+
 /// Lifecycle
 
 void editor_init(void) {
@@ -882,6 +913,7 @@ void editor_init(void) {
     keychord_bind(&keymap, "M-l", toggle_right,  "Toggle inspector",    PRESS);
     keychord_bind(&keymap, "M-k", toggle_top,    "Toggle console",      PRESS);
     keychord_bind(&keymap, "M-h", toggle_left,   "Toggle hierarchy",    PRESS);
+    keychord_bind(&keymap, "c", cb_open_color_picker, "Pick Mesh Color", PRESS);
 
     colorpicker_init(&s_color_picker);
 
@@ -910,6 +942,20 @@ void editor_update(void) {
 
     if (s_color_picker.visible) {
         colorpicker_update(&s_color_picker, dt, s_ui_mx, s_ui_my);
+    }
+
+    if (s_message.active) {
+        if (s_message.timer > 0.0f) {
+            s_message.timer -= dt;
+            s_message.t += 4.0f * dt; // Slide in quickly
+            if (s_message.t > 1.0f) s_message.t = 1.0f;
+        } else {
+            s_message.t -= 4.0f * dt; // Slide out
+            if (s_message.t <= 0.0f) {
+                s_message.t = 0.0f;
+                s_message.active = false;
+            }
+        }
     }
 
     for (int i = 0; i < PANEL_COUNT; i++) {
@@ -944,6 +990,41 @@ void editor_render(void) {
     }
 
     colorpicker_render(&s_color_picker, editor.font);
+
+    // Render the active notification popup
+    if (s_message.active || s_message.t > 0.0f) {
+        // Use back_out to pop up, and back_in to drop down!
+        float ease_t = (s_message.timer > 0.0f) ? ease_back_out(s_message.t) : ease_back_in(s_message.t);
+
+        float text_w = measure_text_width(editor.font, s_message.text, 1.0);
+        float pad = 16.0f;
+        float w = text_w + pad * 2.0f;
+        float h = editor.font->ascent - editor.font->descent + pad * 2.0f;
+
+        float target_y = 20.0f;
+        float offscreen_y = - (h + 20.0f);
+        float y = offscreen_y + (target_y - offscreen_y) * ease_t;
+        float x = 20.0f;
+
+        vec4 radii = {8.0f, 8.0f, 8.0f, 8.0f};
+
+        // Shadow
+        Color shadow = {0.0f, 0.0f, 0.0f, 0.3f};
+        exQuad2D((vec2){x + 4.0f, y - 4.0f}, (vec2){w, h}, radii, 0.0f, shadow, shadow);
+
+        // Themed Border
+        Color border = CT.text_dim;
+        if (s_message.type == MSG_ERROR) border = CT.error;
+        else if (s_message.type == MSG_WARNING) border = CT.warning;
+        else if (s_message.type == MSG_SUCCESS) border = CT.success;
+
+        // Background and Border in a single call
+        exQuad2D((vec2){x, y}, (vec2){w, h}, radii, 2.0f, border, CT.bg);
+
+        // Text
+        float ty = y + h * 0.5f - 2.0f; // Visual center
+        text(editor.font, s_message.text, x + pad, ty, CT.text);
+    }
 
     s_ui_mclicked = false; // Reset one-frame click flag
 }

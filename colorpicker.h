@@ -58,6 +58,10 @@ typedef struct {
     // ── Position & geometry ─────────────────────────────────────────────
     float         x;            // Centre X in screen coords (Y-up)
     float         y;            // Centre Y in screen coords (Y-up)
+    float         target_x;     // Target X for spring animation
+    float         target_y;     // Target Y for spring animation
+    float         vel_x;        // Velocity X for spring animation
+    float         vel_y;        // Velocity Y for spring animation
     float         radius;       // Total wheel radius (ring outer edge)
 
     // ── HSV colour ──────────────────────────────────────────────────────
@@ -74,10 +78,13 @@ typedef struct {
 
     // ── Interaction ──────────────────────────────────────────────────────
     bool          visible;
+    bool          closing;
     bool          hovered;
+    bool          close_hovered;
     ColorPickerDrag drag;
     float         drag_offset_x;
     float         drag_offset_y;
+    float         anim_t;       // Animation state for panel open/close
     float         hue_cursor_t; // Animation position for hue dot
     float         hue_cursor_v; // Animation velocity for hue dot
     float         sv_cursor_t;  // Animation position for sv dot

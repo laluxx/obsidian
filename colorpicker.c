@@ -3,6 +3,7 @@
 #include "context.h"
 #include "theme.h"
 #include "font.h"
+#include "easing.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -177,6 +178,9 @@ static void cp_smart_position(float anchor_x, float anchor_y,
 void colorpicker_init(ColorPickerState* cp) {
     memset(cp, 0, sizeof(ColorPickerState));
     cp->radius       = 130.0f;
+    cp->anim_t       = 0.0f;
+    cp->closing      = false;
+    cp->close_hovered = false;
     cp->hue_cursor_t = 0.0f;
     cp->hue_cursor_v = 0.0f;
     cp->sv_cursor_t  = 0.0f;
@@ -217,16 +221,27 @@ void colorpicker_open(ColorPickerState* cp,
     float cx, cy;
     cp_smart_position(anchor_x, anchor_y, panel_w, panel_h, &cx, &cy);
 
-    cp->x       = cx;
-    cp->y       = cy;
-    cp->visible = true;
-    cp->drag    = CP_DRAG_NONE;
+    cp->target_x = cx;
+    cp->target_y = cy;
+
+    // If opening from closed/closing state, snap to position and reset animation
+    if (!cp->visible || cp->closing) {
+        cp->x       = cx;
+        cp->y       = cy;
+        cp->vel_x   = 0.0f;
+        cp->vel_y   = 0.0f;
+        cp->anim_t  = 0.0f;
+        cp->visible = true;
+        cp->closing = false;
+    }
+
+    cp->drag = CP_DRAG_NONE;
 }
 
 void colorpicker_close(ColorPickerState* cp) {
-    cp->visible      = false;
+    cp->closing      = true;
     cp->drag         = CP_DRAG_NONE;
-    cp->target_color = NULL;
+    cp->target_color = NULL; // Stop tracking immediately
 }
 
 ///  Change notification helper
@@ -250,8 +265,8 @@ static void cp_notify(ColorPickerState* cp) {
 static void cp_render_hue_ring(ColorPickerState* cp) {
     float r = cp->radius;
     float d = r * 2.0f;
-    // Send a single quad with ID -3. Parameters: inner_frac, outer_frac, 0, alpha
-    shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -3, (vec4){CP_RING_INNER_FRAC, CP_RING_OUTER_FRAC, 0.0f, cp->alpha});
+    // Force alpha to 1.0f so the ring doesn't vanish if the user picks a transparent color
+    shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -3, (vec4){CP_RING_INNER_FRAC, CP_RING_OUTER_FRAC, 0.0f, 1.0f});
 }
 
 ////  SV triangle rendering
@@ -259,8 +274,8 @@ static void cp_render_hue_ring(ColorPickerState* cp) {
 static void cp_render_sv_triangle(ColorPickerState* cp) {
     float r = cp->radius;
     float d = r * 2.0f;
-    // Send a single quad with ID -4. Parameters: hue (degrees), radius_frac, 0, alpha
-    shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -4, (vec4){cp->hue, CP_TRI_RADIUS_FRAC, 0.0f, cp->alpha});
+    // Force alpha to 1.0f so the triangle doesn't vanish
+    shaderQuad2D((vec2){cp->x - r, cp->y - r}, (vec2){d, d}, -4, (vec4){cp->hue, CP_TRI_RADIUS_FRAC, 0.0f, 1.0f});
 }
 
 ////  Cursor dots
@@ -310,17 +325,26 @@ static void cp_render_panel(ColorPickerState* cp, Font* font) {
     float bar_y = panel_y + panel_h - bar_h;
     exQuad2D((vec2){panel_x, bar_y}, (vec2){panel_w, bar_h}, (vec4){radii[0], radii[1], 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
 
+    // Thin border (rendered BEFORE text to prevent SDF blending conflicts)
+    Color border = {CT.bg_alt.r, CT.bg_alt.g, CT.bg_alt.b, 0.6f};
+    exQuad2D((vec2){panel_x, panel_y},
+             (vec2){panel_w, panel_h},
+             radii, 1.5f, (Color){0,0,0,0}, border);
+
     // Title text
     if (font) {
         float ty = bar_y + bar_h * 0.5f - 2.0f; // Adjusted for visual center
         text(font, "Color Picker", panel_x + pad, ty, CT.text);
     }
 
-    // Thin border
-    Color border = {CT.bg_alt.r, CT.bg_alt.g, CT.bg_alt.b, 0.6f};
-    exQuad2D((vec2){panel_x, panel_y},
-             (vec2){panel_w, panel_h},
-             radii, 1.5f, (Color){0,0,0,0}, border);
+    // Close 'X' Button
+    float close_size = 10.0f;
+    float close_cx = panel_x + panel_w - pad - 6.0f;
+    float close_cy = bar_y + bar_h * 0.5f;
+    Color close_col = cp->close_hovered ? CT.error : CT.border;
+    float hw = close_size * 0.5f;
+    line2D((vec2){close_cx - hw, close_cy - hw}, (vec2){close_cx + hw, close_cy + hw}, close_col);
+    line2D((vec2){close_cx - hw, close_cy + hw}, (vec2){close_cx + hw, close_cy - hw}, close_col);
 }
 
 ////  Swatch bar
@@ -413,11 +437,38 @@ static void cp_sv_cursor_pos(ColorPickerState* cp, float* out_x, float* out_y) {
 
 void colorpicker_update(ColorPickerState* cp, float dt, double mx, double my) {
     if (!cp->visible) return;
+
+    // Handle Open/Close animation
+    if (cp->closing) {
+        cp->anim_t -= 6.0f * dt;
+        if (cp->anim_t <= 0.0f) {
+            cp->anim_t = 0.0f;
+            cp->visible = false;
+            cp->closing = false;
+            return;
+        }
+    } else if (cp->anim_t < 1.0f) {
+        cp->anim_t += 6.0f * dt;
+        if (cp->anim_t > 1.0f) cp->anim_t = 1.0f;
+    }
+
     (void)mx; (void)my;
 
+    // Window Position Spring Physics
+    if (cp->drag != CP_DRAG_WINDOW) {
+        float win_tension = 800.0f; // Slightly softer than cursor for a smooth glide
+        float win_damp    = 24.0f;  // Higher damping to prevent wobbling the whole window
+
+        float accel_x = (cp->target_x - cp->x) * win_tension - (cp->vel_x * win_damp);
+        float accel_y = (cp->target_y - cp->y) * win_tension - (cp->vel_y * win_damp);
+
+        cp->vel_x += accel_x * dt;
+        cp->vel_y += accel_y * dt;
+        cp->x += cp->vel_x * dt;
+        cp->y += cp->vel_y * dt;
+    }
+
     // True Mass-Spring-Damper Physics (Hooke's Law)
-    // Cranked tension for a lightning-fast pop (~90ms to peak)
-    // Tuned damping for a satisfying, elastic bounce
     float tension = 1200.0f; // Spring stiffness
     float damp    = 18.0f;   // Air friction (lower = more bounce, higher = stiffer)
 
@@ -438,6 +489,11 @@ void colorpicker_update(ColorPickerState* cp, float dt, double mx, double my) {
 
 void colorpicker_render(ColorPickerState* cp, Font* font) {
     if (!cp->visible) return;
+
+    // Apply bounce ease to the y position for opening/closing
+    float ease_val = cp->closing ? ease_back_in(cp->anim_t) : ease_back_out(cp->anim_t);
+    float orig_y = cp->y;
+    cp->y += (1.0f - ease_val) * -40.0f; // Slide down 40px when hidden
 
     // ── 1. Panel background ───────────────────────────────────────────────
     cp_render_panel(cp, font);
@@ -491,6 +547,9 @@ void colorpicker_render(ColorPickerState* cp, Font* font) {
         float r = CP_CURSOR_RADIUS_MIN + (CP_CURSOR_RADIUS_MAX - CP_CURSOR_RADIUS_MIN) * cp->sv_cursor_t;
         cp_draw_cursor(sx, sy, r, (Color){cr, cg, cb, 1.0f});
     }
+
+    // Restore original Y coordinate after rendering
+    cp->y = orig_y;
 }
 
 
@@ -567,6 +626,17 @@ bool colorpicker_mouse_move(ColorPickerState* cp, double mx, double my) {
     float mxf = (float)mx;
     float myf = sh - (float)my;  // Y-up
 
+    // Update close button hover state
+    float panel_x = cp->x - cp->radius - CP_PANEL_PAD;
+    float panel_w = (cp->radius + CP_PANEL_PAD) * 2.0f;
+    float panel_h = panel_w + CP_TITLE_H;
+    float bar_y   = cp->y - cp->radius - CP_PANEL_PAD + panel_h - CP_TITLE_H;
+    float close_cx = panel_x + panel_w - CP_PANEL_PAD - 6.0f;
+    float close_cy = bar_y + CP_TITLE_H * 0.5f;
+    float hit_r = 12.0f;
+    cp->close_hovered = (mxf >= close_cx - hit_r && mxf <= close_cx + hit_r &&
+                         myf >= close_cy - hit_r && myf <= close_cy + hit_r);
+
     if (cp->drag == CP_DRAG_WINDOW) {
         float sw = (float)context.swapChainExtent.width;
         cp->x = mxf - cp->drag_offset_x;
@@ -581,6 +651,12 @@ bool colorpicker_mouse_move(ColorPickerState* cp, double mx, double my) {
         if (cp->x - r - pad + panel_w > sw) cp->x = sw - panel_w + r + pad;
         if (cp->y - r - pad + panel_h > sh) cp->y = sh - panel_h + r + pad;
         if (cp->y - r - pad < CP_SWATCH_GAP + CP_SWATCH_H) cp->y = r + pad + CP_SWATCH_GAP + CP_SWATCH_H;
+
+        // Lock the spring target to exactly where we are dragging it
+        cp->target_x = cp->x;
+        cp->target_y = cp->y;
+        cp->vel_x = 0.0f;
+        cp->vel_y = 0.0f;
 
         return true;
     }
@@ -629,6 +705,10 @@ bool colorpicker_mouse_button(ColorPickerState* cp,
 
     if (button == 0 /* GLFW_MOUSE_BUTTON_LEFT */) {
         if (action == 1 /* GLFW_PRESS */) {
+            if (cp->close_hovered) {
+                colorpicker_close(cp);
+                return true;
+            }
             if (cp_hit_titlebar(cp, mxf, myf)) {
                 cp->drag = CP_DRAG_WINDOW;
                 cp->drag_offset_x = mxf - cp->x;
