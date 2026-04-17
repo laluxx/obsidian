@@ -84,6 +84,115 @@ static ImageViewerState s_image_viewer = {0};
 static double s_last_item_click_time = 0.0;
 static int s_last_clicked_item = -1;
 
+// --- Search & Incremental Caching State ---
+static bool  s_is_searching = false;
+static char  s_search_query[64] = "";
+static float s_search_anim_t = 0.0f;
+
+static int   s_search_matches[256];
+static int   s_search_match_count = 0;
+static int   s_search_current_idx = -1;
+
+static int   s_search_cursor = 0;
+static double s_search_last_key_time = 0.0;
+static int   s_search_prev_match_idx = 0;
+
+static int   s_saved_expanded_count = 0;
+static char  s_saved_expanded_paths[64][256];
+static int   s_saved_selected_index = -1;
+static float s_saved_scroll_y = 0.0f;
+static float s_saved_scroll_target = 0.0f;
+
+// Smooth Scrolling State
+static float s_fs_scroll_y = 0.0f;
+static float s_fs_scroll_target = 0.0f;
+static float s_fs_scroll_start = 0.0f;
+static float s_fs_scroll_t = 1.0f;
+
+#define CACHE_MAX_DIRS 16
+#define CACHE_MAX_FILES 2048
+
+typedef struct {
+    char root[256];
+    char paths[CACHE_MAX_FILES][128];
+    int count;
+} FsCache;
+
+static FsCache s_fs_cache[CACHE_MAX_DIRS];
+static int s_fs_cache_count = 0;
+
+static FsCache* find_cached_parent(const char* dir) {
+    FsCache* best = NULL;
+    size_t max_len = 0;
+    size_t dir_len = strlen(dir);
+    for(int i = 0; i < s_fs_cache_count; i++) {
+        size_t len = strlen(s_fs_cache[i].root);
+        if (len > max_len && len < dir_len && strncmp(s_fs_cache[i].root, dir, len) == 0) {
+            best = &s_fs_cache[i];
+            max_len = len;
+        }
+    }
+    return best;
+}
+
+static void populate_cache_recursive(const char* root, FsCache* c, const char* current_dir) {
+    DIR* dir = opendir(current_dir);
+    if (!dir) return;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue; // skip hidden
+        char full[512];
+        snprintf(full, sizeof(full), "%s/%s", current_dir, entry->d_name);
+
+        struct stat st;
+        if (stat(full, &st) == 0) {
+            if (c->count < CACHE_MAX_FILES) {
+                const char* rel = full + strlen(root);
+                if (rel[0] == '/') rel++;
+                strncpy(c->paths[c->count], rel, 127);
+                c->count++;
+            }
+            if (S_ISDIR(st.st_mode)) populate_cache_recursive(root, c, full);
+        }
+    }
+    closedir(dir);
+}
+
+static FsCache* get_or_build_cache(const char* dir, bool force_refresh) {
+    if (!force_refresh) {
+        for(int i = 0; i < s_fs_cache_count; i++) {
+            if (strcmp(s_fs_cache[i].root, dir) == 0) return &s_fs_cache[i];
+        }
+        FsCache* parent = find_cached_parent(dir);
+        if (parent && s_fs_cache_count < CACHE_MAX_DIRS) {
+            FsCache* c = &s_fs_cache[s_fs_cache_count++];
+            strncpy(c->root, dir, sizeof(c->root)-1);
+            c->count = 0;
+            const char* prefix = dir + strlen(parent->root);
+            if (prefix[0] == '/') prefix++;
+            size_t prefix_len = strlen(prefix);
+            for(int i = 0; i < parent->count; i++) {
+                if (strncmp(parent->paths[i], prefix, prefix_len) == 0 && parent->paths[i][prefix_len] == '/') {
+                    strncpy(c->paths[c->count], parent->paths[i] + prefix_len + 1, 127);
+                    c->count++;
+                }
+            }
+            return c; // Incremental build successful!
+        }
+    }
+    if (s_fs_cache_count >= CACHE_MAX_DIRS) s_fs_cache_count = 0; // Simple eviction
+    FsCache* c = &s_fs_cache[s_fs_cache_count++];
+    strncpy(c->root, dir, sizeof(c->root)-1);
+    c->count = 0;
+    populate_cache_recursive(dir, c, dir);
+    return c;
+}
+
+static Color lerp_color(Color a, Color b, float t) {
+    t = clampf(t, 0.0f, 1.0f);
+    return (Color){ a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t };
+}
+
 static void editor_get_safe_area(float* out_min_x, float* out_min_y, float* out_max_x, float* out_max_y) {
     extern VulkanContext context;
     float sw = (float)context.swapChainExtent.width;
@@ -894,189 +1003,295 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
     // Solid background to hide the inspector underneath when dragged up
     exQuad2D((vec2){cx - PAD, cy}, (vec2){cw + PAD*2.0f, ch}, (vec4){0,0,0,0}, 0.0f, CT.bg, CT.bg);
 
-    // Tab / Title Bar for FileSystem
     float tab_h = TITLE_H;
     float tab_y = cy + ch - tab_h;
-    exQuad2D((vec2){cx - PAD, tab_y}, (vec2){cw + PAD*2.0f, tab_h}, (vec4){8.0f, 8.0f, 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
-    text(editor.font, "FileSystem", cx, tab_y + tab_h * 0.5f - 2.0f, CT.text);
 
-    if (editor.fs_collapsed && editor.fs_anim_t >= 1.0f) return;
+    // --- DRAW LIST FIRST (So the title bar perfectly overlaps scrolled items!) ---
+    if (!editor.fs_collapsed || editor.fs_anim_t < 1.0f) {
+        // Apply smooth scrolling offset!
+        float list_y = tab_y - PAD + s_fs_scroll_y;
+        float lh = editor.font->ascent - editor.font->descent + LH_EXTRA + 6.0f;
 
-    float list_y = tab_y - PAD;
-    float lh = editor.font->ascent - editor.font->descent + LH_EXTRA + 6.0f;
+        // Track the target item at each depth for the selected path
+        int selected_ancestors[32];
+        for (int i = 0; i < 32; i++) selected_ancestors[i] = -1;
 
-    // Track the target item at each depth for the selected path
-    int selected_ancestors[32];
-    for (int i = 0; i < 32; i++) selected_ancestors[i] = -1;
+        if (s->selected_index >= 0 && s->selected_index < s->item_count) {
+            int trace_idx = s->selected_index;
+            while (trace_idx >= 0) {
+                int d = s->items[trace_idx].depth;
+                if (d < 32) selected_ancestors[d] = trace_idx;
 
-    if (s->selected_index >= 0 && s->selected_index < s->item_count) {
-        int trace_idx = s->selected_index;
-        while (trace_idx >= 0) {
-            int d = s->items[trace_idx].depth;
-            if (d < 32) selected_ancestors[d] = trace_idx;
-
-            if (d == 0) break;
-            int parent = -1;
-            for (int p = trace_idx - 1; p >= 0; p--) {
-                if (s->items[p].depth < d) { parent = p; break; }
+                if (d == 0) break;
+                int parent = -1;
+                for (int p = trace_idx - 1; p >= 0; p--) {
+                    if (s->items[p].depth < d) { parent = p; break; }
+                }
+                trace_idx = parent;
             }
-            trace_idx = parent;
-        }
-    }
-
-    // Track the ancestors of the current item being drawn
-    int current_ancestors[32];
-    for (int i = 0; i < 32; i++) current_ancestors[i] = -1;
-
-    for (int i = 0; i < s->item_count; i++) {
-        FileItem* item = &s->items[i];
-        if (list_y < cy) break; // Hard clip at bottom
-
-        int D = item->depth;
-        if (D < 32) current_ancestors[D] = i;
-
-        float indent = D * 16.0f;
-        float row_x = cx + indent;
-
-        // Hover & Selection
-        bool hovered = (s_ui_mx >= cx && s_ui_mx <= cx + cw && s_ui_my >= list_y - lh && s_ui_my <= list_y);
-        bool selected = (s->selected_index == i);
-
-        float sel_x = cx + D * 16.0f + 14.0f;
-        float sel_w = cw - (sel_x - cx) + PAD;
-
-        if (selected) {
-            exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_hovered, CT.fs_hovered);
-        } else if (hovered) {
-            exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_selected, CT.fs_selected);
         }
 
-        // Input
-        if (hovered && s_ui_mclicked) {
-            s->selected_index = i;
-            if (item->type == FILE_ITEM_DIR && s_ui_mx < row_x + 18.0f) {
-                if (item->expanded) {
-                    for (int e = 0; e < s->expanded_count; e++) {
-                        if (strcmp(s->expanded_paths[e], item->full_path) == 0) {
-                            s->expanded_paths[e][0] = '\0';
-                            strcpy(s->expanded_paths[e], s->expanded_paths[s->expanded_count - 1]);
-                            s->expanded_count--;
-                            break;
+        // Track the ancestors of the current item being drawn
+        int current_ancestors[32];
+        for (int i = 0; i < 32; i++) current_ancestors[i] = -1;
+
+        for (int i = 0; i < s->item_count; i++) {
+            FileItem* item = &s->items[i];
+            if (list_y < cy) break; // Hard clip at bottom
+
+            int D = item->depth;
+            if (D < 32) current_ancestors[D] = i;
+
+            float indent = D * 16.0f;
+            float row_x = cx + indent;
+
+            // Hover & Selection
+            bool hovered = (s_ui_mx >= cx && s_ui_mx <= cx + cw && s_ui_my >= list_y - lh && s_ui_my <= list_y);
+            bool selected = (s->selected_index == i);
+
+            float sel_x = cx + D * 16.0f + 14.0f;
+            float sel_w = cw - (sel_x - cx) + PAD;
+
+            bool is_visible = (list_y <= tab_y + 4.0f); // Prevents drawing above the title bar!
+
+            if (is_visible) {
+                if (selected) {
+                    exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_hovered, CT.fs_hovered);
+                } else if (hovered) {
+                    exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_selected, CT.fs_selected);
+                }
+            }
+
+            // Input
+            if (hovered && s_ui_mclicked && is_visible) {
+                s->selected_index = i;
+                if (item->type == FILE_ITEM_DIR && s_ui_mx < row_x + 18.0f) {
+                    if (item->expanded) {
+                        for (int e = 0; e < s->expanded_count; e++) {
+                            if (strcmp(s->expanded_paths[e], item->full_path) == 0) {
+                                s->expanded_paths[e][0] = '\0';
+                                strcpy(s->expanded_paths[e], s->expanded_paths[s->expanded_count - 1]);
+                                s->expanded_count--;
+                                break;
+                            }
+                        }
+                    } else {
+                        if (s->expanded_count < 64) {
+                            strcpy(s->expanded_paths[s->expanded_count++], item->full_path);
                         }
                     }
+                    extern void file_manager_refresh(void);
+                    file_manager_refresh();
+                    return; // Tree rebuilt, stop rendering this frame
                 } else {
-                    if (s->expanded_count < 64) {
-                        strcpy(s->expanded_paths[s->expanded_count++], item->full_path);
+                    double now = glfwGetTime();
+                    if (s_last_clicked_item == i && (now - s_last_item_click_time) < 0.3) {
+                        // It's a double click!
+                        if (item->type == FILE_ITEM_FILE) {
+                            const char* ext = strrchr(item->name, '.');
+                            if (ext) {
+                                if (strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0 ||
+                                    strcasecmp(ext, ".jpeg") == 0 || strcasecmp(ext, ".bmp") == 0 ||
+                                    strcasecmp(ext, ".tga") == 0 || strcasecmp(ext, ".hdr") == 0 ||
+                                    strcasecmp(ext, ".exr") == 0) {
+
+                                    float sh = (float)context.swapChainExtent.height;
+                                    image_viewer_open(&s_image_viewer, item, s_ui_mx, sh - s_ui_my);
+                                } else {
+                                    message(MSG_WARNING, "File format not yet supported!");
+                                }
+                            }
+                        }
+                        s_last_clicked_item = -1;
+                    } else {
+                        s_last_clicked_item = i;
+                        s_last_item_click_time = now;
                     }
                 }
-                extern void file_manager_refresh(void);
-                file_manager_refresh();
-                return; // Tree rebuilt, stop rendering this frame
-            } else {
-                double now = glfwGetTime();
-                if (s_last_clicked_item == i && (now - s_last_item_click_time) < 0.3) {
-                    // It's a double click!
-                    if (item->type == FILE_ITEM_FILE) {
-                        const char* ext = strrchr(item->name, '.');
-                        if (ext) {
-                            if (strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0 ||
-                                strcasecmp(ext, ".jpeg") == 0 || strcasecmp(ext, ".bmp") == 0 ||
-                                strcasecmp(ext, ".tga") == 0 || strcasecmp(ext, ".hdr") == 0 ||
-                                strcasecmp(ext, ".exr") == 0) {
+            }
 
-                                float sh = (float)context.swapChainExtent.height;
-                                image_viewer_open(&s_image_viewer, item, s_ui_mx, sh - s_ui_my);
-                            } else {
-                                message(MSG_WARNING, "File format not yet supported!");
+            // Calculate Animating Target Bound for the continuous beam overlay
+            float anim_y = -9999.0f;
+            if (s_is_searching && s_search_match_count > 0 && s_search_current_idx >= 0) {
+                int active_match = s_search_matches[s_search_current_idx];
+                float current_beam_index = s_search_prev_match_idx + (active_match - s_search_prev_match_idx) * ease_cubic_out(clampf(s_search_anim_t, 0.0f, 1.0f));
+
+                // Shift down by exactly half a line height so the beam geometrically intersects the spur!
+                anim_y = tab_y - PAD + s_fs_scroll_y - (current_beam_index * lh) - (lh * 0.5f);
+            }
+
+            // Draw Godot-style Tree Lines
+            for (int d = 0; d < D; d++) {
+                float line_x = cx + d * 16.0f + 8.0f;
+
+                bool parent_continues = false;
+                for (int j = i + 1; j < s->item_count; j++) {
+                    if (s->items[j].depth <= d) break; // Parent closed
+                    if (s->items[j].depth == d + 1) { parent_continues = true; break; }
+                }
+
+                Color upper_col = CT.fs_tree_dimmed;
+                Color lower_col = CT.fs_tree_dimmed;
+                Color spur_col  = CT.fs_tree_dimmed;
+
+                bool in_selected_folder = (current_ancestors[d] == selected_ancestors[d]);
+                int target = selected_ancestors[d + 1];
+
+                if (in_selected_folder && target != -1 && !s_is_searching) {
+                    bool is_final_folder = (target == s->selected_index);
+
+                    if (i < target) {
+                        upper_col = CT.fs_tree;
+                        lower_col = CT.fs_tree;
+                        if (is_final_folder) spur_col = (Color){0, 0, 0, 0};
+                    } else if (i == target) {
+                        upper_col = CT.fs_tree;
+                        spur_col  = CT.fs_tree;
+                        if (is_final_folder) lower_col = (Color){0, 0, 0, 0};
+                    } else if (i > target) {
+                        if (is_final_folder) {
+                            upper_col = (Color){0, 0, 0, 0};
+                            lower_col = (Color){0, 0, 0, 0};
+                            spur_col  = (Color){0, 0, 0, 0};
+                        }
+                    }
+                }
+
+                if (is_visible) {
+                    if (d == D - 1) {
+                        if (spur_col.a > 0.0f)  quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, spur_col);
+                        if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col);
+                        if (parent_continues && lower_col.a > 0.0f) {
+                            quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col);
+                        }
+                    } else {
+                        if (parent_continues) {
+                            if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col);
+                            if (lower_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col);
+                        }
+                    }
+
+                    // OVERLAY ACTIVE SEARCH BEAM
+                    if (s_is_searching && in_selected_folder && target != -1) {
+                        float y_top = list_y;
+                        float y_mid = list_y - lh * 0.5f;
+                        float y_bot = list_y - lh;
+
+                        if (d == D - 1) {
+                            if (i < target) {
+                                float cy_bot = fmaxf(y_mid, anim_y);
+                                if (y_top > cy_bot) quad2D((vec2){line_x, cy_bot}, (vec2){1.0f, y_top - cy_bot}, CT.accent);
+                                if (parent_continues) {
+                                    float c_bot = fmaxf(y_bot, anim_y);
+                                    if (y_mid > c_bot) quad2D((vec2){line_x, c_bot}, (vec2){1.0f, y_mid - c_bot}, CT.accent);
+                                }
+                            } else if (i == target) {
+                                float cy_bot = fmaxf(y_mid, anim_y);
+                                if (y_top > cy_bot) quad2D((vec2){line_x, cy_bot}, (vec2){1.0f, y_top - cy_bot}, CT.accent);
+                                if (y_mid >= anim_y) {
+                                    quad2D((vec2){line_x, y_mid}, (vec2){10.0f, 1.0f}, CT.accent);
+                                }
+                            }
+                        } else {
+                            if (parent_continues && i < target) {
+                                float cy_bot_u = fmaxf(y_mid, anim_y);
+                                if (y_top > cy_bot_u) quad2D((vec2){line_x, cy_bot_u}, (vec2){1.0f, y_top - cy_bot_u}, CT.accent);
+
+                                float cy_bot_l = fmaxf(y_bot, anim_y);
+                                if (y_mid > cy_bot_l) quad2D((vec2){line_x, cy_bot_l}, (vec2){1.0f, y_mid - cy_bot_l}, CT.accent);
                             }
                         }
                     }
-                    s_last_clicked_item = -1;
+                }
+            }
+
+            if (is_visible) {
+                // Draw Icons
+                float icon_y = list_y - lh * 0.5f - 8.0f;
+                float current_x = row_x;
+
+                if (item->type == FILE_ITEM_DIR) {
+                    Texture2D* arrow = texture_pool_get(item->expanded ? s->icon_arrow_down : s->icon_arrow_right);
+                    if (arrow) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, arrow, (Color){1.0f,1.0f,1.0f,1.0f});
+                    current_x += 18.0f;
+
+                    Texture2D* folder = texture_pool_get(s->icon_folder);
+                    if (folder) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, folder, CT.accent);
+                    current_x += 20.0f;
                 } else {
-                    s_last_clicked_item = i;
-                    s_last_item_click_time = now;
+                    current_x += 18.0f;
+                    Texture2D* file_icon = texture_pool_get(s->icon_file);
+                    if (file_icon) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, file_icon, (Color){1.0f,1.0f,1.0f,1.0f});
+                    current_x += 20.0f;
                 }
+
+                // Text
+                text(editor.font, item->name, current_x, list_y - lh * 0.5f - 2.0f, selected ? CT.text : CT.text_dim);
+            }
+
+            list_y -= lh;
+        }
+    } // End of List Draw
+
+    // --- DRAW TITLE BAR ON TOP ---
+    exQuad2D((vec2){cx - PAD, tab_y}, (vec2){cw + PAD*2.0f, tab_h}, (vec4){8.0f, 8.0f, 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
+    text(editor.font, "FileSystem", cx, tab_y + tab_h * 0.5f - 2.0f, CT.text);
+
+    if (s_is_searching) {
+        char counter_str[32] = "0/0";
+        if (s_search_match_count > 0) {
+            snprintf(counter_str, sizeof(counter_str), "%d/%d", s_search_current_idx + 1, s_search_match_count);
+        }
+        float counter_text_w = measure_text_width(editor.font, counter_str, 1.0f);
+        float mc_w = counter_text_w + 16.0f;
+
+        float sb_x = cx + measure_text_width(editor.font, "FileSystem", 1.0f) + 20.0f;
+        float sb_w = cw - (sb_x - cx) - PAD - mc_w - 8.0f;
+
+        // Perfect Vertical Alignment of Input Box & Text
+        float sb_h = editor.font->ascent - editor.font->descent + 8.0f;
+        float sb_y = tab_y + (tab_h - sb_h) * 0.5f;
+        exQuad2D((vec2){sb_x, sb_y}, (vec2){sb_w, sb_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
+
+        // Render Emacs Block Cursor and Text in a single loop
+        extern float font_width(Font* font);
+        float cursor_w = font_width(editor.font);
+        float text_h = editor.font->ascent;
+        float cursor_h = sb_h;
+
+        // Adjusted baseline to bring text up inside the field properly
+        float ty = sb_y + (editor.font->descent * 2);
+
+        double time_since_key = glfwGetTime() - s_search_last_key_time;
+        bool cursor_visible = (time_since_key < 0.5) || (fmod(time_since_key, 1.0) < 0.5);
+
+        float cur_draw_x = sb_x + 8.0f;
+        int len = strlen(s_search_query);
+
+        for (int i = 0; i <= len; i++) {
+            bool is_cursor_pos = (i == s_search_cursor);
+            char c = (i < len) ? s_search_query[i] : '\0';
+
+            if (is_cursor_pos && cursor_visible) {
+                // Draw rectangular block cursor exactly the width of a whitespace
+                exQuad2D((vec2){cur_draw_x, sb_y}, (vec2){cursor_w, cursor_h}, (vec4){2.0f,2.0f,2.0f,2.0f}, 0.0f, CT.accent, CT.accent);
+            }
+
+            if (c != '\0') {
+                Color col = (is_cursor_pos && cursor_visible) ? CT.bg_deep : CT.accent;
+                float adv = character(editor.font, (uint32_t)c, cur_draw_x, ty, col);
+                cur_draw_x += adv > 0.0f ? adv : cursor_w;
+            } else if (is_cursor_pos) {
+                break;
             }
         }
 
-        // Draw Godot-style Tree Lines
-        for (int d = 0; d < D; d++) {
-            float line_x = cx + d * 16.0f + 8.0f;
-
-            bool parent_continues = false;
-            for (int j = i + 1; j < s->item_count; j++) {
-                if (s->items[j].depth <= d) break; // Parent closed
-                if (s->items[j].depth == d + 1) { parent_continues = true; break; }
-            }
-
-            Color upper_col = CT.fs_tree_dimmed;
-            Color lower_col = CT.fs_tree_dimmed;
-            Color spur_col  = CT.fs_tree_dimmed;
-
-            bool in_selected_folder = (current_ancestors[d] == selected_ancestors[d]);
-            int target = selected_ancestors[d + 1];
-
-            if (in_selected_folder && target != -1) {
-                bool is_final_folder = (target == s->selected_index);
-
-                if (i < target) {
-                    // Active line bypasses earlier siblings
-                    upper_col = CT.fs_tree;
-                    lower_col = CT.fs_tree;
-                    if (is_final_folder) spur_col = (Color){0, 0, 0, 0}; // Hide spur for unselected siblings
-                } else if (i == target) {
-                    // Active line turns into the target
-                    upper_col = CT.fs_tree;
-                    spur_col  = CT.fs_tree;
-                    if (is_final_folder) lower_col = (Color){0, 0, 0, 0}; // Stop trunk at selected file
-                } else if (i > target) {
-                    if (is_final_folder) {
-                        // Completely hide tree for files after the selected one
-                        upper_col = (Color){0, 0, 0, 0};
-                        lower_col = (Color){0, 0, 0, 0};
-                        spur_col  = (Color){0, 0, 0, 0};
-                    }
-                }
-            }
-
-            if (d == D - 1) {
-                if (spur_col.a > 0.0f)  quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, spur_col); // horizontal spur
-                if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col); // upper vertical
-                if (parent_continues && lower_col.a > 0.0f) {
-                    quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col); // lower vertical
-                }
-            } else {
-                if (parent_continues) {
-                    // Render bypass halves separately to support two-tone lines flawlessly
-                    if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col);
-                    if (lower_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col);
-                }
-            }
-        }
-
-        // Draw Icons
-        float icon_y = list_y - lh * 0.5f - 8.0f;
-        float current_x = row_x;
-
-        if (item->type == FILE_ITEM_DIR) {
-            Texture2D* arrow = texture_pool_get(item->expanded ? s->icon_arrow_down : s->icon_arrow_right);
-            if (arrow) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, arrow, (Color){1.0f,1.0f,1.0f,1.0f});
-            current_x += 18.0f;
-
-            Texture2D* folder = texture_pool_get(s->icon_folder);
-            if (folder) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, folder, CT.accent);
-            current_x += 20.0f;
-        } else {
-            current_x += 18.0f; // Align with folders
-            Texture2D* file_icon = texture_pool_get(s->icon_file);
-            if (file_icon) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, file_icon, (Color){1.0f,1.0f,1.0f,1.0f});
-            current_x += 20.0f;
-        }
-
-        // Text
-        text(editor.font, item->name, current_x, list_y - lh * 0.5f - 2.0f, selected ? CT.text : CT.text_dim);
-
-        list_y -= lh;
+        // Draw the Match Counter Badge
+        float mc_h = tab_h - 8.0f;
+        float mc_x = sb_x + sb_w + 8.0f;
+        float mc_y = tab_y + 4.0f;
+        exQuad2D((vec2){mc_x, mc_y}, (vec2){mc_w, mc_h}, (vec4){6.0f, 6.0f, 6.0f, 6.0f}, 0.0f, CT.accent, CT.accent);
+        text(editor.font, counter_str, mc_x + 8.0f, mc_y + mc_h * 0.5f - 2.0f, CT.bg);
     }
 }
 
@@ -1309,6 +1524,165 @@ static void toggle_right(void)  { editor_toggle_panel(PANEL_RIGHT);  }
 static void toggle_top(void)    { editor_toggle_panel(PANEL_TOP);    }
 static void toggle_left(void)   { editor_toggle_panel(PANEL_LEFT);   }
 
+extern void file_manager_refresh(void);
+
+// Fast, portable case-insensitive substring search
+static bool str_contains_ci(const char* haystack, const char* needle) {
+    if (!*needle) return true;
+    for (const char* h = haystack; *h; h++) {
+        char hc = (*h >= 'A' && *h <= 'Z') ? *h + 32 : *h;
+        char nc = (*needle >= 'A' && *needle <= 'Z') ? *needle + 32 : *needle;
+        if (hc == nc) {
+            const char* h1 = h + 1;
+            const char* n1 = needle + 1;
+            while (*n1) {
+                char h1c = (*h1 >= 'A' && *h1 <= 'Z') ? *h1 + 32 : *h1;
+                char n1c = (*n1 >= 'A' && *n1 <= 'Z') ? *n1 + 32 : *n1;
+                if (h1c != n1c) break;
+                h1++;
+                n1++;
+            }
+            if (!*n1) return true;
+        }
+    }
+    return false;
+}
+
+static void update_search_scroll(void) {
+    FileManagerState* s = &editor.file_manager;
+    if (s_search_match_count > 0 && s_search_current_idx >= 0) {
+        s_search_prev_match_idx = s->selected_index > 0 ? s->selected_index : 0;
+        s->selected_index = s_search_matches[s_search_current_idx];
+        float lh = editor.font->ascent - editor.font->descent + LH_EXTRA + 6.0f;
+        float target_y_pos = s->selected_index * lh;
+        float ch = editor.panels[PANEL_BOTTOM].size - 32.0f - 28.0f;
+
+        s_fs_scroll_start = s_fs_scroll_y;
+        s_fs_scroll_target = target_y_pos - (ch * 0.5f);
+        if (s_fs_scroll_target < 0.0f) s_fs_scroll_target = 0.0f;
+        s_fs_scroll_t = 0.0f; // Trigger ease!
+
+        s_search_anim_t = 0.0f; // Restart trace animation
+    }
+}
+
+void search_next(void) {
+    if (!s_is_searching || s_search_match_count == 0) return;
+    s_search_current_idx = (s_search_current_idx + 1) % s_search_match_count;
+    update_search_scroll();
+}
+
+void search_prev(void) {
+    if (!s_is_searching || s_search_match_count == 0) return;
+    s_search_current_idx = (s_search_current_idx - 1 + s_search_match_count) % s_search_match_count;
+    update_search_scroll();
+}
+
+void search_execute(void) {
+    FileManagerState* s = &editor.file_manager;
+    s_search_match_count = 0;
+    s_search_current_idx = -1;
+    if (strlen(s_search_query) == 0) return;
+
+    FsCache* cache = get_or_build_cache(s->current_path, false);
+    char best_matches[256][256];
+
+    for(int i = 0; i < cache->count; i++) {
+        const char* filename = strrchr(cache->paths[i], '/');
+        filename = filename ? filename + 1 : cache->paths[i];
+
+        if (str_contains_ci(filename, s_search_query)) {
+            snprintf(best_matches[s_search_match_count], 256, "%s/%s", s->current_path, cache->paths[i]);
+            s_search_match_count++;
+            if (s_search_match_count >= 256) break;
+        }
+    }
+
+    if (s_search_match_count > 0) {
+        // Expand parents for ALL matches
+        for (int m = 0; m < s_search_match_count; m++) {
+            char temp[256];
+            strncpy(temp, best_matches[m], sizeof(temp));
+            char* last_slash;
+            while ((last_slash = strrchr(temp, '/')) != NULL) {
+                *last_slash = '\0';
+                if (strlen(temp) < strlen(s->current_path)) break;
+
+                bool found = false;
+                for(int i = 0; i < s->expanded_count; i++) {
+                    if (strcmp(s->expanded_paths[i], temp) == 0) { found = true; break; }
+                }
+                if (!found && s->expanded_count < 64) {
+                    strncpy(s->expanded_paths[s->expanded_count++], temp, 255);
+                }
+            }
+        }
+        file_manager_refresh();
+
+        // Map string matches to rendered UI indices
+        int mapped_count = 0;
+        for (int m = 0; m < s_search_match_count; m++) {
+            for(int i = 0; i < s->item_count; i++) {
+                if (strcmp(s->items[i].full_path, best_matches[m]) == 0) {
+                    s_search_matches[mapped_count++] = i;
+                    break;
+                }
+            }
+        }
+        s_search_match_count = mapped_count;
+
+        if (s_search_match_count > 0) {
+            s_search_current_idx = 0;
+            update_search_scroll();
+        }
+    }
+}
+
+static void search_start(void) {
+    FileManagerState* s = &editor.file_manager;
+    if (s_is_searching) return;
+    s_is_searching = true;
+    s_search_query[0] = '\0';
+    s_search_cursor = 0;
+    s_search_anim_t = 0.0f;
+    s_search_match_count = 0;
+    s_search_current_idx = -1;
+    s_search_last_key_time = glfwGetTime();
+    s_search_prev_match_idx = 0;
+
+    s_saved_expanded_count = s->expanded_count;
+    for(int i=0; i<s->expanded_count; i++) strcpy(s_saved_expanded_paths[i], s->expanded_paths[i]);
+    s_saved_selected_index = s->selected_index;
+    s_saved_scroll_y = s_fs_scroll_y;
+    s_saved_scroll_target = s_fs_scroll_target;
+    s_fs_scroll_start = s_fs_scroll_y;
+    s_fs_scroll_t = 1.0f;
+}
+
+void search_cancel(void) {
+    if (!s_is_searching) return;
+    s_is_searching = false;
+    FileManagerState* s = &editor.file_manager;
+    s->expanded_count = s_saved_expanded_count;
+    for(int i=0; i<s->expanded_count; i++) strcpy(s->expanded_paths[i], s_saved_expanded_paths[i]);
+    s->selected_index = s_saved_selected_index;
+    s_search_match_count = 0;
+    s_search_current_idx = -1;
+
+    s_fs_scroll_y = s_saved_scroll_y;
+    s_fs_scroll_target = s_saved_scroll_target;
+    s_fs_scroll_start = s_saved_scroll_y;
+    s_fs_scroll_t = 1.0f; // Instant revert! No easing!
+
+    file_manager_refresh();
+}
+
+static void search_commit(void) {
+    if (!s_is_searching) return;
+    s_is_searching = false;
+    search_execute(); // final resolve
+}
+
 static void cb_open_color_picker(void) {
     if (editor.inspector.selected_mesh_index < 0 || editor.inspector.selected_mesh_index >= (int)scene.meshes.count) {
         message(MSG_ERROR, "No mesh selected! Cannot pick color.");
@@ -1415,6 +1789,11 @@ void editor_init(void) {
     keychord_bind(&keymap, "M-h", toggle_left,   "Toggle hierarchy",    PRESS);
     keychord_bind(&keymap, "c", cb_open_color_picker, "Pick Mesh Color", PRESS);
 
+    // Search keybinds!
+    keychord_bind(&keymap, "C-s", search_start, "Start search", PRESS);
+    keychord_bind(&keymap, "C-g", search_cancel, "Cancel search", PRESS);
+    keychord_bind(&keymap, "RET", search_commit, "Commit search", PRESS);
+
     colorpicker_init(&s_color_picker);
     image_viewer_init(&s_image_viewer);
 
@@ -1444,11 +1823,149 @@ void editor_update(void) {
     if (s_color_picker.visible) {
         colorpicker_update(&s_color_picker, dt, s_ui_mx, s_ui_my);
     }
+
     if (s_image_viewer.visible) {
         image_viewer_update(&s_image_viewer, dt, s_ui_mx, s_ui_my);
     }
 
+    if (s_is_searching) {
+        extern VulkanContext context;
+        GLFWwindow* win = context.window;
+        static float key_timer = 0.0f;
+        key_timer -= dt;
+
+        if (key_timer <= 0.0f) {
+            bool ctrl = glfwGetKey(win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+            bool shift = glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+
+            if (ctrl) {
+                if (glfwGetKey(win, GLFW_KEY_G) == GLFW_PRESS) {
+                    extern void search_cancel(void);
+                    search_cancel();
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.3f;
+                } else if (glfwGetKey(win, GLFW_KEY_N) == GLFW_PRESS) {
+                    extern void search_next(void);
+                    search_next();
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.2f;
+                } else if (glfwGetKey(win, GLFW_KEY_P) == GLFW_PRESS) {
+                    extern void search_prev(void);
+                    search_prev();
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.2f;
+                } else if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) {
+                    s_search_cursor = 0;
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.15f;
+                } else if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) {
+                    s_search_cursor = strlen(s_search_query);
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.15f;
+                } else if (glfwGetKey(win, GLFW_KEY_B) == GLFW_PRESS) {
+                    if (s_search_cursor > 0) s_search_cursor--;
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.1f;
+                } else if (glfwGetKey(win, GLFW_KEY_F) == GLFW_PRESS) {
+                    if (s_search_cursor < (int)strlen(s_search_query)) s_search_cursor++;
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.1f;
+                } else if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) {
+                    int len = strlen(s_search_query);
+                    if (s_search_cursor < len) {
+                        memmove(&s_search_query[s_search_cursor], &s_search_query[s_search_cursor+1], len - s_search_cursor);
+                        extern void search_execute(void);
+                        search_execute();
+                    }
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.1f;
+                } else if (glfwGetKey(win, GLFW_KEY_K) == GLFW_PRESS) {
+                    s_search_query[s_search_cursor] = '\0';
+                    extern void search_execute(void);
+                    search_execute();
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.2f;
+                } else if (glfwGetKey(win, GLFW_KEY_BACKSPACE) == GLFW_PRESS) {
+                    while (s_search_cursor > 0 && s_search_query[s_search_cursor - 1] == ' ') {
+                        int len = strlen(s_search_query);
+                        memmove(&s_search_query[s_search_cursor-1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
+                        s_search_cursor--;
+                    }
+                    while (s_search_cursor > 0 && s_search_query[s_search_cursor - 1] != ' ') {
+                        int len = strlen(s_search_query);
+                        memmove(&s_search_query[s_search_cursor-1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
+                        s_search_cursor--;
+                    }
+                    extern void search_execute(void);
+                    search_execute();
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.15f;
+                }
+            } else {
+                if (glfwGetKey(win, GLFW_KEY_ENTER) == GLFW_PRESS) {
+                    extern void search_commit(void);
+                    search_commit();
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.3f;
+                } else if (glfwGetKey(win, GLFW_KEY_BACKSPACE) == GLFW_PRESS) {
+                    if (s_search_cursor > 0) {
+                        int len = strlen(s_search_query);
+                        memmove(&s_search_query[s_search_cursor-1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
+                        s_search_cursor--;
+                        extern void search_execute(void);
+                        search_execute();
+                    }
+                    s_search_last_key_time = glfwGetTime();
+                    key_timer = 0.08f;
+                } else {
+                    char c = '\0';
+                    for (int k = GLFW_KEY_SPACE; k <= GLFW_KEY_GRAVE_ACCENT; k++) {
+                        if (glfwGetKey(win, k) == GLFW_PRESS) {
+                            if (k >= GLFW_KEY_A && k <= GLFW_KEY_Z) c = shift ? 'A' + (k - GLFW_KEY_A) : 'a' + (k - GLFW_KEY_A);
+                            else if (k >= GLFW_KEY_0 && k <= GLFW_KEY_9) c = shift ? ")!@#$%^&*("[k - GLFW_KEY_0] : '0' + (k - GLFW_KEY_0);
+                            else if (k == GLFW_KEY_SPACE) c = ' ';
+                            else if (k == GLFW_KEY_COMMA) c = shift ? '<' : ',';
+                            else if (k == GLFW_KEY_PERIOD) c = shift ? '>' : '.';
+                            else if (k == GLFW_KEY_MINUS) c = shift ? '_' : '-';
+                            else if (k == GLFW_KEY_SLASH) c = shift ? '?' : '/';
+
+                            if (c != '\0') {
+                                int len = strlen(s_search_query);
+                                if (len < 63) {
+                                    memmove(&s_search_query[s_search_cursor + 1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
+                                    s_search_query[s_search_cursor] = c;
+                                    s_search_cursor++;
+                                    extern void search_execute(void);
+                                    search_execute();
+                                }
+                                s_search_last_key_time = glfwGetTime();
+                                key_timer = 0.08f;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (s_search_anim_t < 1.0f) {
+            s_search_anim_t += 3.0f * dt;
+        }
+    }
+
+    // High-End UI Easing: 333ms Cubic Out for a highly tactile scroll
+    if (s_fs_scroll_t < 1.0f) {
+        s_fs_scroll_t += 3.0f * dt;
+        if (s_fs_scroll_t >= 1.0f) {
+            s_fs_scroll_t = 1.0f;
+            s_fs_scroll_y = s_fs_scroll_target;
+        } else {
+            s_fs_scroll_y = s_fs_scroll_start + (s_fs_scroll_target - s_fs_scroll_start) * ease_cubic_out(s_fs_scroll_t);
+        }
+    }
+
     float msg_h = editor.font ? (editor.font->ascent - editor.font->descent + 32.0f) : 50.0f;
+
     if (s_message.active || s_message.y > -(msg_h + 5.0f)) {
         float w = measure_text_width(editor.font, s_message.text, 1.0f) + 32.0f;
 
