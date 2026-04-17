@@ -39,9 +39,7 @@ void camera_update(Camera* cam) {
         // Update view matrix to look at the target point
         glm_lookat(cam->position, cam->look_at, cam->up, cam->view_matrix);
     } else {
-        // FPS MODE: Keep default Up vector locked to world Y to prevent rolling
-        glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, cam->up);
-
+        // FPS MODE: Use the dynamic 360-degree UP vector to support inverted panning
         vec3 front;
         front[0] = cos(glm_rad(cam->yaw)) * cos(glm_rad(cam->pitch));
         front[1] = sin(glm_rad(cam->pitch));
@@ -69,12 +67,15 @@ void camera_orbit_around_point(Camera* cam, vec3 pivot_point, float delta_yaw, f
     glm_vec3_sub(cam->position, pivot_point, pivot_to_cam);
     float distance = glm_vec3_norm(pivot_to_cam);
 
+    float old_pitch = cam->pitch;
     cam->yaw += glm_deg(delta_yaw);
     cam->pitch += glm_deg(delta_pitch);
 
-    // Clamp manual mouse orbit pitch to prevent going upside down
-    if (cam->pitch > 89.9f) cam->pitch = 89.9f;
-    if (cam->pitch < -89.9f) cam->pitch = -89.9f;
+    // Prevent manually crossing the poles, but allow staying in the upside-down hemisphere
+    if (old_pitch <= 90.0f && cam->pitch > 90.0f) cam->pitch = 89.9f;
+    if (old_pitch >= 90.0f && cam->pitch < 90.0f) cam->pitch = 90.1f;
+    if (old_pitch >= -90.0f && cam->pitch < -90.0f) cam->pitch = -89.9f;
+    if (old_pitch <= -90.0f && cam->pitch > -90.0f) cam->pitch = -90.1f;
 
     while (cam->yaw > 180.0f) cam->yaw -= 360.0f;
     while (cam->yaw < -180.0f) cam->yaw += 360.0f;
@@ -158,10 +159,19 @@ void camera_process_mouse(Camera* cam, double xoffset, double yoffset) {
         printf("Orbit mode disabled - manual camera rotation\n");
     }
 
+    // If the camera is currently upside down, normalize it to the right-side-up equivalent view
+    if (cam->pitch > 90.0f) {
+        cam->pitch = 180.0f - cam->pitch;
+        cam->yaw += 180.0f;
+    } else if (cam->pitch < -90.0f) {
+        cam->pitch = -180.0f - cam->pitch;
+        cam->yaw += 180.0f;
+    }
+
     cam->yaw += xoffset;
     cam->pitch += yoffset;
 
-    // Clamp manual mouse pitch to prevent going upside down
+    // Strict clamp for FPS mode: never allow looking past straight up or straight down
     if (cam->pitch > 89.9f) cam->pitch = 89.9f;
     if (cam->pitch < -89.9f) cam->pitch = -89.9f;
 
