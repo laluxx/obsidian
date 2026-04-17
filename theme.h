@@ -32,7 +32,7 @@ typedef struct {
     Color modeline_border;
     Color show_paren_match;
     Color isearch_highlight;
-    Color minibuffer_prompt;
+    Color prompt;
     Color region_fg;
     Color region_bg;
     Color type;

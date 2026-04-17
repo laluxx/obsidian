@@ -9,6 +9,7 @@
 #include "colorpicker.h"
 #include "easing.h"
 #include "vulkan_setup.h"
+#include "vertico.h"
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <GLFW/glfw3.h>
+#include <ctype.h>
 
 ///  Globals
 
@@ -442,12 +444,13 @@ static void panel_get_rect(Panel* p,
         }
 
         case PANEL_TOP: {
-            // Slides down from above the screen.
-            // When t=1: y = sh - size (top edge flush with viewport top).
-            // When t=0: y = sh (completely off-screen above).
+            // Centered dropdown console (Vertico Palette)
             float h = p->size;
-            *out_x = 0.0f;
-            *out_w = sw;
+            float w = sw * 0.45f;
+            if (w < 450.0f) w = 450.0f;
+            if (w > sw - 40.0f) w = sw - 40.0f;
+            *out_x = (sw - w) * 0.5f; // Centered
+            *out_w = w;
             *out_h = h;
             *out_y = lerpf(sh, sh - h, et);
             break;
@@ -991,6 +994,39 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
 
 void file_manager_refresh(void);
 
+static void render_emacs_input_box(float box_x, float box_y, float box_w, float box_h,
+                                   const char* query, int cursor_pos, double last_key_time) {
+    exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
+    if (!editor.font) return;
+
+    float cursor_w = font_width(editor.font);
+    float cursor_h = box_h;
+    float ty = box_y + (editor.font->descent * 2);
+
+    double time_since_key = glfwGetTime() - last_key_time;
+    bool cursor_visible = (time_since_key < 0.5) || (fmod(time_since_key, 1.0) < 0.5);
+
+    float cur_draw_x = box_x + 8.0f;
+    int len = strlen(query);
+
+    for (int i = 0; i <= len; i++) {
+        bool is_cursor_pos = (i == cursor_pos);
+        char c = (i < len) ? query[i] : '\0';
+
+        if (is_cursor_pos && cursor_visible) {
+            exQuad2D((vec2){cur_draw_x, box_y}, (vec2){cursor_w, cursor_h}, (vec4){2.0f, 2.0f, 2.0f, 2.0f}, 0.0f, CT.accent, CT.accent);
+        }
+
+        if (c != '\0') {
+            Color col = (is_cursor_pos && cursor_visible) ? CT.bg_deep : CT.accent;
+            float adv = character(editor.font, (uint32_t)c, cur_draw_x, ty, col);
+            cur_draw_x += adv > 0.0f ? adv : cursor_w;
+        } else if (is_cursor_pos) {
+            break;
+        }
+    }
+}
+
 static void render_filesystem_content(float cx, float cy, float cw, float ch) {
     FileManagerState* s = &editor.file_manager;
 
@@ -1244,39 +1280,8 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
         // Perfect Vertical Alignment of Input Box & Text
         float sb_h = editor.font->ascent - editor.font->descent + 8.0f;
         float sb_y = tab_y + (tab_h - sb_h) * 0.5f;
-        exQuad2D((vec2){sb_x, sb_y}, (vec2){sb_w, sb_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
 
-        // Render Emacs Block Cursor and Text in a single loop
-        float cursor_w = font_width(editor.font);
-        float text_h = editor.font->ascent;
-        float cursor_h = sb_h;
-
-        // Adjusted baseline to bring text up inside the field properly
-        float ty = sb_y + (editor.font->descent * 2);
-
-        double time_since_key = glfwGetTime() - s_search_last_key_time;
-        bool cursor_visible = (time_since_key < 0.5) || (fmod(time_since_key, 1.0) < 0.5);
-
-        float cur_draw_x = sb_x + 8.0f;
-        int len = strlen(s_search_query);
-
-        for (int i = 0; i <= len; i++) {
-            bool is_cursor_pos = (i == s_search_cursor);
-            char c = (i < len) ? s_search_query[i] : '\0';
-
-            if (is_cursor_pos && cursor_visible) {
-                // Draw rectangular block cursor exactly the width of a whitespace
-                exQuad2D((vec2){cur_draw_x, sb_y}, (vec2){cursor_w, cursor_h}, (vec4){2.0f,2.0f,2.0f,2.0f}, 0.0f, CT.accent, CT.accent);
-            }
-
-            if (c != '\0') {
-                Color col = (is_cursor_pos && cursor_visible) ? CT.bg_deep : CT.accent;
-                float adv = character(editor.font, (uint32_t)c, cur_draw_x, ty, col);
-                cur_draw_x += adv > 0.0f ? adv : cursor_w;
-            } else if (is_cursor_pos) {
-                break;
-            }
-        }
+        render_emacs_input_box(sb_x, sb_y, sb_w, sb_h, s_search_query, s_search_cursor, s_search_last_key_time);
 
         // Draw the Match Counter Badge
         float mc_h = tab_h - 8.0f;
@@ -1284,6 +1289,151 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
         float mc_y = tab_y + 4.0f;
         exQuad2D((vec2){mc_x, mc_y}, (vec2){mc_w, mc_h}, (vec4){6.0f, 6.0f, 6.0f, 6.0f}, 0.0f, CT.accent, CT.accent);
         text(editor.font, counter_str, mc_x + 8.0f, mc_y + mc_h * 0.5f - 2.0f, CT.bg);
+    }
+}
+
+extern size_t vertico_cursor;
+extern double vertico_last_key_time;
+
+static void render_text_with_highlights(Font* font, const char* inputText, float x, float y,
+                                        const char* pattern, Color default_color) {
+    if (!pattern || pattern[0] == '\0') {
+        text(font, inputText, x, y, default_color);
+        return;
+    }
+
+    char text_lower[256], pattern_lower[256];
+    strncpy(text_lower, inputText, sizeof(text_lower) - 1);
+    strncpy(pattern_lower, pattern, sizeof(pattern_lower) - 1);
+    text_lower[sizeof(text_lower) - 1] = '\0';
+    pattern_lower[sizeof(pattern_lower) - 1] = '\0';
+
+    for (char* p = text_lower; *p; p++) *p = tolower(*p);
+    for (char* p = pattern_lower; *p; p++) *p = tolower(*p);
+
+    char* pattern_words[4];
+    int word_count = 0;
+    char* pattern_copy = strdup(pattern_lower);
+    char* token = strtok(pattern_copy, " ");
+
+    while (token && word_count < 4) {
+        pattern_words[word_count++] = token;
+        token = strtok(NULL, " ");
+    }
+
+    int highlight[256] = {0};
+
+    for (int word_idx = 0; word_idx < word_count; word_idx++) {
+        const char* word = pattern_words[word_idx];
+        int word_len = strlen(word);
+        const char* pos = text_lower;
+        while ((pos = strstr(pos, word)) != NULL) {
+            int offset = pos - text_lower;
+            for (int i = 0; i < word_len; i++) {
+                if (highlight[offset + i] == 0) {
+                    highlight[offset + i] = word_idx + 1;
+                }
+            }
+            pos++;
+        }
+    }
+    free(pattern_copy);
+
+    Color match_colors_fg[4] = { CT.orderless_match_face_0_fg, CT.orderless_match_face_1_fg, CT.orderless_match_face_2_fg, CT.orderless_match_face_3_fg };
+    Color match_colors_bg[4] = { CT.orderless_match_face_0_bg, CT.orderless_match_face_1_bg, CT.orderless_match_face_2_bg, CT.orderless_match_face_3_bg };
+
+    float current_x = x;
+    for (size_t i = 0; inputText[i] != '\0'; i++) {
+        float char_width = character_width(font, inputText[i]);
+        if (highlight[i] > 0) {
+            int color_idx = highlight[i] - 1;
+            float bg_height = font->ascent - font->descent + 4.0f;
+            float bg_y = y - font->descent - 2.0f;
+            exQuad2D((vec2){current_x, bg_y}, (vec2){char_width, bg_height}, (vec4){2.0f, 2.0f, 2.0f, 2.0f}, 0.0f, match_colors_bg[color_idx], match_colors_bg[color_idx]);
+
+            char single_char[2] = {inputText[i], '\0'};
+            text(font, single_char, current_x, y, match_colors_fg[color_idx]);
+        } else {
+            char single_char[2] = {inputText[i], '\0'};
+            text(font, single_char, current_x, y, default_color);
+        }
+        current_x += char_width;
+    }
+}
+
+static void render_vertico_panel(Panel* panel, float px, float py, float pw, float ph) {
+    if (!editor.font) return;
+    float cx, cy, cw, ch;
+    content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
+
+    panel->title = ""; // Re-point to an empty string literal to suppress the chrome title
+
+    float lh = editor.font->ascent - editor.font->descent + LH_EXTRA;
+
+    // The title bar is physically located at the BOTTOM of the top panel
+    float tab_y = py;
+    float tab_h = TITLE_H;
+
+    // Render the dynamic prompt inside the title bar (without the match count)
+    char header[128];
+    if (vertico.is_active) {
+        snprintf(header, sizeof(header), "%s:", vertico.category);
+    } else {
+        snprintf(header, sizeof(header), "Console:");
+    }
+
+    float header_w = measure_text_width(editor.font, header, 1.0f);
+
+    // Match the FileSystem titlebar text baseline
+    float text_y = tab_y + tab_h * 0.5f;
+    text(editor.font, header, px + PAD, text_y, CT.prompt);
+
+    // Calculate Match Counter Badge
+    char counter_str[32] = "0/0";
+    if (vertico.is_active && vertico.filtered_count > 0) {
+        snprintf(counter_str, sizeof(counter_str), "%d/%zu", vertico.selected_index + 1, vertico.filtered_count);
+    }
+    float counter_text_w = measure_text_width(editor.font, counter_str, 1.0f);
+    float mc_w = counter_text_w + 16.0f;
+
+    // Position input box immediately after the prompt, leaving room for the badge
+    float input_h = editor.font->ascent - editor.font->descent + 8.0f;
+    float input_y = tab_y + (tab_h - input_h) * 0.5f;
+    float box_x = px + PAD + header_w + 8.0f;
+    float box_w = pw - (box_x - px) - PAD - mc_w - 8.0f;
+
+    render_emacs_input_box(box_x, input_y, box_w, input_h, vertico.input, vertico_cursor, vertico_last_key_time);
+
+    // Draw the Match Counter Badge
+    float mc_h = tab_h - 8.0f;
+    float mc_x = box_x + box_w + 8.0f;
+    float mc_y = tab_y + 4.0f;
+    exQuad2D((vec2){mc_x, mc_y}, (vec2){mc_w, mc_h}, (vec4){6.0f, 6.0f, 6.0f, 6.0f}, 0.0f, CT.accent, CT.accent);
+    text(editor.font, counter_str, mc_x + 8.0f, mc_y + mc_h * 0.5f - 2.0f, CT.bg);
+
+    // Candidates list - render downwards starting from the top of the content area
+    int visible_count = vertico.count;
+    if (vertico.filtered_count < (size_t)vertico.count) visible_count = vertico.filtered_count;
+
+    float row_y = cy + ch - lh;
+    for (int i = 0; i < visible_count; i++) {
+        int idx = vertico.scroll_offset + i;
+        if (idx >= (int)vertico.filtered_count) break;
+
+        bool is_selected = ((int)idx == (int)vertico.selected_index);
+        if (is_selected) {
+            exQuad2D((vec2){cx - 4.0f, row_y - editor.font->descent - 2.0f}, (vec2){cw + 8.0f, lh}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.vertico_current, CT.vertico_current);
+        }
+
+        VerticoCandidate* candidate = &vertico.filtered[idx];
+        render_text_with_highlights(editor.font, candidate->text, cx, row_y, vertico.input, is_selected ? CT.text : CT.text_dim);
+
+        if (candidate->annotation[0] != '\0') {
+            float ann_w = measure_text_width(editor.font, candidate->annotation, 1.0f);
+            text(editor.font, candidate->annotation, cx + cw - ann_w, row_y, CT.comment);
+        }
+
+row_y -= lh;
     }
 }
 
@@ -1302,21 +1452,17 @@ static void render_right_panel(Panel* panel, float px, float py, float pw, float
     if (split_hovered && s_ui_mclicked && s_ui_active_id == NULL) {
         double now = glfwGetTime();
         if (editor.fs_collapsed) {
-            // Single click to expand
             editor.fs_collapsed = false;
             editor.fs_split_start = editor.inspector_fs_split;
             editor.fs_split_target = editor.fs_split_saved > 0.0f ? editor.fs_split_saved : 0.5f;
             editor.fs_anim_t = 0.0f;
         } else if (now - editor.last_tab_click_time < 0.3) {
-            // Double click to collapse
             editor.fs_collapsed = true;
             editor.fs_split_saved = editor.inspector_fs_split;
             editor.fs_split_start = editor.inspector_fs_split;
-            // Target split pushes the tab to the very bottom
             editor.fs_split_target = 1.0f - (TITLE_H / ch);
             editor.fs_anim_t = 0.0f;
         } else {
-            // Start drag
             s_ui_active_id = &editor.inspector_fs_split;
             s_ui_drag_start_val = editor.inspector_fs_split;
             s_ui_drag_start_y = (float)s_ui_my;
@@ -1326,7 +1472,6 @@ static void render_right_panel(Panel* panel, float px, float py, float pw, float
 
     if (s_ui_active_id == &editor.inspector_fs_split) {
         float delta = ((float)s_ui_my - s_ui_drag_start_y) / ch;
-        // Limit drag so tab doesn't go below the screen
         float max_split = 1.0f - (TITLE_H / ch);
         editor.inspector_fs_split = clampf(s_ui_drag_start_val - delta, 0.1f, max_split);
         editor.fs_split_target = editor.inspector_fs_split;
@@ -1335,25 +1480,19 @@ static void render_right_panel(Panel* panel, float px, float py, float pw, float
         split_y = cy + ch * (1.0f - editor.inspector_fs_split);
     }
 
-    // Render Inspector (Top Half)
     float insp_ch = (cy + ch) - split_y;
     if (insp_ch > 20.0f) {
         render_inspector_content(cx, split_y, cw, insp_ch);
     }
 
-    // Render FileSystem (Bottom Half)
     float fs_ch = split_y - cy;
     if (fs_ch > 20.0f) {
         render_filesystem_content(cx, cy, cw, fs_ch);
     }
 }
 
-///  Hierarchy  (Left panel)
-
-static void render_hierarchy(Panel* panel,
-                              float px, float py, float pw, float ph) {
+static void render_hierarchy(Panel* panel, float px, float py, float pw, float ph) {
     if (!editor.font) return;
-
     float cx, cy, cw, ch;
     content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
 
@@ -1366,7 +1505,6 @@ static void render_hierarchy(Panel* panel,
     }
 
     float lh   = editor.font->ascent - editor.font->descent + LH_EXTRA;
-    // List items from top down (each item decreases y)
     float row  = cy + ch - PAD;
 
     for (int i = 0; i < count; i++) {
@@ -1376,14 +1514,11 @@ static void render_hierarchy(Panel* panel,
         bool selected  = (i == s->selected_index);
 
         if (selected) {
-            // Highlight bar
             float bar_y = row - editor.font->descent - 2.0f;
             exQuad2D((vec2){cx - 6.0f, bar_y}, (vec2){cw + 12.0f, lh + 2.0f}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
-            // Accent left stripe
             quad2D((vec2){cx - 6.0f, bar_y}, (vec2){3.0f, lh + 2.0f}, CT.accent);
         }
 
-        // Alpha-mode dot (3×3 square)
         Color dot;
         if      (m->alpha_mode == 0) dot = CT.success;
         else if (m->alpha_mode == 1) dot = CT.error;
@@ -1400,12 +1535,6 @@ static void render_hierarchy(Panel* panel,
     }
 }
 
-///  File Manager  (Bottom panel)
-
-#define FM_TILE_W    110.0f
-#define FM_TILE_H     52.0f
-#define FM_TILE_GAP    8.0f
-
 static void render_file_manager(Panel* panel, float px, float py, float pw, float ph) {
     if (!editor.font) return;
     float cx, cy, cw, ch;
@@ -1413,20 +1542,7 @@ static void render_file_manager(Panel* panel, float px, float py, float pw, floa
     text(editor.font, "— bottom panel coming soon —", cx, cy + ch - PAD, CT.text_dim);
 }
 
-///  Console
-
-static void render_placeholder(Panel* panel,
-                                float px, float py, float pw, float ph) {
-    if (!editor.font) return;
-
-    float cx, cy, cw, ch;
-    content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
-
-    text(editor.font, "— console coming soon —", cx, cy + ch - PAD, CT.text_dim);
-}
-
 /// File Manager
-
 // Native POSIX case-insensitive sort, prioritizing folders
 static int compare_file_items(const void* a, const void* b) {
     const FileItem* fa = (const FileItem*)a;
@@ -1649,6 +1765,43 @@ void editor_search_backspace(void) {
     }
 }
 
+void editor_search_cursor_left(void) {
+    if (s_search_cursor > 0) s_search_cursor--;
+    s_search_last_key_time = glfwGetTime();
+}
+
+void editor_search_cursor_right(void) {
+    if (s_search_cursor < (int)strlen(s_search_query)) s_search_cursor++;
+    s_search_last_key_time = glfwGetTime();
+}
+
+void editor_search_cursor_start(void) {
+    s_search_cursor = 0;
+    s_search_last_key_time = glfwGetTime();
+}
+
+void editor_search_cursor_end(void) {
+    s_search_cursor = strlen(s_search_query);
+    s_search_last_key_time = glfwGetTime();
+}
+
+void editor_search_delete_char(void) {
+    int len = strlen(s_search_query);
+    if (s_search_cursor < len) {
+        memmove(&s_search_query[s_search_cursor], &s_search_query[s_search_cursor+1], len - s_search_cursor);
+        search_execute();
+        s_search_last_key_time = glfwGetTime();
+    }
+}
+
+void editor_search_kill_line(void) {
+    if (s_search_cursor < (int)strlen(s_search_query)) {
+        s_search_query[s_search_cursor] = '\0';
+        search_execute();
+        s_search_last_key_time = glfwGetTime();
+    }
+}
+
 static void search_start(void) {
     FileManagerState* s = &editor.file_manager;
     if (s_is_searching) return;
@@ -1756,18 +1909,18 @@ void editor_init(void) {
         .render_content = render_right_panel,
     };
 
-    // ── Top — Console ─────────────────────────────────────────────────────
+    // ── Top — Console / Vertico ───────────────────────────────────────────
     editor.panels[PANEL_TOP] = (Panel){
         .side           = PANEL_TOP,
         .open           = false,
         .t              = 0.0f,
         .target_t       = 0.0f,
-        .size           = 200.0f,
-        .min_size       = 80.0f,
-        .max_size       = 400.0f,
+        .size           = 380.0f, // Taller to fit ~10 candidates cleanly
+        .min_size       = 100.0f,
+        .max_size       = 800.0f,
         .ease_fn        = ease_quart_out,
         .title          = "Console",
-        .render_content = render_placeholder,
+        .render_content = render_vertico_panel,
     };
 
     // ── Left — Hierarchy ──────────────────────────────────────────────────
@@ -1809,16 +1962,12 @@ void editor_init(void) {
     editor.font = load_font("./assets/fonts/MapleMono-NF-Regular.ttf", 18);
 
     // ── Keybindings ───────────────────────────────────────────────────────
-    // M-j = Files (bottom)   M-l = Inspector (right)
-    // M-k = Console (top)    M-h = Hierarchy (left)
     keychord_bind(&keymap, "M-j", toggle_bottom, "Toggle file manager", PRESS);
     keychord_bind(&keymap, "M-l", toggle_right,  "Toggle inspector",    PRESS);
-    keychord_bind(&keymap, "M-k", toggle_top,    "Toggle console",      PRESS);
+    /* keychord_bind(&keymap, "M-k", toggle_top,    "Toggle console",      PRESS); */
     keychord_bind(&keymap, "M-h", toggle_left,   "Toggle hierarchy",    PRESS);
-    keychord_bind(&keymap, "c", cb_open_color_picker, "Pick Mesh Color", PRESS);
-
-    // Search keybinds!
-    keychord_bind(&keymap, "C-s", search_start, "Start search", PRESS);
+    keychord_bind(&keymap, "C-s", search_start,  "Start search", PRESS);
+    keychord_bind(&keymap, "c",   cb_open_color_picker, "Pick Mesh Color", PRESS);
 
     keymap_init(&editor_search_keymap);
     keychord_bind(&editor_search_keymap, "C-g", search_cancel, "Cancel search", PRESS);
@@ -1826,6 +1975,13 @@ void editor_init(void) {
     keychord_bind(&editor_search_keymap, "C-n", search_next, "Next search match", PRESS | REPEAT);
     keychord_bind(&editor_search_keymap, "C-p", search_prev, "Prev search match", PRESS | REPEAT);
     keychord_bind(&editor_search_keymap, "DEL", editor_search_backspace, "Search backspace", PRESS | REPEAT);
+
+    keychord_bind(&editor_search_keymap, "C-b", editor_search_cursor_left, "Cursor left", PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-f", editor_search_cursor_right, "Cursor right", PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-a", editor_search_cursor_start, "Cursor start", PRESS);
+    keychord_bind(&editor_search_keymap, "C-e", editor_search_cursor_end, "Cursor end", PRESS);
+    keychord_bind(&editor_search_keymap, "C-d", editor_search_delete_char, "Delete char", PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-k", editor_search_kill_line, "Kill line", PRESS);
 
     colorpicker_init(&s_color_picker);
 

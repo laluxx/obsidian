@@ -511,7 +511,6 @@ int main() {
 
         beginFrame();
 
-        vertico_render();
         editor_update();
         editor_render();
         gizmo_render(editor.inspector.selected_mesh_index);
