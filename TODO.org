@@ -1,5 +1,9 @@
 #+TITLE: Obsidian Engine TODO
 
+# TODO NEXT FIXME
+if we are upside down and we pas it istantly invers, then when i move the camera it also flips!
+
+
 # TODO
 One thing to keep an eye on: the magic constant (16384 + 4096) appears four times across three files now with no named constant. That's going to bite you when you change maxMeshes. Should be a #define MAX_INDIRECT_COMMANDS or pulled from the context struct.
 

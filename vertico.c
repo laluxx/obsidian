@@ -56,7 +56,7 @@ void vertico_init() {
     vertico.is_active = false;
     vertico.selected_index = 0;
     vertico.scroll_offset = 0;
-    vertico.count = 20;
+    vertico.count = 19;
     vertico.cycle = false;
 
     keymap_init(&vertico.vertico_keymap);

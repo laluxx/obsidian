@@ -31,9 +31,11 @@ typedef struct {
 } Camera;
 
 extern Camera camera;
+extern bool smooth_camera_snap;
 
 void camera_init(Camera* cam, vec3 position, float yaw, float pitch, float aspect_ratio);
 void camera_update(Camera* cam);
+void camera_update_animations(Camera* cam, float delta_time);
 void camera_process_keyboard(Camera* cam, GLFWwindow* window, float delta_time);
 void camera_process_mouse(Camera* cam, double xoffset, double yoffset);
 void camera_set_look_at(Camera *cam, vec3 look_at);
@@ -45,21 +47,8 @@ bool raycast_to_ground(Camera* cam, vec3 hitPoint);
 
 /// GIZMO SNAP
 
-void camera_snap_to_next_angle(Camera* cam, bool forward, bool vertical);
-
-void camera_snap_left();
-void camera_snap_right();
-void camera_snap_up();
-void camera_snap_down();
-
-
-void camera_snap_to_front();
-void camera_snap_to_back();
-void camera_snap_to_left();
-void camera_snap_to_right();
-void camera_snap_to_top();
-void camera_snap_to_bottom();
-
+void camera_snap_to_angles(Camera* cam, float target_yaw, float target_pitch, vec3 pivot);
+void camera_snap_to_next_angle(Camera* cam, bool forward, bool vertical, vec3 pivot);
 void look_at_world_origin();
 
 #endif

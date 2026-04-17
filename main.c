@@ -42,6 +42,26 @@ bool keyW = false, keyA = false, keyS = false, keyD = false;
 bool keyQ = false, keyE = false;
 bool keySpace = false, keyShift = false;
 
+// Helper to get the correct pivot point for orbiting/snapping
+void get_target_pivot(vec3 out_pivot) {
+    glm_vec3_zero(out_pivot);
+    if (editor.inspector.selected_mesh_index >= 0 && editor.inspector.selected_mesh_index < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[editor.inspector.selected_mesh_index];
+        vec3 local_center;
+        glm_vec3_add(m->aabbMin, m->aabbMax, local_center);
+        glm_vec3_scale(local_center, 0.5f, local_center);
+        vec4 lc4 = {local_center[0], local_center[1], local_center[2], 1.0f};
+        vec4 wc4;
+        glm_mat4_mulv(m->model, lc4, wc4);
+        glm_vec3_copy(wc4, out_pivot);
+    }
+}
+
+void action_camera_snap_left()  { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, true, false, p); }
+void action_camera_snap_right() { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, false, false, p); }
+void action_camera_snap_up()    { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, false, true, p); }
+void action_camera_snap_down()  { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, true, true, p); }
+
 // Camera framing animation state
 bool is_framing = false;
 vec3 frame_start_pos = {0};
@@ -115,20 +135,6 @@ void key_callback(int key, int action, int mods) {
     }
     if (key == GLFW_KEY_Z && action == PRESS) {
         print_scene_meshes();
-    }
-
-    // Arrow keys for camera snapping
-    if (key == KEY_LEFT && action == PRESS) {
-        camera_snap_to_next_angle(&camera, true, false);  // Counter-clockwise
-    }
-    if (key == KEY_RIGHT && action == PRESS) {
-        camera_snap_to_next_angle(&camera, false, false);   // Clockwise
-    }
-    if (key == KEY_UP && action == PRESS) {
-        camera_snap_to_next_angle(&camera, true, true);   // Pitch up (more negative)
-    }
-    if (key == KEY_DOWN && action == PRESS) {
-        camera_snap_to_next_angle(&camera, false, true);    // Pitch down (more positive)
     }
 
     if (key == KEY_T && action == PRESS) {
@@ -466,6 +472,14 @@ int main() {
     registerCursorPosCallback(cursor_pos_callback);
     registerMouseButtonCallback(mouse_button_callback);
 
+    keychord_bind(&keymap, "<left>",    action_camera_snap_left,   "Camera snap left",     PRESS);
+    keychord_bind(&keymap, "<right>",   action_camera_snap_right,  "Camera snap right",    PRESS);
+    keychord_bind(&keymap, "<up>",      action_camera_snap_up,     "Camera snap up",       PRESS);
+    keychord_bind(&keymap, "<down>",    action_camera_snap_down,   "Camera snap down",     PRESS);
+    keychord_bind(&keymap, "M-b",       action_camera_snap_left,   "Camera snap left",     PRESS);
+    keychord_bind(&keymap, "M-f",       action_camera_snap_right,  "Camera snap right",    PRESS);
+    keychord_bind(&keymap, "M-p",       action_camera_snap_up,     "Camera snap up",       PRESS);
+    keychord_bind(&keymap, "M-n",       action_camera_snap_down,   "Camera snap down",     PRESS);
     keychord_bind(&keymap, "TAB",       toggle_skybox,             "Toggle the skybox",    PRESS);
     keychord_bind(&keymap, "t",         toggle_ibl_lighting,       "Toggle IBL lighting",  PRESS);
     keychord_bind(&keymap, "l",         toggle_shadows,            "Toggle shadows",       PRESS);
@@ -508,6 +522,8 @@ int main() {
             float ease_t = ease_quart_out(t);
             glm_vec3_lerp(zoom_start_pos, zoom_target_pos, ease_t, camera.position);
         }
+
+        camera_update_animations(&camera, deltaTime);
 
         beginFrame();
 
