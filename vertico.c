@@ -8,7 +8,10 @@
 #include <string.h>
 #include <ctype.h>
 
+extern void set_active_text_input(void (*cb)(char));
+
 Vertico vertico = {0};
+
 
 void vertico_toggle_top() {
     vertico.top = !vertico.top;
@@ -76,6 +79,8 @@ void vertico_activate(const char* category, VerticoSelectCallback callback) {
     keymap = vertico.vertico_keymap;
     vertico.vertico_keymap = temp;
 
+    set_active_text_input(vertico_insert_char);
+
     // Filter candidates initially
     vertico_filter_candidates();
 }
@@ -84,6 +89,7 @@ void vertico_quit() {
     if (!vertico.is_active) return;
 
     vertico.is_active = false;
+    set_active_text_input(NULL);
 
     // Restore the global keymap
     extern KeyChordMap keymap;
@@ -287,75 +293,6 @@ void vertico_clear_input() {
     vertico.input[0] = '\0';
     vertico_filter_candidates();
 }
-
-// Handle GLFW key input and convert to self-insert characters
-void vertico_handle_char_input(int key, int mods) {
-    char c = 0;
-
-    // Letters A-Z
-    if (key >= KEY_A && key <= KEY_Z) {
-        if (mods & MOD_SHIFT) {
-            c = key; // Uppercase (A-Z)
-        } else {
-            c = key + 32; // Lowercase (a-z)
-        }
-    }
-    // Numbers 0-9
-    else if (key >= KEY_0 && key <= KEY_9) {
-        if (mods & MOD_SHIFT) {
-            // Shifted number keys produce symbols
-            const char shifted_nums[] = ")!@#$%^&*(";
-            c = shifted_nums[key - KEY_0];
-        } else {
-            c = key; // Regular digits
-        }
-    }
-    // Space
-    else if (key == KEY_SPACE) {
-        c = ' ';
-    }
-    // Punctuation and symbols
-    else if (key == KEY_MINUS) {
-        c = (mods & MOD_SHIFT) ? '_' : '-';
-    }
-    else if (key == KEY_EQUAL) {
-        c = (mods & MOD_SHIFT) ? '+' : '=';
-    }
-    else if (key == KEY_LEFT_BRACKET) {
-        c = (mods & MOD_SHIFT) ? '{' : '[';
-    }
-    else if (key == KEY_RIGHT_BRACKET) {
-        c = (mods & MOD_SHIFT) ? '}' : ']';
-    }
-    else if (key == KEY_BACKSLASH) {
-        c = (mods & MOD_SHIFT) ? '|' : '\\';
-    }
-    else if (key == KEY_SEMICOLON) {
-        c = (mods & MOD_SHIFT) ? ':' : ';';
-    }
-    else if (key == KEY_APOSTROPHE) {
-        c = (mods & MOD_SHIFT) ? '"' : '\'';
-    }
-    else if (key == KEY_COMMA) {
-        c = (mods & MOD_SHIFT) ? '<' : ',';
-    }
-    else if (key == KEY_PERIOD) {
-        c = (mods & MOD_SHIFT) ? '>' : '.';
-    }
-    else if (key == KEY_SLASH) {
-        c = (mods & MOD_SHIFT) ? '?' : '/';
-    }
-    else if (key == KEY_GRAVE_ACCENT) {
-        c = (mods & MOD_SHIFT) ? '~' : '`';
-    }
-
-    // Insert the character if we got one
-    if (c != 0) {
-        vertico_insert_char(c);
-    }
-}
-
-
 
 static void render_text_with_highlights(Font* font, const char* inputText, float x, float y,
                                         const char* pattern, Color default_color) {

@@ -58,17 +58,61 @@ float zoom_anim_time = 0.0f;
 const float ZOOM_ANIM_DURATION = 0.15f; // Fast, tactile 150ms settle
 
 
+typedef void (*TextInputCallback)(char c);
+TextInputCallback active_text_input_cb = NULL;
+
+void set_active_text_input(TextInputCallback cb) {
+    active_text_input_cb = cb;
+}
+
+char translate_key_to_char(int key, int mods) {
+    if (mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER)) return 0;
+    char c = 0;
+    if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z) {
+        c = (mods & GLFW_MOD_SHIFT) ? key : key + 32;
+    } else if (key >= GLFW_KEY_0 && key <= GLFW_KEY_9) {
+        const char shifted_nums[] = ")!@#$%^&*(";
+        c = (mods & GLFW_MOD_SHIFT) ? shifted_nums[key - GLFW_KEY_0] : key;
+    } else if (key == GLFW_KEY_SPACE) {
+        c = ' ';
+    } else if (key == GLFW_KEY_MINUS) {
+        c = (mods & GLFW_MOD_SHIFT) ? '_' : '-';
+    } else if (key == GLFW_KEY_EQUAL) {
+        c = (mods & GLFW_MOD_SHIFT) ? '+' : '=';
+    } else if (key == GLFW_KEY_LEFT_BRACKET) {
+        c = (mods & GLFW_MOD_SHIFT) ? '{' : '[';
+    } else if (key == GLFW_KEY_RIGHT_BRACKET) {
+        c = (mods & GLFW_MOD_SHIFT) ? '}' : ']';
+    } else if (key == GLFW_KEY_BACKSLASH) {
+        c = (mods & GLFW_MOD_SHIFT) ? '|' : '\\';
+    } else if (key == GLFW_KEY_SEMICOLON) {
+        c = (mods & GLFW_MOD_SHIFT) ? ':' : ';';
+    } else if (key == GLFW_KEY_APOSTROPHE) {
+        c = (mods & GLFW_MOD_SHIFT) ? '"' : '\'';
+    } else if (key == GLFW_KEY_COMMA) {
+        c = (mods & GLFW_MOD_SHIFT) ? '<' : ',';
+    } else if (key == GLFW_KEY_PERIOD) {
+        c = (mods & GLFW_MOD_SHIFT) ? '>' : '.';
+    } else if (key == GLFW_KEY_SLASH) {
+        c = (mods & GLFW_MOD_SHIFT) ? '?' : '/';
+    } else if (key == GLFW_KEY_GRAVE_ACCENT) {
+        c = (mods & GLFW_MOD_SHIFT) ? '~' : '`';
+    }
+    return c;
+}
+
 void key_callback(int key, int action, int mods) {
     shiftPressed = mods & GLFW_MOD_SHIFT;
     ctrlPressed  = mods & GLFW_MOD_CONTROL;
     altPressed   = mods & GLFW_MOD_ALT;
 
-   if (vertico.is_active) {
-        if (action == PRESS || action == REPEAT)
-            vertico_handle_char_input(key, mods);
-        return;  // Don't process other keys when vertico is active
+    if (active_text_input_cb) {
+        if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+            char c = translate_key_to_char(key, mods);
+            if (c != 0) active_text_input_cb(c);
+        }
+        return;
     }
-
     if (key == GLFW_KEY_Z && action == PRESS) {
         print_scene_meshes();
     }

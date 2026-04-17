@@ -8,6 +8,7 @@
 #include "gizmo.h"
 #include "colorpicker.h"
 #include "easing.h"
+#include "vulkan_setup.h"
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
@@ -103,6 +104,9 @@ static int   s_saved_selected_index = -1;
 static float s_saved_scroll_y = 0.0f;
 static float s_saved_scroll_target = 0.0f;
 
+static KeyChordMap editor_search_keymap;
+extern void set_active_text_input(void (*cb)(char));
+
 // Smooth Scrolling State
 static float s_fs_scroll_y = 0.0f;
 static float s_fs_scroll_target = 0.0f;
@@ -194,7 +198,6 @@ static Color lerp_color(Color a, Color b, float t) {
 }
 
 static void editor_get_safe_area(float* out_min_x, float* out_min_y, float* out_max_x, float* out_max_y) {
-    extern VulkanContext context;
     float sw = (float)context.swapChainExtent.width;
     float sh = (float)context.swapChainExtent.height;
 
@@ -228,7 +231,6 @@ static void image_viewer_init(ImageViewerState* iv) {
 }
 
 static void image_viewer_open(ImageViewerState* iv, const FileItem* item, float anchor_x, float anchor_y) {
-    extern VulkanContext context;
     int32_t tex_idx = texture_pool_add(&context, item->full_path);
     if (tex_idx < 0) {
         message(MSG_ERROR, "Failed to load image");
@@ -306,8 +308,6 @@ static void image_viewer_render(ImageViewerState* iv, Font* font) {
 
 static void on_color_picked(float r, float g, float b, float a, void* user) {
     (void)r; (void)g; (void)b; (void)a; (void)user;
-    extern VulkanContext context;
-    extern void markMeshesSSBODirty(void* ctx);
     markMeshesSSBODirty(&context);
 }
 
@@ -638,7 +638,6 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
                            s_ui_my >= box_y + 2.0f && s_ui_my <= box_y + 2.0f + swatch_size);
 
     if (!locked && swatch_hovered && s_ui_mclicked) {
-        extern VulkanContext context;
         float sh = (float)context.swapChainExtent.height;
         float anchor_x = swatch_x - 10.0f; // Open to the left of the swatch to keep it on-screen
         float anchor_y = sh - (box_y + 2.0f + swatch_size * 0.5f);
@@ -754,7 +753,6 @@ static void render_image_inspector_content(float cx, float cy, float cw, float c
     if (!tex) return;
 
     float lh  = editor.font->ascent - editor.font->descent + LH_EXTRA;
-    extern float font_width(Font* font);
     float space_w = font_width(editor.font);
 
     // Align dynamically to the longest label!
@@ -847,7 +845,6 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     float lh  = editor.font->ascent - editor.font->descent + LH_EXTRA;
     float col2 = cx + 120.0f; // Vector fields stay perfectly aligned to 120
 
-    extern float font_width(Font* font);
     float space_w = font_width(editor.font);
 
     // Calculate dynamic alignments based on the longest label per section + exactly 1 space of padding!
@@ -891,7 +888,6 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
         glm_rotate_y(m->model, glm_rad(rot_deg[1]), m->model);
         glm_rotate_x(m->model, glm_rad(rot_deg[0]), m->model);
         glm_scale(m->model, scale);
-        extern void markMeshesSSBODirty(void* ctx);
         markMeshesSSBODirty(&context);
     }
 
@@ -927,7 +923,6 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     row -= lh + 12.0f;
 
     if (mat_changed) {
-        extern void markMeshesSSBODirty(void* ctx);
         markMeshesSSBODirty(&context);
     }
 
@@ -983,7 +978,6 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
                     char wlbl[16];
                     snprintf(wlbl, sizeof wlbl, "  [%d]", i);
                     if (field_float(cx, row, col2_anim, cw, wlbl, &m->morph_data->weights[i], 0.01f, true, 0.0f, 1.0f, false)) {
-                        extern void markMeshesSSBODirty(void* ctx);
                         markMeshesSSBODirty(&context);
                     }
                     row -= lh + 6.0f;
@@ -1080,7 +1074,6 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
                             strcpy(s->expanded_paths[s->expanded_count++], item->full_path);
                         }
                     }
-                    extern void file_manager_refresh(void);
                     file_manager_refresh();
                     return; // Tree rebuilt, stop rendering this frame
                 } else {
@@ -1254,7 +1247,6 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
         exQuad2D((vec2){sb_x, sb_y}, (vec2){sb_w, sb_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
 
         // Render Emacs Block Cursor and Text in a single loop
-        extern float font_width(Font* font);
         float cursor_w = font_width(editor.font);
         float text_h = editor.font->ascent;
         float cursor_h = sb_h;
@@ -1524,8 +1516,6 @@ static void toggle_right(void)  { editor_toggle_panel(PANEL_RIGHT);  }
 static void toggle_top(void)    { editor_toggle_panel(PANEL_TOP);    }
 static void toggle_left(void)   { editor_toggle_panel(PANEL_LEFT);   }
 
-extern void file_manager_refresh(void);
-
 // Fast, portable case-insensitive substring search
 static bool str_contains_ci(const char* haystack, const char* needle) {
     if (!*needle) return true;
@@ -1631,10 +1621,31 @@ void search_execute(void) {
         }
         s_search_match_count = mapped_count;
 
-        if (s_search_match_count > 0) {
+if (s_search_match_count > 0) {
             s_search_current_idx = 0;
             update_search_scroll();
         }
+    }
+}
+
+void editor_search_insert_char(char c) {
+    int len = strlen(s_search_query);
+    if (len < 63) {
+        memmove(&s_search_query[s_search_cursor + 1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
+        s_search_query[s_search_cursor] = c;
+        s_search_cursor++;
+        search_execute();
+        s_search_last_key_time = glfwGetTime();
+    }
+}
+
+void editor_search_backspace(void) {
+    if (s_search_cursor > 0) {
+        int len = strlen(s_search_query);
+        memmove(&s_search_query[s_search_cursor-1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
+        s_search_cursor--;
+        search_execute();
+        s_search_last_key_time = glfwGetTime();
     }
 }
 
@@ -1657,6 +1668,12 @@ static void search_start(void) {
     s_saved_scroll_target = s_fs_scroll_target;
     s_fs_scroll_start = s_fs_scroll_y;
     s_fs_scroll_t = 1.0f;
+
+    extern KeyChordMap keymap;
+    KeyChordMap temp = keymap;
+    keymap = editor_search_keymap;
+    editor_search_keymap = temp;
+    set_active_text_input(editor_search_insert_char);
 }
 
 void search_cancel(void) {
@@ -1675,12 +1692,24 @@ void search_cancel(void) {
     s_fs_scroll_t = 1.0f; // Instant revert! No easing!
 
     file_manager_refresh();
+
+    extern KeyChordMap keymap;
+    KeyChordMap temp = keymap;
+    keymap = editor_search_keymap;
+    editor_search_keymap = temp;
+    set_active_text_input(NULL);
 }
 
 static void search_commit(void) {
     if (!s_is_searching) return;
     s_is_searching = false;
     search_execute(); // final resolve
+
+    extern KeyChordMap keymap;
+    KeyChordMap temp = keymap;
+    keymap = editor_search_keymap;
+    editor_search_keymap = temp;
+    set_active_text_input(NULL);
 }
 
 static void cb_open_color_picker(void) {
@@ -1768,7 +1797,6 @@ void editor_init(void) {
     editor.last_tab_click_time           = 0.0;
 
     // Cache SVGs instantly via our zero-copy binary pipeline
-    extern VulkanContext context;
     editor.file_manager.icon_folder      = texture_pool_add_svg(&context, "./assets/icons/Folder.svg", 16, 16);
     editor.file_manager.icon_file        = texture_pool_add_svg(&context, "./assets/icons/File.svg", 16, 16);
     editor.file_manager.icon_arrow_right = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowRight.svg", 16, 16);
@@ -1791,8 +1819,15 @@ void editor_init(void) {
 
     // Search keybinds!
     keychord_bind(&keymap, "C-s", search_start, "Start search", PRESS);
-    keychord_bind(&keymap, "C-g", search_cancel, "Cancel search", PRESS);
-    keychord_bind(&keymap, "RET", search_commit, "Commit search", PRESS);
+
+    keymap_init(&editor_search_keymap);
+    keychord_bind(&editor_search_keymap, "C-g", search_cancel, "Cancel search", PRESS);
+    keychord_bind(&editor_search_keymap, "RET", search_commit, "Commit search", PRESS);
+    keychord_bind(&editor_search_keymap, "C-n", search_next, "Next search match", PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-p", search_prev, "Prev search match", PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "DEL", editor_search_backspace, "Search backspace", PRESS | REPEAT);
+
+    colorpicker_init(&s_color_picker);
 
     colorpicker_init(&s_color_picker);
     image_viewer_init(&s_image_viewer);
@@ -1829,125 +1864,6 @@ void editor_update(void) {
     }
 
     if (s_is_searching) {
-        extern VulkanContext context;
-        GLFWwindow* win = context.window;
-        static float key_timer = 0.0f;
-        key_timer -= dt;
-
-        if (key_timer <= 0.0f) {
-            bool ctrl = glfwGetKey(win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
-            bool shift = glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-
-            if (ctrl) {
-                if (glfwGetKey(win, GLFW_KEY_G) == GLFW_PRESS) {
-                    extern void search_cancel(void);
-                    search_cancel();
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.3f;
-                } else if (glfwGetKey(win, GLFW_KEY_N) == GLFW_PRESS) {
-                    extern void search_next(void);
-                    search_next();
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.2f;
-                } else if (glfwGetKey(win, GLFW_KEY_P) == GLFW_PRESS) {
-                    extern void search_prev(void);
-                    search_prev();
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.2f;
-                } else if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) {
-                    s_search_cursor = 0;
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.15f;
-                } else if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) {
-                    s_search_cursor = strlen(s_search_query);
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.15f;
-                } else if (glfwGetKey(win, GLFW_KEY_B) == GLFW_PRESS) {
-                    if (s_search_cursor > 0) s_search_cursor--;
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.1f;
-                } else if (glfwGetKey(win, GLFW_KEY_F) == GLFW_PRESS) {
-                    if (s_search_cursor < (int)strlen(s_search_query)) s_search_cursor++;
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.1f;
-                } else if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) {
-                    int len = strlen(s_search_query);
-                    if (s_search_cursor < len) {
-                        memmove(&s_search_query[s_search_cursor], &s_search_query[s_search_cursor+1], len - s_search_cursor);
-                        extern void search_execute(void);
-                        search_execute();
-                    }
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.1f;
-                } else if (glfwGetKey(win, GLFW_KEY_K) == GLFW_PRESS) {
-                    s_search_query[s_search_cursor] = '\0';
-                    extern void search_execute(void);
-                    search_execute();
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.2f;
-                } else if (glfwGetKey(win, GLFW_KEY_BACKSPACE) == GLFW_PRESS) {
-                    while (s_search_cursor > 0 && s_search_query[s_search_cursor - 1] == ' ') {
-                        int len = strlen(s_search_query);
-                        memmove(&s_search_query[s_search_cursor-1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
-                        s_search_cursor--;
-                    }
-                    while (s_search_cursor > 0 && s_search_query[s_search_cursor - 1] != ' ') {
-                        int len = strlen(s_search_query);
-                        memmove(&s_search_query[s_search_cursor-1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
-                        s_search_cursor--;
-                    }
-                    extern void search_execute(void);
-                    search_execute();
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.15f;
-                }
-            } else {
-                if (glfwGetKey(win, GLFW_KEY_ENTER) == GLFW_PRESS) {
-                    extern void search_commit(void);
-                    search_commit();
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.3f;
-                } else if (glfwGetKey(win, GLFW_KEY_BACKSPACE) == GLFW_PRESS) {
-                    if (s_search_cursor > 0) {
-                        int len = strlen(s_search_query);
-                        memmove(&s_search_query[s_search_cursor-1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
-                        s_search_cursor--;
-                        extern void search_execute(void);
-                        search_execute();
-                    }
-                    s_search_last_key_time = glfwGetTime();
-                    key_timer = 0.08f;
-                } else {
-                    char c = '\0';
-                    for (int k = GLFW_KEY_SPACE; k <= GLFW_KEY_GRAVE_ACCENT; k++) {
-                        if (glfwGetKey(win, k) == GLFW_PRESS) {
-                            if (k >= GLFW_KEY_A && k <= GLFW_KEY_Z) c = shift ? 'A' + (k - GLFW_KEY_A) : 'a' + (k - GLFW_KEY_A);
-                            else if (k >= GLFW_KEY_0 && k <= GLFW_KEY_9) c = shift ? ")!@#$%^&*("[k - GLFW_KEY_0] : '0' + (k - GLFW_KEY_0);
-                            else if (k == GLFW_KEY_SPACE) c = ' ';
-                            else if (k == GLFW_KEY_COMMA) c = shift ? '<' : ',';
-                            else if (k == GLFW_KEY_PERIOD) c = shift ? '>' : '.';
-                            else if (k == GLFW_KEY_MINUS) c = shift ? '_' : '-';
-                            else if (k == GLFW_KEY_SLASH) c = shift ? '?' : '/';
-
-                            if (c != '\0') {
-                                int len = strlen(s_search_query);
-                                if (len < 63) {
-                                    memmove(&s_search_query[s_search_cursor + 1], &s_search_query[s_search_cursor], len - s_search_cursor + 1);
-                                    s_search_query[s_search_cursor] = c;
-                                    s_search_cursor++;
-                                    extern void search_execute(void);
-                                    search_execute();
-                                }
-                                s_search_last_key_time = glfwGetTime();
-                                key_timer = 0.08f;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         if (s_search_anim_t < 1.0f) {
             s_search_anim_t += 3.0f * dt;
         }
