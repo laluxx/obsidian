@@ -81,8 +81,12 @@ bool load_gltf_textures(cgltf_data* data, const char* base_path) {
             unsigned char* buffer_data = (unsigned char*)view->buffer->data + view->offset;
             size_t buffer_size = view->size;
 
-            // Load texture from memory buffer
-            tex_id = texture_pool_add_from_memory(buffer_data, buffer_size);
+            // Generate a deterministic virtual filename for the cache cooker to use
+            char virtual_filename[1024];
+            snprintf(virtual_filename, sizeof(virtual_filename), "%s_embedded_tex_%zu.png", base_path, i);
+
+            // Load texture from memory buffer, routing it through the DDS JIT pipeline
+            tex_id = texture_pool_add_embedded(&context, virtual_filename, buffer_data, buffer_size);
         }
         // Case 3: Data URI embedded in .gltf file
         else if (img->uri && strstr(img->uri, "data:")) {

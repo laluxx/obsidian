@@ -98,8 +98,9 @@ bool load_texture_from_rgba_with_format(VulkanContext* context, unsigned char* r
 bool load_texture_from_rgba(VulkanContext* context, unsigned char* rgba_data, uint32_t width, uint32_t height, Texture2D* texture);
 bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture, unsigned char* rgba_data, int width, int height);
 bool load_texture_from_memory(VulkanContext* context, unsigned char* data, size_t data_size, Texture2D* texture);
-int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size);
+int32_t texture_pool_add_embedded(VulkanContext* ctx, const char* virtual_filename, unsigned char* data, size_t data_size);
 
+bool load_texture_ex(VulkanContext* ctx, const char* filename, unsigned char* mem_data, size_t mem_size, Texture2D* texture);
 bool load_texture(VulkanContext* context, const char* filename, Texture2D* texture);
 void destroy_texture(VulkanContext* context, Texture2D* texture);
 void texture2D(vec2 position, vec2 size, Texture2D* texture, Color tint);

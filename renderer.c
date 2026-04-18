@@ -1615,23 +1615,12 @@ static bool load_texture_from_pixels(VulkanContext* ctx, stbi_uc* pixels, int w,
     return ok;
 }
 
-bool load_texture_from_memory(VulkanContext* ctx, unsigned char* data, size_t data_size, Texture2D* texture) {
-    int w, h, ch;
-    stbi_uc* pixels = stbi_load_from_memory(data, (int)data_size, &w, &h, &ch, STBI_rgb_alpha);
-    if (!pixels) {
-        fprintf(stderr, "Failed to decode texture from memory\n");
-        return false;
-    }
-    bool res = load_texture_from_pixels(ctx, pixels, w, h, texture);
-    stbi_image_free(pixels);
-    return res;
-}
-
-int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size) {
+int32_t texture_pool_add_embedded(VulkanContext* ctx, const char* virtual_filename, unsigned char* data, size_t data_size) {
     if (textureCount >= MAX_TEXTURES) {
         fprintf(stderr, "Texture pool full!\n"); return -1;
     }
-    if (load_texture_from_memory(&context, data, data_size, &texturePool[textureCount])) {
+    if (load_texture_ex(ctx, virtual_filename, data, data_size, &texturePool[textureCount])) {
+        printf("  -> Successfully queued embedded texture #%u\n", textureCount);
         return textureCount++;
     }
     return -1;
@@ -1833,14 +1822,14 @@ static bool load_texture_dds(VulkanContext* ctx, const char* filepath, Texture2D
     return false;
 }
 
-bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) {
+bool load_texture_ex(VulkanContext* ctx, const char* filename, unsigned char* mem_data, size_t mem_size, Texture2D* texture) {
     char dds_path[512];
     strncpy(dds_path, filename, sizeof(dds_path) - 1);
     char* ext = strrchr(dds_path, '.');
     if (ext) strcpy(ext, ".dds");
 
-    // 1. Check local offline-compressed .dds first (e.g., ./assets/textures/diffuse.dds)
-    if (ext && load_texture_dds(ctx, dds_path, texture)) {
+    // 1. Check local offline-compressed .dds first (only if it's a real file)
+    if (!mem_data && ext && load_texture_dds(ctx, dds_path, texture)) {
         fprintf(stdout, "\033[36m[TEXTURE] AAA Pipeline: Zero-Copy Local DDS Loaded -> %s\033[0m\n", dds_path);
         return true;
     }
@@ -1875,7 +1864,7 @@ bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) 
 
     fprintf(stdout, "\033[33m[TEXTURE] Cache Miss. Decoding: %s\033[0m\n", filename);
 
-int w, h, ch;
+    int w, h, ch;
 
     // EXR HDR textures stay uncompressed (32-bit float) to preserve physical light values
     if (strstr(filename, ".exr")) {
@@ -1897,7 +1886,13 @@ int w, h, ch;
     }
 
     // Standard LDR textures (PNG/JPG) get JIT compiled into BC3 (DXT5) DDS files
-    unsigned char* pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
+    unsigned char* pixels = NULL;
+    if (mem_data) {
+        pixels = stbi_load_from_memory(mem_data, (int)mem_size, &w, &h, &ch, STBI_rgb_alpha);
+    } else {
+        pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
+    }
+
     if (!pixels) {
         fprintf(stderr, "[WARNING] Failed to load texture: %s\n", filename);
         return false;
@@ -1959,6 +1954,10 @@ int w, h, ch;
 
     // Pipe the newly generated DDS right back into the engine's AAA loader
     return load_texture_dds(ctx, out_dds_cache, texture);
+}
+
+bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) {
+    return load_texture_ex(ctx, filename, NULL, 0, texture);
 }
 
 void destroy_texture(VulkanContext* context, Texture2D* texture) {
