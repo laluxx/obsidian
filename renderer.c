@@ -10,6 +10,8 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_DXT_IMPLEMENTATION
+#include "stb_dxt.h"
 #define NANOSVG_IMPLEMENTATION
 #include "nanosvg.h"
 #define NANOSVGRAST_IMPLEMENTATION
@@ -21,6 +23,17 @@
 #ifndef MIN
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #endif
+
+#define DDS_MAGIC 0x20534444
+typedef struct {
+    uint32_t dwSize; uint32_t dwFlags; uint32_t dwHeight; uint32_t dwWidth;
+    uint32_t dwPitchOrLinearSize; uint32_t dwDepth; uint32_t dwMipMapCount;
+    uint32_t dwReserved1[11];
+    struct { uint32_t dwSize; uint32_t dwFlags; uint32_t dwFourCC; uint32_t dwRGBBitCount;
+             uint32_t dwRBitMask; uint32_t dwGBitMask; uint32_t dwBBitMask; uint32_t dwABitMask; } ddspf;
+    uint32_t dwCaps; uint32_t dwCaps2; uint32_t dwCaps3; uint32_t dwCaps4; uint32_t dwReserved2;
+} DDS_HEADER;
+typedef struct { uint32_t dxgiFormat; uint32_t resourceDimension; uint32_t miscFlag; uint32_t arraySize; uint32_t miscFlags2; } DDS_HEADER_DXT10;
 
 // --- Texture Pool Management ---
 static Texture2D texturePool[MAX_TEXTURES];
@@ -407,36 +420,82 @@ Material load_pbr_material(const char* albedoPath, const char* normalPath, const
     return mat;
 }
 
+typedef struct {
+    uint32_t magic; // 0x54414D4F 'OMAT'
+    char albedoPath[512];
+    char normalPath[512];
+    char roughPath[512];
+    char aoPath[512];
+    char dispPath[512];
+    float displacementScale;
+} OmatCache;
+
+static const char* get_material_cache_path(const char* dirPath) {
+    static char cache_path[512];
+    const char* home = getenv("HOME");
+    if (!home) home = ".";
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/materials", home); mkdir(dir_path, 0777);
+
+    char safe_name[256];
+    strncpy(safe_name, dirPath, sizeof(safe_name) - 1);
+    safe_name[sizeof(safe_name) - 1] = '\0';
+    for (int i = 0; safe_name[i]; i++) {
+        if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.') safe_name[i] = '_';
+    }
+    snprintf(cache_path, sizeof(cache_path), "%s/%s.omat", dir_path, safe_name);
+    return cache_path;
+}
+
 Material load_pbr_material_dir(const char* dirPath) {
-    DIR *dir;
-    struct dirent *ent;
-    char albedoPath[512] = {0};
-    char normalPath[512] = {0};
-    char roughPath[512] = {0};
-    char aoPath[512] = {0};
-    char dispPath[512] = {0};
-
     printf("\n[PBR SCAN] ==========================================\n");
-    printf("[PBR SCAN] Scanning directory: %s\n", dirPath);
 
-    if ((dir = opendir(dirPath)) != NULL) {
-        while ((ent = readdir(dir)) != NULL) {
-            // Check for keywords in the filename
-            if (strstr(ent->d_name, "diff") || strstr(ent->d_name, "albedo") || strstr(ent->d_name, "basecolor")) {
-                snprintf(albedoPath, sizeof(albedoPath), "%s/%s", dirPath, ent->d_name);
-            } else if (strstr(ent->d_name, "nor")) {
-                snprintf(normalPath, sizeof(normalPath), "%s/%s", dirPath, ent->d_name);
-            } else if (strstr(ent->d_name, "rough")) {
-                snprintf(roughPath, sizeof(roughPath), "%s/%s", dirPath, ent->d_name);
-            } else if (strstr(ent->d_name, "ao") || strstr(ent->d_name, "ambient")) {
-                snprintf(aoPath, sizeof(aoPath), "%s/%s", dirPath, ent->d_name);
-            } else if (strstr(ent->d_name, "disp") || strstr(ent->d_name, "height")) {
-                snprintf(dispPath, sizeof(dispPath), "%s/%s", dirPath, ent->d_name);
-            }
+    const char* cache_path = get_material_cache_path(dirPath);
+    FILE* f = fopen(cache_path, "rb");
+    OmatCache cache = {0};
+    bool cache_hit = false;
+
+    if (f) {
+        if (fread(&cache, sizeof(OmatCache), 1, f) == 1 && cache.magic == 0x54414D4F) {
+            fprintf(stdout, "\033[32m[MATERIAL] Cache Hit (OMAT Manifest): %s\033[0m\n", cache_path);
+            cache_hit = true;
         }
-        closedir(dir);
-    } else {
-        fprintf(stderr, "[WARNING] Could not open material directory: %s\n", dirPath);
+        fclose(f);
+    }
+
+    if (!cache_hit) {
+        fprintf(stdout, "\033[33m[MATERIAL] Cache Miss. Scanning directory (OS Syscalls): %s\033[0m\n", dirPath);
+        cache.magic = 0x54414D4F;
+        cache.displacementScale = 0.5f;
+
+        DIR *dir;
+        struct dirent *ent;
+        if ((dir = opendir(dirPath)) != NULL) {
+            while ((ent = readdir(dir)) != NULL) {
+                if (strstr(ent->d_name, "diff") || strstr(ent->d_name, "albedo") || strstr(ent->d_name, "basecolor")) {
+                    snprintf(cache.albedoPath, sizeof(cache.albedoPath), "%s/%s", dirPath, ent->d_name);
+                } else if (strstr(ent->d_name, "nor")) {
+                    snprintf(cache.normalPath, sizeof(cache.normalPath), "%s/%s", dirPath, ent->d_name);
+                } else if (strstr(ent->d_name, "rough")) {
+                    snprintf(cache.roughPath, sizeof(cache.roughPath), "%s/%s", dirPath, ent->d_name);
+                } else if (strstr(ent->d_name, "ao") || strstr(ent->d_name, "ambient")) {
+                    snprintf(cache.aoPath, sizeof(cache.aoPath), "%s/%s", dirPath, ent->d_name);
+                } else if (strstr(ent->d_name, "disp") || strstr(ent->d_name, "height")) {
+                    snprintf(cache.dispPath, sizeof(cache.dispPath), "%s/%s", dirPath, ent->d_name);
+                }
+            }
+            closedir(dir);
+        } else {
+            fprintf(stderr, "[WARNING] Could not open material directory: %s\n", dirPath);
+        }
+
+        FILE* fout = fopen(cache_path, "wb");
+        if (fout) {
+            fwrite(&cache, sizeof(OmatCache), 1, fout);
+            fclose(fout);
+        }
     }
 
     Material mat;
@@ -444,39 +503,37 @@ Material load_pbr_material_dir(const char* dirPath) {
     mat = currentMaterial;
 
     int32_t pIdx;
-    if (albedoPath[0]) {
-        pIdx = texture_pool_add(&context, albedoPath);
+    if (cache.albedoPath[0]) {
+        pIdx = texture_pool_add(&context, cache.albedoPath);
         if (pIdx >= 0) mat.albedoIndex = texture_pool_get(pIdx)->bindlessSlot;
         printf("[PBR SCAN] -> Albedo mapped to Bindless Slot: %d\n", mat.albedoIndex);
     }
-    if (normalPath[0]) {
-        pIdx = texture_pool_add(&context, normalPath);
+    if (cache.normalPath[0]) {
+        pIdx = texture_pool_add(&context, cache.normalPath);
         if (pIdx >= 0) mat.normalMapIndex = texture_pool_get(pIdx)->bindlessSlot;
         printf("[PBR SCAN] -> Normal mapped to Bindless Slot: %d\n", mat.normalMapIndex);
     }
-    if (roughPath[0]) {
-        pIdx = texture_pool_load_roughness_to_gltf(&context, roughPath);
+    if (cache.roughPath[0]) {
+        pIdx = texture_pool_load_roughness_to_gltf(&context, cache.roughPath);
         if (pIdx >= 0) mat.metallicRoughIndex = texture_pool_get(pIdx)->bindlessSlot;
         printf("[PBR SCAN] -> Roughness mapped to Bindless Slot: %d\n", mat.metallicRoughIndex);
     }
-    if (aoPath[0]) {
-        pIdx = texture_pool_add(&context, aoPath);
+    if (cache.aoPath[0]) {
+        pIdx = texture_pool_add(&context, cache.aoPath);
         if (pIdx >= 0) mat.aoIndex = texture_pool_get(pIdx)->bindlessSlot;
         printf("[PBR SCAN] -> AO mapped to Bindless Slot: %d\n", mat.aoIndex);
     }
-    if (dispPath[0]) {
-        pIdx = texture_pool_add(&context, dispPath);
+    if (cache.dispPath[0]) {
+        pIdx = texture_pool_add(&context, cache.dispPath);
         if (pIdx >= 0) mat.displacementIndex = texture_pool_get(pIdx)->bindlessSlot;
         printf("[PBR SCAN] -> Displacement mapped to Bindless Slot: %d\n", mat.displacementIndex);
-
-        // Push the scale aggressively so the physical extrusion is undeniably visible!
-        mat.displacementScale = 0.5f;
+        mat.displacementScale = cache.displacementScale;
     }
     printf("[PBR SCAN] ==========================================\n\n");
 
-    if (albedoPath[0]) glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mat.baseColorFactor);
-    if (roughPath[0]) mat.roughnessFactor = 1.0f;
-    if (roughPath[0]) mat.metallicFactor = 1.0f;
+    if (cache.albedoPath[0]) glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mat.baseColorFactor);
+    if (cache.roughPath[0]) mat.roughnessFactor = 1.0f;
+    if (cache.roughPath[0]) mat.metallicFactor = 1.0f;
 
     return mat;
 }
@@ -1305,6 +1362,29 @@ static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels,
     return true;
 }
 
+static bool alloc_texture_image_mips(VulkanContext* ctx, uint32_t w, uint32_t h, uint32_t mipLevels,
+                                     VkFormat fmt, VkImage* image, VkDeviceMemory* memory)
+{
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .extent = {w, h, 1}, .mipLevels = mipLevels, .arrayLayers = 1, .format = fmt,
+        .tiling = VK_IMAGE_TILING_OPTIMAL, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .samples = VK_SAMPLE_COUNT_1_BIT
+    };
+    if (vkCreateImage(ctx->device, &ici, NULL, image) != VK_SUCCESS) return false;
+    VkMemoryRequirements req; vkGetImageMemoryRequirements(ctx->device, *image, &req);
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    };
+    if (vkAllocateMemory(ctx->device, &mai, NULL, memory) != VK_SUCCESS) {
+        vkDestroyImage(ctx->device, *image, NULL); return false;
+    }
+    vkBindImageMemory(ctx->device, *image, *memory, 0);
+    return true;
+}
+
 // Allocate a VkImage + memory for a 2D texture.
 static bool alloc_texture_image(VulkanContext* ctx, uint32_t w, uint32_t h,
                                 VkFormat fmt, VkImage* image, VkDeviceMemory* memory)
@@ -1329,6 +1409,30 @@ static bool alloc_texture_image(VulkanContext* ctx, uint32_t w, uint32_t h,
         vkDestroyImage(ctx->device, *image, NULL); return false;
     }
     vkBindImageMemory(ctx->device, *image, *memory, 0);
+    return true;
+}
+
+static bool finalize_texture_mips(VulkanContext* ctx, Texture2D* texture, VkFormat fmt, VkSamplerAddressMode addrMode, uint32_t mipLevels) {
+    VkImageViewCreateInfo vci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = texture->image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1 }
+    };
+    if (vkCreateImageView(ctx->device, &vci, NULL, &texture->view) != VK_SUCCESS) return false;
+    VkSamplerCreateInfo sci = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+        .addressModeU = addrMode, .addressModeV = addrMode, .addressModeW = addrMode,
+        .anisotropyEnable = VK_TRUE, .maxAnisotropy = 16.0f, .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR, .minLod = 0.0f, .maxLod = (float)mipLevels, .mipLodBias = 0.0f
+    };
+    if (vkCreateSampler(ctx->device, &sci, NULL, &texture->sampler) != VK_SUCCESS) return false;
+    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = ctx->descriptorPool2D, .descriptorSetCount = 1, .pSetLayouts = &ctx->descriptorSetLayout2D };
+    if (vkAllocateDescriptorSets(ctx->device, &dai, &texture->descriptorSet) != VK_SUCCESS) return false;
+    VkDescriptorImageInfo dii = { .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = texture->view, .sampler = texture->sampler };
+    VkWriteDescriptorSet wds = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = texture->descriptorSet, .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dii };
+    vkUpdateDescriptorSets(ctx->device, 1, &wds, 0, NULL);
+    texture->bindlessSlot = ctx->bindlessTextureCount;
+    bindlessRegisterTexture(ctx, texture->bindlessSlot, texture->view, texture->sampler);
     return true;
 }
 
@@ -1526,7 +1630,108 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
     return -1;
 }
 
+static bool load_texture_dds(VulkanContext* ctx, const char* filepath, Texture2D* texture) {
+    FILE* f = fopen(filepath, "rb");
+    if (!f) return false;
+
+    uint32_t magic;
+    if (fread(&magic, 4, 1, f) != 1 || magic != DDS_MAGIC) { fclose(f); return false; }
+
+    DDS_HEADER header;
+    fread(&header, sizeof(DDS_HEADER), 1, f);
+
+    uint32_t mipMapCount = header.dwMipMapCount > 0 ? header.dwMipMapCount : 1;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t blockSize = 16;
+
+    if (header.ddspf.dwFourCC == 0x30315844) { // "DX10"
+        DDS_HEADER_DXT10 dx10;
+        fread(&dx10, sizeof(DDS_HEADER_DXT10), 1, f);
+        if (dx10.dxgiFormat == 98 || dx10.dxgiFormat == 99) { format = VK_FORMAT_BC7_UNORM_BLOCK; blockSize = 16; }
+        else if (dx10.dxgiFormat == 83 || dx10.dxgiFormat == 84) { format = VK_FORMAT_BC5_UNORM_BLOCK; blockSize = 16; }
+        else if (dx10.dxgiFormat == 77 || dx10.dxgiFormat == 78) { format = VK_FORMAT_BC3_UNORM_BLOCK; blockSize = 16; }
+        else if (dx10.dxgiFormat == 71 || dx10.dxgiFormat == 72) { format = VK_FORMAT_BC1_RGB_UNORM_BLOCK; blockSize = 8; }
+    } else if (header.ddspf.dwFourCC == 0x35545844) { // "DXT5"
+        format = VK_FORMAT_BC3_UNORM_BLOCK; blockSize = 16;
+    } else if (header.ddspf.dwFourCC == 0x31545844) { // "DXT1"
+        format = VK_FORMAT_BC1_RGB_UNORM_BLOCK; blockSize = 8;
+    }
+
+    if (format == VK_FORMAT_UNDEFINED) { fclose(f); return false; }
+
+    size_t dataOffset = ftell(f);
+    fseek(f, 0, SEEK_END);
+    size_t dataSize = ftell(f) - dataOffset;
+    fseek(f, dataOffset, SEEK_SET);
+
+    if (!alloc_texture_image_mips(ctx, header.dwWidth, header.dwHeight, mipMapCount, format, &texture->image, &texture->memory)) {
+        fclose(f); return false;
+    }
+
+    VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = dataSize, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+    VkMemoryRequirements req; vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+    vkAllocateMemory(ctx->device, &mai, NULL, &stagingMem);
+    vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+
+    void* mapped;
+    vkMapMemory(ctx->device, stagingMem, 0, dataSize, 0, &mapped);
+    fread(mapped, 1, dataSize, f);
+    vkUnmapMemory(ctx->device, stagingMem);
+    fclose(f);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+
+    VkImageMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = texture->image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipMapCount, 0, 1}, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    VkBufferImageCopy* regions = malloc(mipMapCount * sizeof(VkBufferImageCopy));
+    uint32_t offset = 0; uint32_t mipW = header.dwWidth; uint32_t mipH = header.dwHeight;
+    for (uint32_t i = 0; i < mipMapCount; i++) {
+        regions[i] = (VkBufferImageCopy){ .bufferOffset = offset, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1}, .imageExtent = {mipW, mipH, 1} };
+        uint32_t blocksW = (mipW + 3) / 4; uint32_t blocksH = (mipH + 3) / 4;
+        offset += blocksW * blocksH * blockSize;
+        if (mipW > 1) mipW /= 2; if (mipH > 1) mipH /= 2;
+    }
+    vkCmdCopyBufferToImage(cmd, stagingBuf, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipMapCount, regions);
+    free(regions);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL); vkFreeMemory(ctx->device, stagingMem, NULL);
+
+    if (finalize_texture_mips(ctx, texture, format, VK_SAMPLER_ADDRESS_MODE_REPEAT, mipMapCount)) {
+        texture->width = header.dwWidth; texture->height = header.dwHeight; texture->loaded = true;
+        return true;
+    }
+    return false;
+}
+
 bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) {
+    char dds_path[512];
+    strncpy(dds_path, filename, sizeof(dds_path) - 1);
+    char* ext = strrchr(dds_path, '.');
+    if (ext) strcpy(ext, ".dds");
+
+    // 1. Check local offline-compressed .dds first (e.g., ./assets/textures/diffuse.dds)
+    if (ext && load_texture_dds(ctx, dds_path, texture)) {
+        fprintf(stdout, "\033[36m[TEXTURE] AAA Pipeline: Zero-Copy Local DDS Loaded -> %s\033[0m\n", dds_path);
+        return true;
+    }
+
+    // 2. Check the engine's JIT-compiled .dds cache
+    const char* dds_cache = get_texture_cache_path(dds_path, false);
+    if (ext && load_texture_dds(ctx, dds_cache, texture)) {
+        fprintf(stdout, "\033[32m[TEXTURE] Cache Hit (JIT DDS): %s\033[0m\n", dds_cache);
+        return true;
+    }
+
+    // 3. Check the .otex cache (used primarily for HDR EXRs that skip DDS)
     const char* cache_path = get_texture_cache_path(filename, false);
     FILE* f = fopen(cache_path, "rb");
     if (f) {
@@ -1549,46 +1754,90 @@ bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) 
 
     fprintf(stdout, "\033[33m[TEXTURE] Cache Miss. Decoding: %s\033[0m\n", filename);
 
-    int w, h, ch;
-    void* pixels = NULL;
-    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
-    size_t data_size = 0;
-    bool is_float = false;
+int w, h, ch;
 
+    // EXR HDR textures stay uncompressed (32-bit float) to preserve physical light values
     if (strstr(filename, ".exr")) {
         bool is_normal = (strstr(filename, "nor") != NULL);
-        pixels = load_exr_as_float(filename, &w, &h, is_normal, false);
-        if (!pixels) return false;
-        format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        data_size = w * h * 16;
-        is_float = true;
-    } else {
-        pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
-        if (!pixels) {
-            fprintf(stderr, "[WARNING] Failed to load texture: %s\n", filename);
-            return false;
+        float* float_pixels = load_exr_as_float(filename, &w, &h, is_normal, false);
+        if (!float_pixels) return false;
+
+        f = fopen(cache_path, "wb");
+        if (f) {
+            OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(w * h * 16) };
+            fwrite(&header, sizeof(OtexHeader), 1, f);
+            fwrite(float_pixels, 1, header.data_size, f);
+            fclose(f);
         }
-        format = VK_FORMAT_R8G8B8A8_UNORM;
-        data_size = w * h * 4;
+
+        bool res = load_texture_from_float_pixels(ctx, float_pixels, w, h, texture);
+        free(float_pixels);
+        return res;
     }
 
-    f = fopen(cache_path, "wb");
-    if (f) {
-        OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, format, (uint32_t)data_size };
-        fwrite(&header, sizeof(OtexHeader), 1, f);
-        fwrite(pixels, 1, data_size, f);
-        fclose(f);
+    // Standard LDR textures (PNG/JPG) get JIT compiled into BC3 (DXT5) DDS files
+    unsigned char* pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
+    if (!pixels) {
+        fprintf(stderr, "[WARNING] Failed to load texture: %s\n", filename);
+        return false;
     }
 
-    bool res = false;
-    if (is_float) {
-        res = load_texture_from_float_pixels(ctx, (float*)pixels, w, h, texture);
-        free(pixels);
-    } else {
-        res = load_texture_from_pixels(ctx, (stbi_uc*)pixels, w, h, texture);
-        stbi_image_free(pixels);
+    fprintf(stdout, "\033[35m[COOKER] JIT Compressing %s to BC3 (DXT5)...\033[0m\n", filename);
+
+    uint32_t num_blocks_x = (w + 3) / 4;
+    uint32_t num_blocks_y = (h + 3) / 4;
+    uint32_t dxt_size = num_blocks_x * num_blocks_y * 16;
+    unsigned char* dxt_data = malloc(dxt_size);
+
+    for (uint32_t by = 0; by < num_blocks_y; by++) {
+        for (uint32_t bx = 0; bx < num_blocks_x; bx++) {
+            unsigned char block[64];
+            for (uint32_t y = 0; y < 4; y++) {
+                for (uint32_t x = 0; x < 4; x++) {
+                    uint32_t px = (bx * 4) + x;
+                    uint32_t py = (by * 4) + y;
+                    // Clamp to edge for non-power-of-two textures
+                    uint32_t idx = ((py < h ? py : h - 1) * w + (px < w ? px : w - 1)) * 4;
+                    memcpy(&block[(y * 4 + x) * 4], &pixels[idx], 4);
+                }
+            }
+            // Compress the 4x4 block into 16 bytes using STB_DXT_NORMAL quality
+            stb_compress_dxt_block(&dxt_data[(by * num_blocks_x + bx) * 16], block, 1, STB_DXT_NORMAL);
+        }
     }
-    return res;
+
+    char out_dds_path[512];
+    strncpy(out_dds_path, filename, sizeof(out_dds_path) - 1);
+    char* out_ext = strrchr(out_dds_path, '.');
+    if (out_ext) strcpy(out_ext, ".dds");
+    const char* out_dds_cache = get_texture_cache_path(out_dds_path, false);
+
+    FILE* fdds = fopen(out_dds_cache, "wb");
+    if (fdds) {
+        uint32_t magic = DDS_MAGIC;
+        DDS_HEADER header = {0};
+        header.dwSize = 124;
+        header.dwFlags = 0x1007 | 0x80000; // CAPS | HEIGHT | WIDTH | PIXELFORMAT | LINEARSIZE
+        header.dwHeight = h;
+        header.dwWidth = w;
+        header.dwPitchOrLinearSize = dxt_size;
+        header.dwMipMapCount = 1;
+        header.ddspf.dwSize = 32;
+        header.ddspf.dwFlags = 0x4; // DDPF_FOURCC
+        header.ddspf.dwFourCC = 0x35545844; // "DXT5"
+        header.dwCaps = 0x1000; // DDSCAPS_TEXTURE
+
+        fwrite(&magic, 4, 1, fdds);
+        fwrite(&header, sizeof(DDS_HEADER), 1, fdds);
+        fwrite(dxt_data, 1, dxt_size, fdds);
+        fclose(fdds);
+    }
+
+    free(dxt_data);
+    stbi_image_free(pixels);
+
+    // Pipe the newly generated DDS right back into the engine's AAA loader
+    return load_texture_dds(ctx, out_dds_cache, texture);
 }
 
 void destroy_texture(VulkanContext* context, Texture2D* texture) {
