@@ -62,6 +62,9 @@ typedef struct {
     uint32_t node_count;
     OmdlNode* nodes;
     mat4* world_transforms; // Pre-allocated scratchpad for fast hierarchy evaluation
+    mat4* local_transforms; // AAA FIX: Pre-allocated to avoid frame allocation overhead
+    bool* node_resolved;    // AAA FIX: Pre-allocated for topological sorting
+    uint32_t* traversal_stack; // AAA FIX: Iterative topological sort stack
 
     uint32_t skin_count;
     OmdlSkin* skins;
@@ -129,6 +132,7 @@ static uint32_t omdl_cache_idx = 0;
 static uint32_t omdl_base_v = 0;
 static uint32_t omdl_base_i = 0;
 static uint32_t omdl_base_m = 0;
+static OmdlSceneGraph* omdl_cache_osg = NULL;
 
 typedef struct {
     cgltf_node* node;
@@ -886,6 +890,38 @@ bool load_gltf(const char* filepath, Scene* scene) {
             flushUploadStagingBuffer(&context);
 
             omdl_cache_idx = 0;
+
+            // AAA FIX: Sequential read! The file pointer is now exactly at the start of the scene graph!
+            omdl_cache_osg = calloc(1, sizeof(OmdlSceneGraph));
+            omdl_cache_osg->node_count = header.node_count;
+            if (omdl_cache_osg->node_count > 0) {
+                omdl_cache_osg->nodes = malloc(header.node_count * sizeof(OmdlNode));
+                fread(omdl_cache_osg->nodes, sizeof(OmdlNode), header.node_count, fomdl);
+                omdl_cache_osg->world_transforms = malloc(header.node_count * sizeof(mat4));
+                omdl_cache_osg->local_transforms = malloc(header.node_count * sizeof(mat4));
+                omdl_cache_osg->node_resolved = malloc(header.node_count * sizeof(bool));
+                omdl_cache_osg->traversal_stack = malloc(header.node_count * sizeof(uint32_t));
+            }
+
+            omdl_cache_osg->skin_count = header.skin_count;
+            if (omdl_cache_osg->skin_count > 0) {
+                omdl_cache_osg->skins = malloc(header.skin_count * sizeof(OmdlSkin));
+                omdl_cache_osg->skin_joints = malloc(header.total_joints * sizeof(uint32_t));
+                omdl_cache_osg->skin_ibms = malloc(header.total_joints * sizeof(mat4));
+                fread(omdl_cache_osg->skins, sizeof(OmdlSkin), header.skin_count, fomdl);
+                fread(omdl_cache_osg->skin_joints, sizeof(uint32_t), header.total_joints, fomdl);
+                fread(omdl_cache_osg->skin_ibms, sizeof(mat4), header.total_joints, fomdl);
+            }
+
+            omdl_cache_osg->anim_count = header.anim_count;
+            if (omdl_cache_osg->anim_count > 0) {
+                omdl_cache_osg->anims = malloc(header.anim_count * sizeof(OmdlAnimation));
+                omdl_cache_osg->channels = malloc(header.total_channels * sizeof(OmdlChannel));
+                omdl_cache_osg->anim_floats = malloc(header.total_floats * sizeof(float));
+                fread(omdl_cache_osg->anims, sizeof(OmdlAnimation), header.anim_count, fomdl);
+                fread(omdl_cache_osg->channels, sizeof(OmdlChannel), header.total_channels, fomdl);
+                fread(omdl_cache_osg->anim_floats, sizeof(float), header.total_floats, fomdl);
+            }
         }
         fclose(fomdl);
     }
@@ -1083,57 +1119,21 @@ bool load_gltf(const char* filepath, Scene* scene) {
 
         instance->gltf_data = (void*)osg;
         osg->world_transforms = malloc(osg->node_count * sizeof(mat4));
+        osg->local_transforms = malloc(osg->node_count * sizeof(mat4));
+        osg->node_resolved = malloc(osg->node_count * sizeof(bool));
+        osg->traversal_stack = malloc(osg->node_count * sizeof(uint32_t));
 
         if (omdl_vertices) free(omdl_vertices);
         if (omdl_indices) free(omdl_indices);
         if (omdl_morphs) free(omdl_morphs);
         if (omdl_metas) free(omdl_metas);
     } else {
-        OmdlSceneGraph* osg = calloc(1, sizeof(OmdlSceneGraph));
-        FILE* fomdl = fopen(omdl_path, "rb");
+        instance->gltf_data = (void*)omdl_cache_osg;
 
-        OmdlHeader h; fread(&h, sizeof(OmdlHeader), 1, fomdl);
-        fseek(fomdl, sizeof(OmdlHeader) + (h.mesh_count * sizeof(OmdlMeshMeta)) +
-              (h.total_vertices * sizeof(Vertex)) + (h.total_indices * sizeof(uint32_t)) +
-              (h.total_morph_deltas * sizeof(MorphDelta)), SEEK_SET);
-
-        osg->node_count = h.node_count;
-        if (osg->node_count > 0) {
-            osg->nodes = malloc(osg->node_count * sizeof(OmdlNode));
-            fread(osg->nodes, sizeof(OmdlNode), osg->node_count, fomdl);
-            osg->world_transforms = malloc(osg->node_count * sizeof(mat4));
-        }
-
-        osg->skin_count = h.skin_count;
-        if (osg->skin_count > 0) {
-            osg->skins = malloc(osg->skin_count * sizeof(OmdlSkin));
-            osg->skin_joints = malloc(h.total_joints * sizeof(uint32_t));
-            osg->skin_ibms = malloc(h.total_joints * sizeof(mat4));
-            fread(osg->skins, sizeof(OmdlSkin), osg->skin_count, fomdl);
-            fread(osg->skin_joints, sizeof(uint32_t), h.total_joints, fomdl);
-            fread(osg->skin_ibms, sizeof(mat4), h.total_joints, fomdl);
-        }
-
-        osg->anim_count = h.anim_count;
-        if (osg->anim_count > 0) {
-            osg->anims = malloc(osg->anim_count * sizeof(OmdlAnimation));
-            osg->channels = malloc(h.total_channels * sizeof(OmdlChannel));
-            osg->anim_floats = malloc(h.total_floats * sizeof(float));
-            fread(osg->anims, sizeof(OmdlAnimation), osg->anim_count, fomdl);
-            fread(osg->channels, sizeof(OmdlChannel), h.total_channels, fomdl);
-            fread(osg->anim_floats, sizeof(float), h.total_floats, fomdl);
-        }
-
-        fclose(fomdl);
-        instance->gltf_data = (void*)osg;
-
-        // Restore integer node IDs to meshes (Hijack pointer)
         for (size_t i = 0; i < instance->mesh_count; i++) {
-            // Nullify the cgltf pointer first to prevent out-of-bounds indexing
             scene->meshes.items[instance->mesh_start_index + i].node = NULL;
-
-            for (size_t n = 0; n < osg->node_count; n++) {
-                if (osg->nodes[n].mesh_idx == (int32_t)i) {
+            for (size_t n = 0; n < omdl_cache_osg->node_count; n++) {
+                if (omdl_cache_osg->nodes[n].mesh_idx == (int32_t)i) {
                     scene->meshes.items[instance->mesh_start_index + i].node = (void*)(uintptr_t)n;
                     break;
                 }
@@ -1142,6 +1142,7 @@ bool load_gltf(const char* filepath, Scene* scene) {
 
         if (omdl_cache_metas) free(omdl_cache_metas);
         omdl_cache_metas = NULL;
+        omdl_cache_osg = NULL;
     }
 
     // Assign morphWeightOffset: pack each morph mesh into a unique slice of morphWeightBuffer.
@@ -1223,33 +1224,17 @@ static size_t find_keyframe(float* times, size_t count, float time) {
     return count - 2;
 }
 
-#define MAX_NODES 16384
-static mat4 node_transform_scratch[MAX_NODES];
-
-// Helper for topological resolution
-static void resolve_omdl_world(uint32_t n, OmdlSceneGraph* osg, mat4* locals, bool* resolved) {
-    if (resolved[n]) return;
-    int32_t p = osg->nodes[n].parent;
-    if (p >= 0) {
-        resolve_omdl_world(p, osg, locals, resolved);
-        glm_mat4_mul(osg->world_transforms[p], locals[n], osg->world_transforms[n]);
-    } else {
-        glm_mat4_copy(locals[n], osg->world_transforms[n]);
-    }
-    resolved[n] = true;
-}
-
 void animate_scene(Scene* scene, float time) {
     for (size_t inst = 0; inst < scene->gltf_instance_count; inst++) {
         GLTFInstance* instance = &scene->gltf_instances[inst];
         OmdlSceneGraph* osg = (OmdlSceneGraph*)instance->gltf_data;
         if (!osg || osg->anim_count == 0) continue;
 
+        // TODO: Add active_animation index to GLTFInstance to support selecting sequences
         OmdlAnimation* anim = &osg->anims[0];
         float anim_time = fmodf(time, anim->duration);
 
-        mat4* local_transforms = malloc(osg->node_count * sizeof(mat4));
-        bool* node_resolved = calloc(osg->node_count, sizeof(bool));
+        memset(osg->node_resolved, 0, osg->node_count * sizeof(bool));
 
         // Phase 1: Evaluate Channels and Build Local Matrices
         for (uint32_t n = 0; n < osg->node_count; n++) {
@@ -1264,8 +1249,7 @@ void animate_scene(Scene* scene, float time) {
 
                 if (chan->target_node == UINT32_MAX) continue;
 
-                // cgltf mapping: 4 = Weights
-                if (chan->path_type == 4) {
+                if (chan->path_type == cgltf_animation_path_type_weights) {
                     if (n != 0) continue; // Execute once
                     size_t k0 = find_keyframe(&osg->anim_floats[chan->times_offset], chan->keyframe_count, anim_time);
                     size_t k1 = chan->keyframe_count > 1 ? k0 + 1 : k0;
@@ -1300,22 +1284,21 @@ void animate_scene(Scene* scene, float time) {
                 float factor = (t1 > t0) ? (anim_time - t0) / (t1 - t0) : 0.0f;
                 if (factor < 0.0f) factor = 0.0f; if (factor > 1.0f) factor = 1.0f;
 
-                // cgltf mapping: 1 = Translation, 2 = Rotation, 3 = Scale
-                float* v0 = &osg->anim_floats[chan->values_offset + (k0 * (chan->path_type == 2 ? 4 : 3))];
-                float* v1 = &osg->anim_floats[chan->values_offset + (k1 * (chan->path_type == 2 ? 4 : 3))];
+                float* v0 = &osg->anim_floats[chan->values_offset + (k0 * (chan->path_type == cgltf_animation_path_type_rotation ? 4 : 3))];
+                float* v1 = &osg->anim_floats[chan->values_offset + (k1 * (chan->path_type == cgltf_animation_path_type_rotation ? 4 : 3))];
 
-                if (chan->path_type == 1) {
+                if (chan->path_type == cgltf_animation_path_type_translation) {
                     T[0] = lerp(v0[0], v1[0], factor);
                     T[1] = lerp(v0[1], v1[1], factor);
                     T[2] = lerp(v0[2], v1[2], factor);
                 }
-                else if (chan->path_type == 2) {
+                else if (chan->path_type == cgltf_animation_path_type_rotation) {
                     versor r0 = {v0[0], v0[1], v0[2], v0[3]};
                     versor r1 = {v1[0], v1[1], v1[2], v1[3]};
                     glm_quat_slerp(r0, r1, factor, R);
                     glm_quat_normalize(R);
                 }
-                else if (chan->path_type == 3) {
+                else if (chan->path_type == cgltf_animation_path_type_scale) {
                     S[0] = lerp(v0[0], v1[0], factor);
                     S[1] = lerp(v0[1], v1[1], factor);
                     S[2] = lerp(v0[2], v1[2], factor);
@@ -1333,12 +1316,30 @@ void animate_scene(Scene* scene, float time) {
                 glm_mat4_copy(node->base_matrix, local);
             }
 
-            glm_mat4_copy(local, local_transforms[n]);
+            glm_mat4_copy(local, osg->local_transforms[n]);
         }
 
-        // Phase 2: Safe Topological Resolution of World Transforms
+        // Phase 2: O(N) Iterative Kahn-style Topological Resolution
+        // Eliminates function call overhead and stack overflows completely
         for (uint32_t n = 0; n < osg->node_count; n++) {
-            resolve_omdl_world(n, osg, local_transforms, node_resolved);
+            uint32_t curr = n;
+            uint32_t depth = 0;
+
+            while (curr != UINT32_MAX && !osg->node_resolved[curr]) {
+                osg->traversal_stack[depth++] = curr;
+                curr = osg->nodes[curr].parent >= 0 ? (uint32_t)osg->nodes[curr].parent : UINT32_MAX;
+            }
+
+            while (depth > 0) {
+                curr = osg->traversal_stack[--depth];
+                int32_t p = osg->nodes[curr].parent;
+                if (p >= 0) {
+                    glm_mat4_mul(osg->world_transforms[p], osg->local_transforms[curr], osg->world_transforms[curr]);
+                } else {
+                    glm_mat4_copy(osg->local_transforms[curr], osg->world_transforms[curr]);
+                }
+                osg->node_resolved[curr] = true;
+            }
 
             if (osg->nodes[n].mesh_idx >= 0) {
                 uint32_t m = instance->mesh_start_index + osg->nodes[n].mesh_idx;
@@ -1372,8 +1373,5 @@ void animate_scene(Scene* scene, float time) {
                 }
             }
         }
-
-        free(local_transforms);
-        free(node_resolved);
     }
 }
