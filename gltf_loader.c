@@ -23,6 +23,10 @@ static size_t node_mapping_count = 0;
 static int global_joint_counter = 0;
 extern mat4* jointSSBOMapped[MAX_FRAMES_IN_FLIGHT];
 
+extern uint32_t megaBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t vertexCount);
+extern uint32_t megaIndexBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t indexCount);
+extern uint32_t megaMorphBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t deltaCount);
+
 void get_directory(const char* filepath, char* dir, size_t dir_size) {
     const char* last_slash = strrchr(filepath, '/');
     if (last_slash) {
@@ -393,12 +397,13 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             mesh.emissiveStrength = prim->material->emissive_strength.emissive_strength;
     }
 
-    Vertex* final_vertices = NULL;
-    uint32_t* final_indices = NULL;
-    MorphDelta* final_morphs = NULL;
     uint32_t final_vertex_count = 0;
     uint32_t final_index_count = 0;
     uint32_t final_morph_count = 0;
+
+    mesh.megaBaseVertex     = UINT32_MAX;
+    mesh.megaBaseIndex      = UINT32_MAX;
+    mesh.dynamicBaseVertex  = UINT32_MAX;
 
     bool loaded_from_cache = false;
     if (geom_cache_in) {
@@ -408,23 +413,31 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         fread(mesh.aabbMin, sizeof(vec3), 1, geom_cache_in);
         fread(mesh.aabbMax, sizeof(vec3), 1, geom_cache_in);
 
+        // AAA Zero-Copy NVMe to GPU Staging Buffer
         if (final_vertex_count > 0) {
-            final_vertices = malloc(final_vertex_count * sizeof(Vertex));
-            fread(final_vertices, sizeof(Vertex), final_vertex_count, geom_cache_in);
+            mesh.megaBaseVertex = megaBufferAllocateFromFile(&context, geom_cache_in, final_vertex_count);
         }
         if (final_index_count > 0) {
-            final_indices = malloc(final_index_count * sizeof(uint32_t));
-            fread(final_indices, sizeof(uint32_t), final_index_count, geom_cache_in);
+            mesh.megaBaseIndex = megaIndexBufferAllocateFromFile(&context, geom_cache_in, final_index_count);
         }
         if (final_morph_count > 0) {
-            size_t total_deltas = (size_t)final_vertex_count * final_morph_count;
-            final_morphs = malloc(total_deltas * sizeof(MorphDelta));
-            fread(final_morphs, sizeof(MorphDelta), total_deltas, geom_cache_in);
+            uint32_t delta_offset = megaMorphBufferAllocateFromFile(&context, geom_cache_in, final_vertex_count * final_morph_count);
+            if (delta_offset != UINT32_MAX) {
+                mesh.morph_data = malloc(sizeof(MorphData));
+                mesh.morph_data->target_count = final_morph_count;
+                mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
+                mesh.morphDeltaOffset = (int)delta_offset;
+                mesh.morphCount = (int)final_morph_count;
+                mesh.dynamicBaseVertex = UINT32_MAX;
+            }
         }
         loaded_from_cache = true;
     }
 
     if (!loaded_from_cache) {
+        Vertex* final_vertices = NULL;
+        uint32_t* final_indices = NULL;
+        MorphDelta* final_morphs = NULL;
         final_vertex_count = (uint32_t)vertex_count;
         final_index_count = (uint32_t)index_count;
         final_morph_count = (uint32_t)prim->targets_count;
@@ -495,25 +508,35 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             if (final_vertex_count > 0) fwrite(final_vertices, sizeof(Vertex), final_vertex_count, geom_cache_out);
             if (final_index_count > 0) fwrite(final_indices, sizeof(uint32_t), final_index_count, geom_cache_out);
             if (final_morph_count > 0) {
-                size_t total_deltas = (size_t)final_vertex_count * final_morph_count;
-                fwrite(final_morphs, sizeof(MorphDelta), total_deltas, geom_cache_out);
+                    size_t total_deltas = (size_t)final_vertex_count * final_morph_count;
+                    fwrite(final_morphs, sizeof(MorphDelta), total_deltas, geom_cache_out);
+                }
             }
-        }
-    }
 
-    if (final_morph_count > 0 && final_morphs) {
-        uint32_t delta_offset = megaMorphBufferAllocate(&context, final_morphs, final_vertex_count * final_morph_count);
-        if (delta_offset != UINT32_MAX) {
-            mesh.morph_data = malloc(sizeof(MorphData));
-            mesh.morph_data->target_count = final_morph_count;
-            mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
-            mesh.morphDeltaOffset = (int)delta_offset;
-            mesh.morphCount = (int)final_morph_count;
-        }
-        free(final_morphs);
-    }
+            if (final_morph_count > 0 && final_morphs) {
+                uint32_t delta_offset = megaMorphBufferAllocate(&context, final_morphs, final_vertex_count * final_morph_count);
+                if (delta_offset != UINT32_MAX) {
+                    mesh.morph_data = malloc(sizeof(MorphData));
+                    mesh.morph_data->target_count = final_morph_count;
+                    mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
+                    mesh.morphDeltaOffset = (int)delta_offset;
+                    mesh.morphCount = (int)final_morph_count;
+                }
+                free(final_morphs);
+            }
 
-    mesh.vertexCount = final_vertex_count;
+            mesh.megaBaseVertex = megaBufferAllocate(&context, final_vertices, final_vertex_count);
+            if (final_indices && final_index_count > 0) {
+                mesh.megaBaseIndex = megaIndexBufferAllocate(&context, final_indices, final_index_count);
+            }
+
+            if (mesh.morph_data) mesh.dynamicBaseVertex = UINT32_MAX;
+            if (final_indices) free(final_indices);
+            if (final_vertices) free(final_vertices);
+        }
+
+        mesh.vertexCount = final_vertex_count;
+
     mesh.indexCount  = final_index_count;
 
     // Load texture if present
@@ -534,20 +557,8 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
     }
 
-    mesh.megaBaseVertex     = UINT32_MAX;
-    mesh.megaBaseIndex      = UINT32_MAX;
-    mesh.dynamicBaseVertex  = UINT32_MAX;
+    printf("Loaded mesh '%s' with %zu vertices", mesh.name, (size_t)final_vertex_count);
 
-    mesh.megaBaseVertex = megaBufferAllocate(&context, final_vertices, final_vertex_count);
-    if (final_indices && final_index_count > 0) {
-        mesh.megaBaseIndex = megaIndexBufferAllocate(&context, final_indices, final_index_count);
-    }
-
-    if (mesh.morph_data) mesh.dynamicBaseVertex = UINT32_MAX;
-    if (final_indices) free(final_indices);
-    if (final_vertices) free(final_vertices);
-
-    printf("Loaded mesh '%s' with %zu vertices", mesh.name, final_vertex_count);
     if (is_unlit) {
         printf(" (UNLIT)");
     }

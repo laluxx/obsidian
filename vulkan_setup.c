@@ -2320,6 +2320,38 @@ uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t verte
     return baseVertex;
 }
 
+uint32_t megaBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t vertexCount)
+{
+    VkDeviceSize uploadSize = vertexCount * sizeof(Vertex);
+    VkDeviceSize dstOffset  = (VkDeviceSize)ctx->megaVertexBufferOffset * sizeof(Vertex);
+
+    if (dstOffset + uploadSize > ctx->megaVertexBufferSize) return UINT32_MAX;
+
+    if (ctx->uploadStagingBuffer && ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+
+    if (ctx->uploadStagingBuffer) {
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, 1, uploadSize, f);
+        if (ctx->pendingVertexCopyCount == ctx->pendingVertexCopyCapacity) {
+            ctx->pendingVertexCopyCapacity *= 2;
+            ctx->pendingVertexCopies = realloc(ctx->pendingVertexCopies, ctx->pendingVertexCopyCapacity * sizeof(VkBufferCopy));
+        }
+        ctx->pendingVertexCopies[ctx->pendingVertexCopyCount++] = (VkBufferCopy){ .srcOffset = ctx->uploadStagingOffset, .dstOffset = dstOffset, .size = uploadSize };
+        ctx->uploadStagingOffset += uploadSize;
+    } else {
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        createBuffer(ctx, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
+        void* mapped; vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+        fread(mapped, 1, uploadSize, f);
+        vkUnmapMemory(ctx->device, stagingMem);
+        copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue, stagingBuf, ctx->megaVertexBuffer, uploadSize, 0, dstOffset);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL); vkFreeMemory(ctx->device, stagingMem, NULL);
+    }
+
+    uint32_t baseVertex = ctx->megaVertexBufferOffset;
+    ctx->megaVertexBufferOffset += vertexCount;
+    return baseVertex;
+}
+
 uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_t deltaCount)
 {
     VkDeviceSize uploadSize = (VkDeviceSize)deltaCount * sizeof(MorphDelta);
@@ -2360,6 +2392,35 @@ uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_
                    stagingBuf, ctx->megaMorphBuffer, uploadSize, 0, dstOffset);
         vkDestroyBuffer(ctx->device, stagingBuf, NULL);
         vkFreeMemory(ctx->device, stagingMem, NULL);
+    }
+
+    uint32_t baseOffset = ctx->megaMorphBufferOffset;
+    ctx->megaMorphBufferOffset += deltaCount;
+    return baseOffset;
+}
+
+uint32_t megaMorphBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t deltaCount)
+{
+    VkDeviceSize uploadSize = (VkDeviceSize)deltaCount * sizeof(MorphDelta);
+    VkDeviceSize dstOffset  = (VkDeviceSize)ctx->megaMorphBufferOffset * sizeof(MorphDelta);
+
+    if (dstOffset + uploadSize > ctx->megaMorphBufferSize) return UINT32_MAX;
+
+    if (ctx->uploadStagingBuffer && ctx->uploadStagingOffset + uploadSize <= ctx->uploadStagingSize) {
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, 1, uploadSize, f);
+        VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+        VkBufferCopy region = { .srcOffset = ctx->uploadStagingOffset, .dstOffset = dstOffset, .size = uploadSize };
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaMorphBuffer, 1, &region);
+        endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+        ctx->uploadStagingOffset += uploadSize;
+    } else {
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        createBuffer(ctx, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
+        void* mapped; vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+        fread(mapped, 1, uploadSize, f);
+        vkUnmapMemory(ctx->device, stagingMem);
+        copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue, stagingBuf, ctx->megaMorphBuffer, uploadSize, 0, dstOffset);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL); vkFreeMemory(ctx->device, stagingMem, NULL);
     }
 
     uint32_t baseOffset = ctx->megaMorphBufferOffset;
@@ -2425,6 +2486,38 @@ uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t
                    stagingBuf, ctx->megaIndexBuffer, uploadSize, 0, dstOffset);
         vkDestroyBuffer(ctx->device, stagingBuf, NULL);
         vkFreeMemory(ctx->device, stagingMem, NULL);
+    }
+
+    uint32_t baseIndex = ctx->megaIndexBufferOffset;
+    ctx->megaIndexBufferOffset += indexCount;
+    return baseIndex;
+}
+
+uint32_t megaIndexBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t indexCount)
+{
+    VkDeviceSize uploadSize = indexCount * sizeof(uint32_t);
+    VkDeviceSize dstOffset  = (VkDeviceSize)ctx->megaIndexBufferOffset * sizeof(uint32_t);
+
+    if (dstOffset + uploadSize > ctx->megaIndexBufferSize) return UINT32_MAX;
+
+    if (ctx->uploadStagingBuffer && ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+
+    if (ctx->uploadStagingBuffer) {
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, 1, uploadSize, f);
+        if (ctx->pendingIndexCopyCount == ctx->pendingIndexCopyCapacity) {
+            ctx->pendingIndexCopyCapacity *= 2;
+            ctx->pendingIndexCopies = realloc(ctx->pendingIndexCopies, ctx->pendingIndexCopyCapacity * sizeof(VkBufferCopy));
+        }
+        ctx->pendingIndexCopies[ctx->pendingIndexCopyCount++] = (VkBufferCopy){ .srcOffset = ctx->uploadStagingOffset, .dstOffset = dstOffset, .size = uploadSize };
+        ctx->uploadStagingOffset += uploadSize;
+    } else {
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        createBuffer(ctx, uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
+        void* mapped; vkMapMemory(ctx->device, stagingMem, 0, uploadSize, 0, &mapped);
+        fread(mapped, 1, uploadSize, f);
+        vkUnmapMemory(ctx->device, stagingMem);
+        copyBuffer(ctx->device, ctx->commandPool, ctx->graphicsQueue, stagingBuf, ctx->megaIndexBuffer, uploadSize, 0, dstOffset);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL); vkFreeMemory(ctx->device, stagingMem, NULL);
     }
 
     uint32_t baseIndex = ctx->megaIndexBufferOffset;
