@@ -180,6 +180,12 @@ static uint32_t vertex_count = 0;
 static uint32_t dynamic_draw_count = 0;
 static uint32_t frame_index = 0;
 
+static bool scene_topology_dirty = true;
+static bool indirect_buffer_dirty[MAX_FRAMES_IN_FLIGHT] = {true, true};
+static vec3 last_camera_pos = { -1e7f, -1e7f, -1e7f };
+static float* mesh_distances = NULL;
+static size_t mesh_distances_capacity = 0;
+
 uint32_t opaqueMeshCount = 0;
 uint32_t transparentMeshCount = 0;
 
@@ -685,27 +691,28 @@ void begin_frame(void) {
     line_renderer_clear();
     context.indirectDrawCount = (uint32_t)scene.meshes.count;
 
-    // AAA FIX: Sort meshes every single frame!
-    // Shell sort is O(N log N) and runs in microseconds. This guarantees
-    // opaqueMeshCount is perfectly synced with compact.comp to prevent flickering.
     vec3 camPos = { camera.position[0], camera.position[1], camera.position[2] };
-    sort_meshes_by_alpha(&scene.meshes, camPos);
+    float cam_delta = glm_vec3_distance2(camPos, last_camera_pos);
 
-    // AAA ARCHITECTURE FIX: We MUST resync the CPU sorted array with the GPU!
-    // If we sort the meshes in memory but don't rebuild the indirect commands and
-    // mark the SSBO dirty, the GPU will draw the wrong meshes with the wrong materials,
-    // resulting in invisible objects or corrupted rendering.
-    updateMeshSSBOAndIndirect(&context, &scene.meshes);
+    // AAA Zero-Tick Architecture: Only sort and write to PCIe if the observer or topology changes
+    if (scene_topology_dirty || cam_delta > 0.01f) {
+        sort_meshes_by_alpha(&scene.meshes, camPos);
+        glm_vec3_copy(camPos, last_camera_pos);
+
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            indirect_buffer_dirty[i] = true;
+        }
+        scene_topology_dirty = false;
+    }
+
+    if (indirect_buffer_dirty[frame_index]) {
+        updateMeshSSBOAndIndirect(&context, &scene.meshes);
+        indirect_buffer_dirty[frame_index] = false;
+    }
+
+    // flushMeshSSBO is extremely cheap (O(1) bitmask scan) so it safely runs every frame
     flushMeshSSBO(&context, &scene.meshes);
 }
-
-/* void begin_frame(void) { */
-/*     frame_index = context.currentFrame; */
-/*     dynamic_draw_count = 0; */
-/*     vertex_count = 0; */
-/*     lineVertexCount = 0; */
-/*     context.indirectDrawCount = (uint32_t)scene.meshes.count; */
-/* } */
 
 static void create_mapped_buffer(VkDevice dev, VkPhysicalDevice physDev, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer* buffer, VkDeviceMemory* memory, void** mapped) {
     VkBufferCreateInfo bufferInfo = {
@@ -980,7 +987,13 @@ Vertex* get_dynamic_vertices(void) {
 }
 
 void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
-    if (!meshes->draw_indices) return;
+    if (!meshes->draw_indices || meshes->count == 0) return;
+
+    if (meshes->capacity > mesh_distances_capacity) {
+        mesh_distances_capacity = meshes->capacity;
+        mesh_distances = realloc(mesh_distances, mesh_distances_capacity * sizeof(float));
+    }
+
     size_t write_idx = 0;
     for (size_t i = 0; i < meshes->count; i++) {
         uint32_t mesh_idx = meshes->draw_indices[i];
@@ -999,23 +1012,28 @@ void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
     size_t blend_count = meshes->count - write_idx;
     if (blend_count <= 1) return;
 
-    // Data-Oriented Shell Sort! Sorts indices instead of 1KB Mesh structs.
     uint32_t* blend = &meshes->draw_indices[write_idx];
-    size_t gaps[] = { 701, 301, 132, 57, 23, 10, 4, 1 };
 
+    // AAA Optimization: Pre-calculate distance exactly once per transparent mesh!
+    // Slashes massive redundant matrix array accesses inside the sorting loops.
+    for (size_t i = 0; i < blend_count; i++) {
+        uint32_t mesh_idx = blend[i];
+        Mesh* m = &meshes->items[mesh_idx];
+        mesh_distances[mesh_idx] = glm_vec3_distance2(cameraPos, (vec3){m->model[3][0], m->model[3][1], m->model[3][2]});
+    }
+
+    // Data-Oriented Shell Sort! Sorts indices using cached O(1) L1-cache float lookups.
+    size_t gaps[] = { 701, 301, 132, 57, 23, 10, 4, 1 };
     for (int g = 0; g < 8; g++) {
         size_t gap = gaps[g];
         for (size_t i = gap; i < blend_count; i++) {
             uint32_t temp_idx = blend[i];
-            Mesh* temp_mesh = &meshes->items[temp_idx];
-            float d_temp = glm_vec3_distance2(cameraPos, (vec3){temp_mesh->model[3][0], temp_mesh->model[3][1], temp_mesh->model[3][2]});
+            float d_temp = mesh_distances[temp_idx];
 
             size_t j;
             for (j = i; j >= gap; j -= gap) {
                 uint32_t comp_idx = blend[j - gap];
-                Mesh* comp_mesh = &meshes->items[comp_idx];
-                float d_j = glm_vec3_distance2(cameraPos, (vec3){comp_mesh->model[3][0], comp_mesh->model[3][1], comp_mesh->model[3][2]});
-                if (d_j >= d_temp) break;
+                if (mesh_distances[comp_idx] >= d_temp) break;
                 blend[j] = blend[j - gap];
             }
             blend[j] = temp_idx;
@@ -1074,7 +1092,7 @@ void meshes_add(Meshes* meshes, Mesh mesh) {
     }
     meshes->draw_indices[meshes->count] = meshes->count;
     meshes->items[meshes->count++] = mesh;
-    markMeshesSSBODirty(&context); // Mark dirty only when structural additions occur
+    scene_topology_dirty = true;
 }
 
 void meshes_remove(Meshes* meshes, size_t index) {
@@ -1085,7 +1103,7 @@ void meshes_remove(Meshes* meshes, size_t index) {
     for (size_t i = 0; i < meshes->count; i++) {
         meshes->draw_indices[i] = (uint32_t)i;
     }
-    markMeshesSSBODirty(&context); // Mark dirty only when structural removals occur
+    scene_topology_dirty = true;
 }
 
 void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
@@ -1130,6 +1148,7 @@ void meshes_destroy(VkDevice device, Meshes* meshes) {
     meshes->draw_indices = NULL;
     meshes->count = 0;
     meshes->capacity = 0;
+    scene_topology_dirty = true;
 }
 
 Mesh* get_mesh(const char* name) {
@@ -1666,20 +1685,20 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
 
     // 1. Try blazing-fast ZERO-COPY binary cache read
     if (alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory)) {
-            // Attempt to read from disk DIRECTLY into the mapped Vulkan staging buffer
-            if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width, height, fmt, 0, &tex->loaded)) {
-                // UI Icons must use CLAMP_TO_EDGE, not REPEAT, to prevent edge bleeding!
-                if (finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)) {
-                    fprintf(stdout, "\033[32m[SVG] Cache Hit (ZERO-COPY to GPU): %s\033[0m\n", cache_file);
-                    tex->width = width;
-                    tex->height = height;
-                    return textureCount++;
-                }
+        // Attempt to read from disk DIRECTLY into the mapped Vulkan staging buffer
+        if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width, height, fmt, 0, &tex->loaded)) {
+            // UI Icons must use CLAMP_TO_EDGE, not REPEAT, to prevent edge bleeding!
+            if (finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)) {
+                fprintf(stdout, "\033[32m[SVG] Cache Hit (ZERO-COPY to GPU): %s\033[0m\n", cache_file);
+                tex->width = width;
+                tex->height = height;
+                return textureCount++;
             }
+        }
 
         // Cache miss or read failure: clean up the image to prepare for rasterization
         vkDestroyImage(ctx->device, tex->image, NULL);
-        vkFreeMemory(ctx->device, tex->memory, NULL);
+        free_texture_vram(tex->memory);
         tex->image = VK_NULL_HANDLE;
         tex->memory = VK_NULL_HANDLE;
     }
@@ -1719,8 +1738,8 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
 
     // 4. Upload to Vulkan using standard pixel upload
     bool ok = alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory) &&
-              upload_pixels_to_image(ctx, pixels, size, tex->image, width, height, fmt, VK_IMAGE_LAYOUT_UNDEFINED, &tex->loaded) &&
-              finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        upload_pixels_to_image(ctx, pixels, size, tex->image, width, height, fmt, VK_IMAGE_LAYOUT_UNDEFINED, &tex->loaded) &&
+        finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     free(pixels);
 
