@@ -35,6 +35,91 @@ typedef struct {
 } DDS_HEADER;
 typedef struct { uint32_t dxgiFormat; uint32_t resourceDimension; uint32_t miscFlag; uint32_t arraySize; uint32_t miscFlags2; } DDS_HEADER_DXT10;
 
+// --- OBSIDIAN MEMORY MANAGER & ASYNC QUEUE ---
+#define MAX_TEXTURE_PAGES 64 // 16GB max pool
+typedef struct { VkDeviceMemory memory; VkDeviceSize size; VkDeviceSize offset; uint32_t active_allocations; } TexturePage;
+static TexturePage texture_pages[MAX_TEXTURE_PAGES];
+static uint32_t texture_page_count = 0;
+
+static bool alloc_texture_vram(VulkanContext* ctx, VkMemoryRequirements req, VkDeviceMemory* out_mem, VkDeviceSize* out_offset) {
+    VkDeviceSize alignment = req.alignment; // Trust driver alignment entirely
+    for (uint32_t i = 0; i < texture_page_count; i++) {
+        VkDeviceSize aligned_offset = (texture_pages[i].offset + alignment - 1) & ~(alignment - 1);
+        if (aligned_offset + req.size <= texture_pages[i].size) {
+            *out_mem = texture_pages[i].memory; *out_offset = aligned_offset;
+            texture_pages[i].offset = aligned_offset + req.size;
+            texture_pages[i].active_allocations++;
+            return true;
+        }
+    }
+    if (texture_page_count >= MAX_TEXTURE_PAGES) {
+        fprintf(stderr, "\033[31m[OMM] CRITICAL: Max texture pages reached!\033[0m\n");
+        return false;
+    }
+    VkDeviceSize page_size = 256 * 1024 * 1024;
+    if (req.size > page_size) page_size = (req.size + alignment - 1) & ~(alignment - 1);
+    uint32_t memType = findMemoryType(ctx->physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo allocInfo = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = page_size, .memoryTypeIndex = memType };
+    VkDeviceMemory new_mem;
+    if (vkAllocateMemory(ctx->device, &allocInfo, NULL, &new_mem) != VK_SUCCESS) return false;
+
+    texture_pages[texture_page_count] = (TexturePage){ .memory = new_mem, .size = page_size, .offset = req.size, .active_allocations = 1 };
+    *out_mem = new_mem; *out_offset = 0;
+    texture_page_count++;
+    fprintf(stdout, "\033[35m[OMM] Allocated %llu MB VRAM Texture Block (Page %u)\033[0m\n", page_size / (1024*1024), texture_page_count);
+    return true;
+}
+
+static void free_texture_vram(VkDeviceMemory mem) {
+    for (uint32_t i = 0; i < texture_page_count; i++) {
+        if (texture_pages[i].memory == mem) {
+            if (texture_pages[i].active_allocations > 0) {
+                texture_pages[i].active_allocations--;
+                if (texture_pages[i].active_allocations == 0) {
+                    texture_pages[i].offset = 0; // Compacting reset!
+                    fprintf(stdout, "\033[35m[OMM] Page %u compacted (0 active allocations).\033[0m\n", i);
+                }
+            }
+            return;
+        }
+    }
+}
+
+typedef struct { VkBuffer buffer; VkDeviceMemory memory; VkFence fence; VkCommandBuffer cmd; bool* loaded_flag; } AsyncUpload;
+static AsyncUpload* async_uploads = NULL;
+static uint32_t async_upload_count = 0;
+static uint32_t async_upload_capacity = 0;
+
+static void submit_async_upload(VulkanContext* ctx, VkBuffer buf, VkDeviceMemory mem, VkCommandBuffer cmd, bool* loaded_flag) {
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo submitInfo = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+    VkFenceCreateInfo fenceInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence; vkCreateFence(ctx->device, &fenceInfo, NULL, &fence);
+    vkQueueSubmit(ctx->graphicsQueue, 1, &submitInfo, fence);
+
+    if (async_upload_count == async_upload_capacity) {
+        async_upload_capacity = async_upload_capacity == 0 ? 128 : async_upload_capacity * 2;
+        async_uploads = realloc(async_uploads, async_upload_capacity * sizeof(AsyncUpload));
+    }
+    async_uploads[async_upload_count++] = (AsyncUpload){ buf, mem, fence, cmd, loaded_flag };
+}
+
+void pump_async_uploads(VulkanContext* ctx) {
+    for (uint32_t i = 0; i < async_upload_count; i++) {
+        if (vkGetFenceStatus(ctx->device, async_uploads[i].fence) == VK_SUCCESS) {
+            vkDestroyBuffer(ctx->device, async_uploads[i].buffer, NULL);
+            vkFreeMemory(ctx->device, async_uploads[i].memory, NULL);
+            vkFreeCommandBuffers(ctx->device, ctx->commandPool, 1, &async_uploads[i].cmd);
+            vkDestroyFence(ctx->device, async_uploads[i].fence, NULL);
+
+            // Defuse race condition: Texture pops in precisely when GPU completes
+            if (async_uploads[i].loaded_flag) *async_uploads[i].loaded_flag = true;
+
+            async_uploads[i] = async_uploads[--async_upload_count]; i--;
+        }
+    }
+}
+
 // --- Texture Pool Management ---
 static Texture2D texturePool[MAX_TEXTURES];
 static uint32_t textureCount = 0;
@@ -45,12 +130,25 @@ void texture_pool_init() {
 }
 
 void texture_pool_cleanup(VulkanContext* context) {
+    for (uint32_t i = 0; i < async_upload_count; i++) {
+        vkWaitForFences(context->device, 1, &async_uploads[i].fence, VK_TRUE, UINT64_MAX);
+    }
+    pump_async_uploads(context);
+
     for (uint32_t i = 0; i < textureCount; i++) {
         if (texturePool[i].loaded) {
             destroy_texture(context, &texturePool[i]);
         }
     }
     textureCount = 0;
+
+    for (uint32_t i = 0; i < texture_page_count; i++) {
+        vkFreeMemory(context->device, texture_pages[i].memory, NULL);
+    }
+    texture_page_count = 0;
+
+    if (async_uploads) { free(async_uploads); async_uploads = NULL; }
+    async_upload_capacity = 0;
 }
 
 int32_t texture_pool_add(VulkanContext* context, const char* filename) {
@@ -62,8 +160,7 @@ int32_t texture_pool_add(VulkanContext* context, const char* filename) {
     printf("Loading texture %u: %s\n", textureCount, filename);
 
     if (load_texture(context, filename, &texturePool[textureCount])) {
-        texturePool[textureCount].loaded = true;
-        printf("  -> Successfully loaded as texture #%u\n", textureCount);
+        printf("  -> Successfully queued texture #%u\n", textureCount);
         return textureCount++;
     }
 
@@ -255,17 +352,16 @@ static float* load_exr_as_float(const char* path, int* out_w, int* out_h, bool i
 
 // Forward declarations for texture utilities
 static bool alloc_texture_image(VulkanContext* ctx, uint32_t w, uint32_t h, VkFormat fmt, VkImage* image, VkDeviceMemory* memory);
-static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels, VkDeviceSize imageSize, VkImage image, uint32_t w, uint32_t h, VkFormat fmt, VkImageLayout srcLayout);
+static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels, VkDeviceSize imageSize, VkImage image, uint32_t w, uint32_t h, VkFormat fmt, VkImageLayout srcLayout, bool* loaded_flag);
 static bool finalize_texture(VulkanContext* ctx, Texture2D* texture, VkFormat fmt, VkSamplerAddressMode addrMode);
 
 static bool load_texture_from_float_pixels(VulkanContext* ctx, float* pixels, int w, int h, Texture2D* texture) {
     if (!pixels) return false;
-    // Massive precision upgrade! 32-bit floats preserve the raw EXR values perfectly
     VkFormat fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
     bool ok = alloc_texture_image(ctx, w, h, fmt, &texture->image, &texture->memory) &&
-              upload_pixels_to_image(ctx, (unsigned char*)pixels, (VkDeviceSize)w*h*16, texture->image, w, h, fmt, VK_IMAGE_LAYOUT_UNDEFINED) &&
+              upload_pixels_to_image(ctx, (unsigned char*)pixels, (VkDeviceSize)w*h*16, texture->image, w, h, fmt, VK_IMAGE_LAYOUT_UNDEFINED, &texture->loaded) &&
               finalize_texture(ctx, texture, fmt, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    if (ok) { texture->width = w; texture->height = h; texture->loaded = true; }
+    if (ok) { texture->width = w; texture->height = h; }
     return ok;
 }
 
@@ -300,7 +396,7 @@ static const char* get_texture_cache_path(const char* original_path, bool is_rou
 static bool upload_file_to_image_direct(VulkanContext *ctx, const char *filepath,
                                         VkDeviceSize imageSize, VkImage image,
                                         uint32_t w, uint32_t h, VkFormat fmt,
-                                        size_t file_offset);
+                                        size_t file_offset, bool* loaded_flag);
 
 static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const char* roughPath) {
     if (!roughPath) return -1;
@@ -315,9 +411,9 @@ static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const cha
             if (textureCount >= MAX_TEXTURES) return -1;
             Texture2D* texture = &texturePool[textureCount];
             if (alloc_texture_image(ctx, header.width, header.height, header.format, &texture->image, &texture->memory)) {
-                if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader))) {
+                if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader), &texture->loaded)) {
                     if (finalize_texture(ctx, texture, header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
-                        texture->width = header.width; texture->height = header.height; texture->loaded = true;
+                        texture->width = header.width; texture->height = header.height;
                         return textureCount++;
                     }
                 }
@@ -582,6 +678,7 @@ int alloc_slot(mat4 model) {
 }
 
 void begin_frame(void) {
+    pump_async_uploads(&context); // Garbage collect finished staging buffers asynchronously
     frame_index = context.currentFrame;
     dynamic_draw_count = 0;
     vertex_count = 0;
@@ -1231,12 +1328,11 @@ bool load_texture_from_rgba_with_format(VulkanContext* context, unsigned char* r
                                         Texture2D* texture, VkFormat format) {
     bool ok = alloc_texture_image(context, width, height, format, &texture->image, &texture->memory) &&
               upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image,
-                                     width, height, format, VK_IMAGE_LAYOUT_UNDEFINED) &&
+                                     width, height, format, VK_IMAGE_LAYOUT_UNDEFINED, &texture->loaded) &&
               finalize_texture(context, texture, format, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     if (ok) {
         texture->width = width;
         texture->height = height;
-        texture->loaded = true;
     }
     return ok;
 }
@@ -1253,10 +1349,14 @@ bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture,
     if ((uint32_t)width != texture->width || (uint32_t)height != texture->height) {
         if (texture->view) vkDestroyImageView(context->device, texture->view, NULL);
         if (texture->image) vkDestroyImage(context->device, texture->image, NULL);
-        if (texture->memory) vkFreeMemory(context->device, texture->memory, NULL);
+        if (texture->memory) {
+            free_texture_vram(texture->memory);
+            texture->memory = VK_NULL_HANDLE;
+        }
 
+        texture->loaded = false; // Suspend rendering until upload completes
         alloc_texture_image(context, width, height, VK_FORMAT_R8G8B8A8_UNORM, &texture->image, &texture->memory);
-        upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED);
+        upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, &texture->loaded);
 
         VkImageViewCreateInfo viewInfo = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = texture->image,
@@ -1272,13 +1372,14 @@ bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture,
         texture->width = width; texture->height = height;
         return true;
     }
-    return upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->loaded = false;
+    return upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4, texture->image, width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &texture->loaded);
 }
 
 // Zero-copy direct-to-GPU upload helper. Reads from disk directly into Vulkan mapped memory.
 static bool upload_file_to_image_direct(VulkanContext* ctx, const char* filepath,
                                         VkDeviceSize imageSize, VkImage image,
-                                        uint32_t w, uint32_t h, VkFormat fmt, size_t file_offset)
+                                        uint32_t w, uint32_t h, VkFormat fmt, size_t file_offset, bool* loaded_flag)
 {
     FILE* f = fopen(filepath, "rb");
     if (!f) return false;
@@ -1324,10 +1425,7 @@ static bool upload_file_to_image_direct(VulkanContext* ctx, const char* filepath
     copyBufferToImage(cmd, stagingBuf, image, w, h);
     transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
-
-    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
-    vkFreeMemory(ctx->device, stagingMem, NULL);
+    submit_async_upload(ctx, stagingBuf, stagingMem, cmd, loaded_flag);
     return true;
 }
 
@@ -1336,7 +1434,7 @@ static bool upload_file_to_image_direct(VulkanContext* ctx, const char* filepath
 static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels,
                                    VkDeviceSize imageSize, VkImage image,
                                    uint32_t w, uint32_t h, VkFormat fmt,
-                                   VkImageLayout srcLayout)
+                                   VkImageLayout srcLayout, bool* loaded_flag)
 {
     VkBuffer stagingBuf; VkDeviceMemory stagingMem;
     VkBufferCreateInfo bci = {
@@ -1368,10 +1466,7 @@ static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels,
     copyBufferToImage(cmd, stagingBuf, image, w, h);
     transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
-
-    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
-    vkFreeMemory(ctx->device, stagingMem, NULL);
+    submit_async_upload(ctx, stagingBuf, stagingMem, cmd, loaded_flag);
     return true;
 }
 
@@ -1387,18 +1482,14 @@ static bool alloc_texture_image_mips(VulkanContext* ctx, uint32_t w, uint32_t h,
     };
     if (vkCreateImage(ctx->device, &ici, NULL, image) != VK_SUCCESS) return false;
     VkMemoryRequirements req; vkGetImageMemoryRequirements(ctx->device, *image, &req);
-    VkMemoryAllocateInfo mai = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    };
-    if (vkAllocateMemory(ctx->device, &mai, NULL, memory) != VK_SUCCESS) {
+    VkDeviceSize offset;
+    if (!alloc_texture_vram(ctx, req, memory, &offset)) {
         vkDestroyImage(ctx->device, *image, NULL); return false;
     }
-    vkBindImageMemory(ctx->device, *image, *memory, 0);
+    vkBindImageMemory(ctx->device, *image, *memory, offset);
     return true;
 }
 
-// Allocate a VkImage + memory for a 2D texture.
 static bool alloc_texture_image(VulkanContext* ctx, uint32_t w, uint32_t h,
                                 VkFormat fmt, VkImage* image, VkDeviceMemory* memory)
 {
@@ -1410,18 +1501,12 @@ static bool alloc_texture_image(VulkanContext* ctx, uint32_t w, uint32_t h,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .samples = VK_SAMPLE_COUNT_1_BIT
     };
     if (vkCreateImage(ctx->device, &ici, NULL, image) != VK_SUCCESS) return false;
-
-    VkMemoryRequirements req;
-    vkGetImageMemoryRequirements(ctx->device, *image, &req);
-    VkMemoryAllocateInfo mai = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
-        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
-                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    };
-    if (vkAllocateMemory(ctx->device, &mai, NULL, memory) != VK_SUCCESS) {
+    VkMemoryRequirements req; vkGetImageMemoryRequirements(ctx->device, *image, &req);
+    VkDeviceSize offset;
+    if (!alloc_texture_vram(ctx, req, memory, &offset)) {
         vkDestroyImage(ctx->device, *image, NULL); return false;
     }
-    vkBindImageMemory(ctx->device, *image, *memory, 0);
+    vkBindImageMemory(ctx->device, *image, *memory, offset);
     return true;
 }
 
@@ -1505,10 +1590,9 @@ static bool load_texture_from_pixels(VulkanContext* ctx, stbi_uc* pixels, int w,
     if (!pixels) return false;
     VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
     bool ok = alloc_texture_image(ctx, w, h, fmt, &texture->image, &texture->memory) &&
-              upload_pixels_to_image(ctx, pixels, (VkDeviceSize)w*h*4, texture->image, w, h, fmt, VK_IMAGE_LAYOUT_UNDEFINED) &&
+              upload_pixels_to_image(ctx, pixels, (VkDeviceSize)w*h*4, texture->image, w, h, fmt, VK_IMAGE_LAYOUT_UNDEFINED, &texture->loaded) &&
               finalize_texture(ctx, texture, fmt, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    // Removed the rogue stbi_image_free(pixels) here! Memory ownership stays with the caller.
-    if (ok) { texture->width = w; texture->height = h; texture->loaded = true; }
+    if (ok) { texture->width = w; texture->height = h; }
     return ok;
 }
 
@@ -1583,16 +1667,16 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
     // 1. Try blazing-fast ZERO-COPY binary cache read
     if (alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory)) {
             // Attempt to read from disk DIRECTLY into the mapped Vulkan staging buffer
-            if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width, height, fmt, 0)) {
-            // UI Icons must use CLAMP_TO_EDGE, not REPEAT, to prevent edge bleeding!
-            if (finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)) {
-                fprintf(stdout, "\033[32m[SVG] Cache Hit (ZERO-COPY to GPU): %s\033[0m\n", cache_file);
-                tex->width = width;
-                tex->height = height;
-                tex->loaded = true;
-                return textureCount++;
+            if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width, height, fmt, 0, &tex->loaded)) {
+                // UI Icons must use CLAMP_TO_EDGE, not REPEAT, to prevent edge bleeding!
+                if (finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)) {
+                    fprintf(stdout, "\033[32m[SVG] Cache Hit (ZERO-COPY to GPU): %s\033[0m\n", cache_file);
+                    tex->width = width;
+                    tex->height = height;
+                    return textureCount++;
+                }
             }
-        }
+
         // Cache miss or read failure: clean up the image to prepare for rasterization
         vkDestroyImage(ctx->device, tex->image, NULL);
         vkFreeMemory(ctx->device, tex->memory, NULL);
@@ -1635,7 +1719,7 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
 
     // 4. Upload to Vulkan using standard pixel upload
     bool ok = alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory) &&
-              upload_pixels_to_image(ctx, pixels, size, tex->image, width, height, fmt, VK_IMAGE_LAYOUT_UNDEFINED) &&
+              upload_pixels_to_image(ctx, pixels, size, tex->image, width, height, fmt, VK_IMAGE_LAYOUT_UNDEFINED, &tex->loaded) &&
               finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     free(pixels);
@@ -1643,7 +1727,6 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
     if (ok) {
         tex->width = width;
         tex->height = height;
-        tex->loaded = true;
         return textureCount++;
     }
 
@@ -1722,11 +1805,10 @@ static bool load_texture_dds(VulkanContext* ctx, const char* filepath, Texture2D
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 
-    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
-    vkDestroyBuffer(ctx->device, stagingBuf, NULL); vkFreeMemory(ctx->device, stagingMem, NULL);
+    submit_async_upload(ctx, stagingBuf, stagingMem, cmd, &texture->loaded);
 
     if (finalize_texture_mips(ctx, texture, format, VK_SAMPLER_ADDRESS_MODE_REPEAT, mipMapCount)) {
-        texture->width = header.dwWidth; texture->height = header.dwHeight; texture->loaded = true;
+        texture->width = header.dwWidth; texture->height = header.dwHeight;
         return true;
     }
     return false;
@@ -1760,9 +1842,9 @@ bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) 
             fclose(f);
             fprintf(stdout, "\033[32m[TEXTURE] Cache Hit (ZERO-COPY): %s\033[0m\n", cache_path);
             if (alloc_texture_image(ctx, header.width, header.height, header.format, &texture->image, &texture->memory)) {
-                if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader))) {
+                if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader), &texture->loaded)) {
                     if (finalize_texture(ctx, texture, header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
-                        texture->width = header.width; texture->height = header.height; texture->loaded = true;
+                        texture->width = header.width; texture->height = header.height;
                         return true;
                     }
                 }
@@ -1864,7 +1946,10 @@ void destroy_texture(VulkanContext* context, Texture2D* texture) {
     if (texture->sampler) vkDestroySampler(context->device, texture->sampler, NULL);
     if (texture->view) vkDestroyImageView(context->device, texture->view, NULL);
     if (texture->image) vkDestroyImage(context->device, texture->image, NULL);
-    if (texture->memory) vkFreeMemory(context->device, texture->memory, NULL);
+    if (texture->memory) {
+        free_texture_vram(texture->memory);
+        texture->memory = VK_NULL_HANDLE;
+    }
 
     texture->sampler = VK_NULL_HANDLE;
     texture->view = VK_NULL_HANDLE;
