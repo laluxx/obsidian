@@ -17,8 +17,62 @@ typedef struct {
     uint32_t total_vertices;
     uint32_t total_indices;
     uint32_t total_morph_deltas;
-    uint32_t reserved[3];
+    uint32_t node_count;
+    uint32_t skin_count;
+    uint32_t anim_count;
+    uint32_t total_joints;
+    uint32_t total_channels;
+    uint32_t total_floats;
 } OmdlHeader;
+
+// AAA Data-Oriented Flat Node Hierarchy
+typedef struct {
+    int32_t parent;     // -1 if root
+    vec3 translation;
+    versor rotation;
+    vec3 scale;
+    mat4 base_matrix;   // Pre-computed fallback for static/matrix-only nodes
+    int32_t mesh_idx;   // Relative to instance->mesh_start_index
+    int32_t skin_idx;
+} OmdlNode;
+
+typedef struct {
+    uint32_t joints_count;
+    uint32_t joints_offset; // Index into a flat uint32_t array
+    uint32_t ibm_offset;    // Index into a flat mat4 array
+} OmdlSkin;
+
+typedef struct {
+    uint32_t target_node; // Index into OmdlNode array
+    uint32_t path_type;   // 0=T, 1=R, 2=S, 3=W
+    uint32_t keyframe_count;
+    uint32_t times_offset;
+    uint32_t values_offset;
+} OmdlChannel;
+
+typedef struct {
+    char name[64];
+    float duration;
+    uint32_t channel_count;
+    uint32_t channel_offset;
+} OmdlAnimation;
+
+// The monolithic runtime struct that replaces cgltf_data
+typedef struct {
+    uint32_t node_count;
+    OmdlNode* nodes;
+    mat4* world_transforms; // Pre-allocated scratchpad for fast hierarchy evaluation
+
+    uint32_t skin_count;
+    OmdlSkin* skins;
+    uint32_t* skin_joints;
+    mat4* skin_ibms;
+
+    uint32_t anim_count;
+    OmdlAnimation* anims;
+    OmdlChannel* channels;
+    float* anim_floats; // Massive flat array holding ALL keyframes and times
+} OmdlSceneGraph;
 
 typedef struct {
     char name[256];
@@ -556,8 +610,8 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     // OMDL COOKER PATH: Append to massive flat arrays
     OmdlMeshMeta meta = {0};
     strncpy(meta.name, name, sizeof(meta.name)-1);
-    glm_vec3_copy(mesh.aabbMin, meta.aabbMin);
-    glm_vec3_copy(mesh.aabbMax, meta.aabbMax);
+    memcpy(meta.aabbMin, mesh.aabbMin, sizeof(vec3));
+    memcpy(meta.aabbMax, mesh.aabbMax, sizeof(vec3));
     meta.vertexCount = final_vertex_count;
     meta.indexCount = final_index_count;
     meta.morphCount = final_morph_count;
@@ -565,18 +619,18 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     meta.indexOffset = omdl_index_count;
     meta.morphOffset = omdl_morph_count;
 
-    glm_vec4_copy(mesh.baseColorFactor, meta.baseColorFactor);
+    memcpy(meta.baseColorFactor, mesh.baseColorFactor, sizeof(vec4));
     meta.metallicFactor = mesh.metallicFactor;
     meta.roughnessFactor = mesh.roughnessFactor;
     meta.emissiveStrength = mesh.emissiveStrength;
-    glm_vec3_copy(mesh.emissiveFactor, meta.emissiveFactor);
+    memcpy(meta.emissiveFactor, mesh.emissiveFactor, sizeof(vec3));
     meta.alpha_mode = mesh.alpha_mode;
     meta.alpha_cutoff = mesh.alpha_cutoff;
     meta.is_unlit = mesh.is_unlit;
     meta.transmissionFactor = mesh.transmissionFactor;
     meta.ior = mesh.ior;
     meta.thicknessFactor = mesh.thicknessFactor;
-    glm_vec3_copy(mesh.attenuationColor, meta.attenuationColor);
+    memcpy(meta.attenuationColor, mesh.attenuationColor, sizeof(vec3));
     meta.attenuationDistance = mesh.attenuationDistance;
     meta.dispersion = mesh.dispersion;
 
@@ -889,28 +943,209 @@ bool load_gltf(const char* filepath, Scene* scene) {
             if (m->morphCount > 0) m->morphDeltaOffset = (base_m != UINT32_MAX) ? base_m + omdl_metas[i].morphOffset : UINT32_MAX;
         }
 
-        // 3. Write Monolithic OMDL Binary
+        // 3. Extract Scene Graph (Nodes, Skins, Animations)
+        OmdlSceneGraph* osg = calloc(1, sizeof(OmdlSceneGraph));
+        osg->node_count = data->nodes_count;
+        osg->nodes = calloc(data->nodes_count, sizeof(OmdlNode));
+        for (size_t i = 0; i < data->nodes_count; i++) {
+            cgltf_node* n = &data->nodes[i];
+            osg->nodes[i].parent = n->parent ? (int32_t)(n->parent - data->nodes) : -1;
+            osg->nodes[i].mesh_idx = -1;
+            osg->nodes[i].skin_idx = n->skin ? (int32_t)(n->skin - data->skins) : -1;
+
+            // Extract valid base matrix for hierarchy resolution
+            cgltf_node_transform_local(n, (float*)osg->nodes[i].base_matrix);
+
+            if (n->has_translation) { memcpy(osg->nodes[i].translation, n->translation, sizeof(vec3)); }
+            else { memset(osg->nodes[i].translation, 0, sizeof(vec3)); }
+
+            if (n->has_rotation) { memcpy(osg->nodes[i].rotation, n->rotation, sizeof(versor)); }
+            else { osg->nodes[i].rotation[0]=0; osg->nodes[i].rotation[1]=0; osg->nodes[i].rotation[2]=0; osg->nodes[i].rotation[3]=1.0f; }
+
+            if (n->has_scale) { memcpy(osg->nodes[i].scale, n->scale, sizeof(vec3)); }
+            else { osg->nodes[i].scale[0]=1.0f; osg->nodes[i].scale[1]=1.0f; osg->nodes[i].scale[2]=1.0f; }
+        }
+
+        for (size_t i = 0; i < omdl_mesh_count; i++) {
+            Mesh* m = &scene->meshes.items[instance->mesh_start_index + i];
+            if (m->node) {
+                size_t node_idx = (cgltf_node*)m->node - data->nodes;
+                osg->nodes[node_idx].mesh_idx = (int32_t)i;
+                m->node = (void*)(uintptr_t)node_idx;
+            }
+        }
+
+        osg->skin_count = data->skins_count;
+        osg->skins = calloc(data->skins_count, sizeof(OmdlSkin));
+        uint32_t total_joints = 0;
+        for (size_t i = 0; i < data->skins_count; i++) total_joints += data->skins[i].joints_count;
+        osg->skin_joints = calloc(total_joints, sizeof(uint32_t));
+        osg->skin_ibms = calloc(total_joints, sizeof(mat4));
+
+        uint32_t j_offset = 0;
+        for (size_t i = 0; i < data->skins_count; i++) {
+            cgltf_skin* s = &data->skins[i];
+            osg->skins[i].joints_count = s->joints_count;
+            osg->skins[i].joints_offset = j_offset;
+            osg->skins[i].ibm_offset = j_offset;
+            for (size_t j = 0; j < s->joints_count; j++) {
+                osg->skin_joints[j_offset + j] = s->joints[j] - data->nodes;
+                if (s->inverse_bind_matrices) {
+                    cgltf_accessor_read_float(s->inverse_bind_matrices, j, (float*)osg->skin_ibms[j_offset + j], 16);
+                } else {
+                    mat4 ident = GLM_MAT4_IDENTITY_INIT;
+                    memcpy(osg->skin_ibms[j_offset + j], ident, sizeof(mat4));
+                }
+            }
+            j_offset += s->joints_count;
+        }
+
+        osg->anim_count = data->animations_count;
+        osg->anims = calloc(data->animations_count, sizeof(OmdlAnimation));
+        uint32_t total_channels = 0;
+        uint32_t total_floats = 0;
+        for (size_t i = 0; i < data->animations_count; i++) {
+            total_channels += data->animations[i].channels_count;
+            for (size_t c = 0; c < data->animations[i].channels_count; c++) {
+                cgltf_animation_channel* chan = &data->animations[i].channels[c];
+                total_floats += chan->sampler->input->count;
+                uint32_t out_count = chan->sampler->output->count;
+                if (chan->target_path == cgltf_animation_path_type_weights) total_floats += out_count;
+                else total_floats += out_count * ((chan->target_path == cgltf_animation_path_type_rotation) ? 4 : 3);
+            }
+        }
+        osg->channels = calloc(total_channels, sizeof(OmdlChannel));
+        osg->anim_floats = calloc(total_floats, sizeof(float));
+
+        uint32_t c_offset = 0;
+        uint32_t f_offset = 0;
+        for (size_t i = 0; i < data->animations_count; i++) {
+            cgltf_animation* a = &data->animations[i];
+            strncpy(osg->anims[i].name, a->name ? a->name : "unnamed", 63);
+            osg->anims[i].channel_count = a->channels_count;
+            osg->anims[i].channel_offset = c_offset;
+            float max_time = 0.0f;
+
+            for (size_t c = 0; c < a->channels_count; c++) {
+                cgltf_animation_channel* chan = &a->channels[c];
+                OmdlChannel* ochan = &osg->channels[c_offset + c];
+                ochan->target_node = chan->target_node ? (uint32_t)(chan->target_node - data->nodes) : UINT32_MAX;
+                ochan->path_type = chan->target_path;
+                ochan->keyframe_count = chan->sampler->input->count;
+
+                ochan->times_offset = f_offset;
+
+                for (size_t k = 0; k < ochan->keyframe_count; k++) {
+                    cgltf_accessor_read_float(chan->sampler->input, k, &osg->anim_floats[f_offset++], 1);
+                    if (osg->anim_floats[f_offset-1] > max_time) max_time = osg->anim_floats[f_offset-1];
+                }
+
+                ochan->values_offset = f_offset;
+                uint32_t out_count = chan->sampler->output->count;
+                if (chan->target_path == cgltf_animation_path_type_weights) {
+                    for (size_t k = 0; k < out_count; k++) cgltf_accessor_read_float(chan->sampler->output, k, &osg->anim_floats[f_offset++], 1);
+                } else {
+                    uint32_t comps = (chan->target_path == cgltf_animation_path_type_rotation) ? 4 : 3;
+                    for (size_t k = 0; k < out_count; k++) {
+                        cgltf_accessor_read_float(chan->sampler->output, k, &osg->anim_floats[f_offset], comps);
+                        f_offset += comps;
+                    }
+                }
+            }
+            osg->anims[i].duration = max_time;
+            c_offset += a->channels_count;
+        }
+
+        // 4. Write Monolithic OMDL Binary (Single Pass)
         FILE* fout = fopen(omdl_path, "wb");
         if (fout) {
-            OmdlHeader header = { OMDL_MAGIC, omdl_mesh_count, omdl_vertex_count, omdl_index_count, omdl_morph_count, {0,0,0} };
+            OmdlHeader header = { OMDL_MAGIC, omdl_mesh_count, omdl_vertex_count, omdl_index_count, omdl_morph_count,
+                                  osg->node_count, osg->skin_count, osg->anim_count, total_joints, total_channels, total_floats };
             fwrite(&header, sizeof(OmdlHeader), 1, fout);
             fwrite(omdl_metas, sizeof(OmdlMeshMeta), omdl_mesh_count, fout);
             if (omdl_vertex_count > 0) fwrite(omdl_vertices, sizeof(Vertex), omdl_vertex_count, fout);
             if (omdl_index_count > 0) fwrite(omdl_indices, sizeof(uint32_t), omdl_index_count, fout);
             if (omdl_morph_count > 0) fwrite(omdl_morphs, sizeof(MorphDelta), omdl_morph_count, fout);
+
+            if (osg->node_count > 0) fwrite(osg->nodes, sizeof(OmdlNode), osg->node_count, fout);
+            if (osg->skin_count > 0) {
+                fwrite(osg->skins, sizeof(OmdlSkin), osg->skin_count, fout);
+                fwrite(osg->skin_joints, sizeof(uint32_t), total_joints, fout);
+                fwrite(osg->skin_ibms, sizeof(mat4), total_joints, fout);
+            }
+            if (osg->anim_count > 0) {
+                fwrite(osg->anims, sizeof(OmdlAnimation), osg->anim_count, fout);
+                fwrite(osg->channels, sizeof(OmdlChannel), total_channels, fout);
+                fwrite(osg->anim_floats, sizeof(float), total_floats, fout);
+            }
             fclose(fout);
         }
+
+        instance->gltf_data = (void*)osg;
+        osg->world_transforms = malloc(osg->node_count * sizeof(mat4));
 
         if (omdl_vertices) free(omdl_vertices);
         if (omdl_indices) free(omdl_indices);
         if (omdl_morphs) free(omdl_morphs);
         if (omdl_metas) free(omdl_metas);
     } else {
+        OmdlSceneGraph* osg = calloc(1, sizeof(OmdlSceneGraph));
+        FILE* fomdl = fopen(omdl_path, "rb");
+
+        OmdlHeader h; fread(&h, sizeof(OmdlHeader), 1, fomdl);
+        fseek(fomdl, sizeof(OmdlHeader) + (h.mesh_count * sizeof(OmdlMeshMeta)) +
+              (h.total_vertices * sizeof(Vertex)) + (h.total_indices * sizeof(uint32_t)) +
+              (h.total_morph_deltas * sizeof(MorphDelta)), SEEK_SET);
+
+        osg->node_count = h.node_count;
+        if (osg->node_count > 0) {
+            osg->nodes = malloc(osg->node_count * sizeof(OmdlNode));
+            fread(osg->nodes, sizeof(OmdlNode), osg->node_count, fomdl);
+            osg->world_transforms = malloc(osg->node_count * sizeof(mat4));
+        }
+
+        osg->skin_count = h.skin_count;
+        if (osg->skin_count > 0) {
+            osg->skins = malloc(osg->skin_count * sizeof(OmdlSkin));
+            osg->skin_joints = malloc(h.total_joints * sizeof(uint32_t));
+            osg->skin_ibms = malloc(h.total_joints * sizeof(mat4));
+            fread(osg->skins, sizeof(OmdlSkin), osg->skin_count, fomdl);
+            fread(osg->skin_joints, sizeof(uint32_t), h.total_joints, fomdl);
+            fread(osg->skin_ibms, sizeof(mat4), h.total_joints, fomdl);
+        }
+
+        osg->anim_count = h.anim_count;
+        if (osg->anim_count > 0) {
+            osg->anims = malloc(osg->anim_count * sizeof(OmdlAnimation));
+            osg->channels = malloc(h.total_channels * sizeof(OmdlChannel));
+            osg->anim_floats = malloc(h.total_floats * sizeof(float));
+            fread(osg->anims, sizeof(OmdlAnimation), osg->anim_count, fomdl);
+            fread(osg->channels, sizeof(OmdlChannel), h.total_channels, fomdl);
+            fread(osg->anim_floats, sizeof(float), h.total_floats, fomdl);
+        }
+
+        fclose(fomdl);
+        instance->gltf_data = (void*)osg;
+
+        // Restore integer node IDs to meshes (Hijack pointer)
+        for (size_t i = 0; i < instance->mesh_count; i++) {
+            // Nullify the cgltf pointer first to prevent out-of-bounds indexing
+            scene->meshes.items[instance->mesh_start_index + i].node = NULL;
+
+            for (size_t n = 0; n < osg->node_count; n++) {
+                if (osg->nodes[n].mesh_idx == (int32_t)i) {
+                    scene->meshes.items[instance->mesh_start_index + i].node = (void*)(uintptr_t)n;
+                    break;
+                }
+            }
+        }
+
         if (omdl_cache_metas) free(omdl_cache_metas);
         omdl_cache_metas = NULL;
     }
 
     // Assign morphWeightOffset: pack each morph mesh into a unique slice of morphWeightBuffer.
+
     // The buffer is 1MB = 262144 floats, more than enough for all meshes combined.
     {
         static int global_morph_weight_counter = 0;
@@ -926,27 +1161,27 @@ bool load_gltf(const char* filepath, Scene* scene) {
         }
     }
 
-    // AAA: Map glTF skins to our Global Joint SSBO
-    if (data->skins_count > 0) {
-        int* skin_offsets = malloc(data->skins_count * sizeof(int));
-        for (size_t s = 0; s < data->skins_count; s++) {
+    // AAA: Map OMDL skins to our Global Joint SSBO
+    OmdlSceneGraph* osg = (OmdlSceneGraph*)instance->gltf_data;
+    if (osg->skin_count > 0) {
+        int* skin_offsets = malloc(osg->skin_count * sizeof(int));
+        for (size_t s = 0; s < osg->skin_count; s++) {
             skin_offsets[s] = global_joint_counter;
-            global_joint_counter += data->skins[s].joints_count;
+            global_joint_counter += osg->skins[s].joints_count;
         }
 
         for (size_t i = instance->mesh_start_index; i < instance->mesh_start_index + instance->mesh_count; i++) {
             Mesh* m = &scene->meshes.items[i];
-            cgltf_node* cnode = (cgltf_node*)m->node;
-            if (cnode && cnode->skin) {
-                size_t skin_idx = cnode->skin - data->skins;
-                m->jointOffset = skin_offsets[skin_idx];
-                m->jointCount = cnode->skin->joints_count;
+            if (m->node) {
+                uint32_t node_idx = (uint32_t)(uintptr_t)m->node;
+                if (osg->nodes[node_idx].skin_idx >= 0) {
+                    m->jointOffset = skin_offsets[osg->nodes[node_idx].skin_idx];
+                    m->jointCount = osg->skins[osg->nodes[node_idx].skin_idx].joints_count;
+                }
             }
         }
         free(skin_offsets);
     }
-
-    load_gltf_animations(data, instance);
 
     scene->gltf_instance_count++;
 
@@ -956,22 +1191,16 @@ bool load_gltf(const char* filepath, Scene* scene) {
            instance->mesh_start_index,
            instance->mesh_start_index + instance->mesh_count - 1);
 
-    /* Rebuild indirect draw commands after every GLTF load so the
-       indirect pass stays in sync with the current mesh list.      */
     scene_topology_dirty = true;
-
-    /* CRITICAL FIX: Guarantee static meshes without animations push their
-       initial transforms and PBR materials to the GPU SSBO. */
     markMeshesSSBODirty(&context);
 
-    // Do NOT free cgltf_data here! The runtime animation/hierarchy system holds
-    // pointers to it. It must stay alive for the lifetime of the scene.
+    // Completely destroy cgltf! The engine now relies strictly on the OMDL Binary memory.
+    if (!is_omdl_cache_hit && data) cgltf_free(data);
+
     return true;
 }
 
-static float lerp(float a, float b, float t) {
-    return a + (b - a) * t;
-}
+static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 
 static size_t find_keyframe(float* times, size_t count, float time) {
     if (count < 2) return 0;
@@ -997,196 +1226,154 @@ static size_t find_keyframe(float* times, size_t count, float time) {
 #define MAX_NODES 16384
 static mat4 node_transform_scratch[MAX_NODES];
 
-// AAA O(N) Single-Pass Top-Down Hierarchy Evaluator
-static void compute_node_hierarchy(cgltf_node* node, Animation* anim, float anim_time, mat4 parent_mat, cgltf_data* data) {
-    mat4 local;
-    bool is_animated = false;
-
-    // Standard stack variables (compiler aligns these naturally)
-    vec3 T = {0.0f, 0.0f, 0.0f};
-    versor R = {0.0f, 0.0f, 0.0f, 1.0f};
-    vec3 S = {1.0f, 1.0f, 1.0f};
-
-    // Shielding cglm from unaligned heap memory via scalar assignment
-    if (node->has_translation) { T[0] = node->translation[0]; T[1] = node->translation[1]; T[2] = node->translation[2]; }
-    if (node->has_rotation) { R[0] = node->rotation[0]; R[1] = node->rotation[1]; R[2] = node->rotation[2]; R[3] = node->rotation[3]; }
-    if (node->has_scale) { S[0] = node->scale[0]; S[1] = node->scale[1]; S[2] = node->scale[2]; }
-
-    if (anim) {
-        for (size_t c = 0; c < anim->channel_count; c++) {
-            AnimationChannel* chan = &anim->channels[c];
-            if (chan->target_node == node && chan->path != cgltf_animation_path_type_weights) {
-                is_animated = true;
-                size_t k0 = find_keyframe(chan->times, chan->keyframe_count, anim_time);
-                size_t k1 = chan->keyframe_count > 1 ? k0 + 1 : k0;
-
-                // CRITICAL: Clamp factor to prevent infinite extrapolation!
-                float factor = 0.0f;
-                if (chan->keyframe_count > 1) {
-                    float t_diff = chan->times[k1] - chan->times[k0];
-                    if (t_diff > 0.00001f) {
-                        factor = (anim_time - chan->times[k0]) / t_diff;
-                        if (factor < 0.0f) factor = 0.0f;
-                        if (factor > 1.0f) factor = 1.0f;
-                    }
-                }
-
-                // Shielding cglm again by pulling heap arrays into stack variables first
-                if (chan->path == cgltf_animation_path_type_translation && chan->translations) {
-                    vec3 t0 = {chan->translations[k0][0], chan->translations[k0][1], chan->translations[k0][2]};
-                    vec3 t1 = {chan->translations[k1][0], chan->translations[k1][1], chan->translations[k1][2]};
-                    glm_vec3_lerp(t0, t1, factor, T);
-                } else if (chan->path == cgltf_animation_path_type_rotation && chan->rotations) {
-                    versor r0 = {chan->rotations[k0][0], chan->rotations[k0][1], chan->rotations[k0][2], chan->rotations[k0][3]};
-                    versor r1 = {chan->rotations[k1][0], chan->rotations[k1][1], chan->rotations[k1][2], chan->rotations[k1][3]};
-                    glm_quat_slerp(r0, r1, factor, R);
-                } else if (chan->path == cgltf_animation_path_type_scale && chan->scales) {
-                    vec3 s0 = {chan->scales[k0][0], chan->scales[k0][1], chan->scales[k0][2]};
-                    vec3 s1 = {chan->scales[k1][0], chan->scales[k1][1], chan->scales[k1][2]};
-                    glm_vec3_lerp(s0, s1, factor, S);
-                }
-            }
-        }
-    }
-
-    if (is_animated) {
-        mat4 rot_mat;
-        glm_quat_mat4(R, rot_mat);
-        glm_mat4_identity(local);
-        glm_translate(local, T);
-        glm_mat4_mul(local, rot_mat, local);
-        glm_scale(local, S);
+// Helper for topological resolution
+static void resolve_omdl_world(uint32_t n, OmdlSceneGraph* osg, mat4* locals, bool* resolved) {
+    if (resolved[n]) return;
+    int32_t p = osg->nodes[n].parent;
+    if (p >= 0) {
+        resolve_omdl_world(p, osg, locals, resolved);
+        glm_mat4_mul(osg->world_transforms[p], locals[n], osg->world_transforms[n]);
     } else {
-        cgltf_node_transform_local(node, (float*)local);
+        glm_mat4_copy(locals[n], osg->world_transforms[n]);
     }
-
-    // Resolve hierarchy against parent
-    mat4 world;
-    glm_mat4_mul(parent_mat, local, world);
-
-    // Cache the resolved world matrix
-    size_t node_idx = node - data->nodes;
-    if (node_idx < MAX_NODES) {
-        memcpy(node_transform_scratch[node_idx], world, sizeof(mat4));
-    }
-
-    // Recurse children exactly once
-    for (size_t i = 0; i < node->children_count; i++) {
-        compute_node_hierarchy(node->children[i], anim, anim_time, world, data);
-    }
+    resolved[n] = true;
 }
 
 void animate_scene(Scene* scene, float time) {
-    // Animate each glTF instance independently
     for (size_t inst = 0; inst < scene->gltf_instance_count; inst++) {
         GLTFInstance* instance = &scene->gltf_instances[inst];
-        if (!instance->animations) continue;
+        OmdlSceneGraph* osg = (OmdlSceneGraph*)instance->gltf_data;
+        if (!osg || osg->anim_count == 0) continue;
 
-        for (size_t a = 0; a < instance->animation_count; a++) {
-            Animation* anim = &instance->animations[a];
-            float anim_time = fmodf(time, anim->duration);
+        OmdlAnimation* anim = &osg->anims[0];
+        float anim_time = fmodf(time, anim->duration);
 
-            // Phase 1: Evaluate morph weights (with clamping)
-            for (size_t c = 0; c < anim->channel_count; c++) {
-                AnimationChannel* channel = &anim->channels[c];
-                if (channel->path == cgltf_animation_path_type_weights && channel->weights) {
-                    cgltf_node* target_node = channel->target_node;
-                    size_t k0 = find_keyframe(channel->times, channel->keyframe_count, anim_time);
-                    size_t k1 = channel->keyframe_count > 1 ? k0 + 1 : k0;
+        mat4* local_transforms = malloc(osg->node_count * sizeof(mat4));
+        bool* node_resolved = calloc(osg->node_count, sizeof(bool));
 
-                    float factor = 0.0f;
-                    if (channel->keyframe_count > 1) {
-                        float t_diff = channel->times[k1] - channel->times[k0];
-                        if (t_diff > 0.00001f) {
-                            factor = (anim_time - channel->times[k0]) / t_diff;
-                            if (factor < 0.0f) factor = 0.0f;
-                            if (factor > 1.0f) factor = 1.0f;
-                        }
-                    }
+        // Phase 1: Evaluate Channels and Build Local Matrices
+        for (uint32_t n = 0; n < osg->node_count; n++) {
+            OmdlNode* node = &osg->nodes[n];
+            vec3 T = { node->translation[0], node->translation[1], node->translation[2] };
+            versor R = { node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3] };
+            vec3 S = { node->scale[0], node->scale[1], node->scale[2] };
+            bool animated = false;
+
+            for (uint32_t c = 0; c < anim->channel_count; c++) {
+                OmdlChannel* chan = &osg->channels[anim->channel_offset + c];
+
+                if (chan->target_node == UINT32_MAX) continue;
+
+                // cgltf mapping: 4 = Weights
+                if (chan->path_type == 4) {
+                    if (n != 0) continue; // Execute once
+                    size_t k0 = find_keyframe(&osg->anim_floats[chan->times_offset], chan->keyframe_count, anim_time);
+                    size_t k1 = chan->keyframe_count > 1 ? k0 + 1 : k0;
+                    float t0 = osg->anim_floats[chan->times_offset + k0];
+                    float t1 = osg->anim_floats[chan->times_offset + k1];
+                    float factor = (t1 > t0) ? (anim_time - t0) / (t1 - t0) : 0.0f;
+                    if (factor < 0.0f) factor = 0.0f; if (factor > 1.0f) factor = 1.0f;
 
                     size_t mesh_end = instance->mesh_start_index + instance->mesh_count;
                     for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
                         Mesh* mesh = &scene->meshes.items[m];
-                        if (mesh->node == target_node && mesh->morph_data) {
+                        if (mesh->node && (uint32_t)(uintptr_t)mesh->node == chan->target_node && mesh->morph_data) {
                             size_t num_targets = mesh->morph_data->target_count;
                             for (size_t t = 0; t < num_targets; t++) {
-                                float w0 = channel->weights[k0 * num_targets + t];
-                                float w1 = channel->weights[k1 * num_targets + t];
+                                float w0 = osg->anim_floats[chan->values_offset + (k0 * num_targets) + t];
+                                float w1 = osg->anim_floats[chan->values_offset + (k1 * num_targets) + t];
                                 mesh->morph_data->weights[t] = lerp(w0, w1, factor);
                             }
+                            markMeshDirty(&context, (uint32_t)m);
                         }
                     }
+                    continue;
+                }
+
+                if (chan->target_node != n) continue;
+                animated = true;
+
+                size_t k0 = find_keyframe(&osg->anim_floats[chan->times_offset], chan->keyframe_count, anim_time);
+                size_t k1 = chan->keyframe_count > 1 ? k0 + 1 : k0;
+                float t0 = osg->anim_floats[chan->times_offset + k0];
+                float t1 = osg->anim_floats[chan->times_offset + k1];
+                float factor = (t1 > t0) ? (anim_time - t0) / (t1 - t0) : 0.0f;
+                if (factor < 0.0f) factor = 0.0f; if (factor > 1.0f) factor = 1.0f;
+
+                // cgltf mapping: 1 = Translation, 2 = Rotation, 3 = Scale
+                float* v0 = &osg->anim_floats[chan->values_offset + (k0 * (chan->path_type == 2 ? 4 : 3))];
+                float* v1 = &osg->anim_floats[chan->values_offset + (k1 * (chan->path_type == 2 ? 4 : 3))];
+
+                if (chan->path_type == 1) {
+                    T[0] = lerp(v0[0], v1[0], factor);
+                    T[1] = lerp(v0[1], v1[1], factor);
+                    T[2] = lerp(v0[2], v1[2], factor);
+                }
+                else if (chan->path_type == 2) {
+                    versor r0 = {v0[0], v0[1], v0[2], v0[3]};
+                    versor r1 = {v1[0], v1[1], v1[2], v1[3]};
+                    glm_quat_slerp(r0, r1, factor, R);
+                    glm_quat_normalize(R);
+                }
+                else if (chan->path_type == 3) {
+                    S[0] = lerp(v0[0], v1[0], factor);
+                    S[1] = lerp(v0[1], v1[1], factor);
+                    S[2] = lerp(v0[2], v1[2], factor);
                 }
             }
 
-            // Phase 2: Top-Down Single Pass Hierarchy Evaluation
-            cgltf_scene* active_scene = instance->gltf_data->scene ? instance->gltf_data->scene : &instance->gltf_data->scenes[0];
-            mat4 identity;
-            glm_mat4_identity(identity);
-
-            for (size_t i = 0; i < active_scene->nodes_count; i++) {
-                compute_node_hierarchy(active_scene->nodes[i], anim, anim_time, identity, instance->gltf_data);
+            mat4 local;
+            if (animated) {
+                glm_mat4_identity(local);
+                glm_translate(local, T);
+                mat4 rot_mat; glm_quat_mat4(R, rot_mat);
+                glm_mat4_mul(local, rot_mat, local);
+                glm_scale(local, S);
+            } else {
+                glm_mat4_copy(node->base_matrix, local);
             }
 
-            // Phase 3: Fast linear sweep to apply cached transforms to meshes
+            glm_mat4_copy(local, local_transforms[n]);
+        }
+
+        // Phase 2: Safe Topological Resolution of World Transforms
+        for (uint32_t n = 0; n < osg->node_count; n++) {
+            resolve_omdl_world(n, osg, local_transforms, node_resolved);
+
+            if (osg->nodes[n].mesh_idx >= 0) {
+                uint32_t m = instance->mesh_start_index + osg->nodes[n].mesh_idx;
+                memcpy(scene->meshes.items[m].model, osg->world_transforms[n], sizeof(mat4));
+                markMeshDirty(&context, m);
+            }
+        }
+
+        // Phase 3: Hardware Skinning
+        mat4* joint_buffer = jointSSBOMapped[context.currentFrame];
+        if (joint_buffer && osg->skin_count > 0) {
             size_t mesh_end = instance->mesh_start_index + instance->mesh_count;
             for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
                 Mesh* mesh = &scene->meshes.items[m];
-                if (mesh->node) {
-                    // CRITICAL: Cast the opaque void* back to cgltf_node* so C can do pointer math!
-                    size_t node_idx = (cgltf_node*)mesh->node - instance->gltf_data->nodes;
-                    if (node_idx < MAX_NODES) {
-                        memcpy(mesh->model, node_transform_scratch[node_idx], sizeof(mat4));
-                        markMeshDirty(&context, (uint32_t)m);
-                    }
-                } else if (mesh->morph_data) {
-                    markMeshDirty(&context, (uint32_t)m);
-                }
-            }
+                if (mesh->node && mesh->jointOffset >= 0) {
+                    uint32_t node_idx = (uint32_t)(uintptr_t)mesh->node;
+                    OmdlSkin* skin = &osg->skins[osg->nodes[node_idx].skin_idx];
+                    mat4 inverse_mesh_world; glm_mat4_inv(mesh->model, inverse_mesh_world);
 
-            // Phase 4: Hardware Skinning (Evaluate and upload joint matrices to the SSBO)
-            mat4* joint_buffer = jointSSBOMapped[context.currentFrame];
-            if (joint_buffer && instance->gltf_data->skins_count > 0) {
-                for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
-                    Mesh* mesh = &scene->meshes.items[m];
-                    cgltf_node* cnode = (cgltf_node*)mesh->node;
+                    for (uint32_t j = 0; j < skin->joints_count; j++) {
+                        uint32_t joint_node_idx = osg->skin_joints[skin->joints_offset + j];
+                        mat4 final_joint;
+                        glm_mat4_mul(inverse_mesh_world, osg->world_transforms[joint_node_idx], final_joint);
+                        glm_mat4_mul(final_joint, osg->skin_ibms[skin->ibm_offset + j], final_joint);
 
-                    if (cnode && cnode->skin && mesh->jointOffset >= 0) {
-                        cgltf_skin* skin = cnode->skin;
-                        mat4 inverse_mesh_world;
-                        glm_mat4_inv(mesh->model, inverse_mesh_world);
-
-                        for (size_t j = 0; j < skin->joints_count; j++) {
-                            cgltf_node* joint_node = skin->joints[j];
-
-                            mat4 inverse_bind;
-                            glm_mat4_identity(inverse_bind);
-                            if (skin->inverse_bind_matrices) {
-                                cgltf_accessor_read_float(skin->inverse_bind_matrices, j, (float*)inverse_bind, 16);
-                            }
-
-                            size_t joint_idx = joint_node - instance->gltf_data->nodes;
-                            mat4 joint_world;
-                            if (joint_idx < MAX_NODES) {
-                                memcpy(joint_world, node_transform_scratch[joint_idx], sizeof(mat4));
-                            } else {
-                                glm_mat4_identity(joint_world);
-                            }
-
-                            // The glTF 2.0 Spec Formula: Final = Inverse(MeshWorld) * JointWorld * InverseBind
-                            mat4 final_joint;
-                            glm_mat4_mul(inverse_mesh_world, joint_world, final_joint);
-                            glm_mat4_mul(final_joint, inverse_bind, final_joint);
-
-                            // AAA 4x3 Packing: cglm is column-major. We transpose the top 3 rows into 3 vec4s.
-                            float* dst = (float*)((uint8_t*)joint_buffer + (mesh->jointOffset + j) * 48);
-                            dst[0] = final_joint[0][0]; dst[1] = final_joint[1][0]; dst[2] = final_joint[2][0]; dst[3] = final_joint[3][0];
-                            dst[4] = final_joint[0][1]; dst[5] = final_joint[1][1]; dst[6] = final_joint[2][1]; dst[7] = final_joint[3][1];
-                            dst[8] = final_joint[0][2]; dst[9] = final_joint[1][2]; dst[10]= final_joint[2][2]; dst[11]= final_joint[3][2];
-                        }
+                        float* dst = (float*)((uint8_t*)joint_buffer + (mesh->jointOffset + j) * 48);
+                        dst[0] = final_joint[0][0]; dst[1] = final_joint[1][0]; dst[2] = final_joint[2][0]; dst[3] = final_joint[3][0];
+                        dst[4] = final_joint[0][1]; dst[5] = final_joint[1][1]; dst[6] = final_joint[2][1]; dst[7] = final_joint[3][1];
+                        dst[8] = final_joint[0][2]; dst[9] = final_joint[1][2]; dst[10]= final_joint[2][2]; dst[11]= final_joint[3][2];
                     }
                 }
             }
         }
+
+        free(local_transforms);
+        free(node_resolved);
     }
 }

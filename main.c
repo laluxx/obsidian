@@ -396,7 +396,7 @@ int main() {
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                         // PASS */
     /* load_gltf("./assets/gltf/Box.glb", &scene);                                 // PASS */
     /* load_gltf("./assets/gltf/Corset.glb", &scene);                              // PASS (but it's really small) */
-    load_gltf("./assets/gltf/CesiumMan.glb", &scene);                           // PASS
+    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene);                           // PASS */
     /* load_gltf("./assets/gltf/Fox.glb", &scene);                                 // PASS */
     /* load_gltf("./assets/gltf/RecursiveSkeletons.glb", &scene);                  // PASS */
     /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene);                        // PASS */
@@ -410,7 +410,7 @@ int main() {
     /* load_gltf("./assets/gltf/CubeVisibility.glb", &scene);                      // FAIL */
     /* load_gltf("./assets/gltf/EmissiveStrengthTest.glb", &scene);                // FAIL also the sun goes thorugh walls */
     /* load_gltf("./assets/gltf/InterpolationTest.glb", &scene);                   // FAIL */
-    /* load_gltf("./assets/gltf/DragonAttenuation.glb", &scene);                   // PASS */
+    load_gltf("./assets/gltf/DragonAttenuation.glb", &scene);                   // PASS
     /* load_gltf("./assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf", &scene); // PASS */
     /* load_gltf("./assets/gltf/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb", &scene); // PASS */
     /* load_gltf("./assets/gltf/DragonDispersion.glb", &scene);                    // FAIL */
