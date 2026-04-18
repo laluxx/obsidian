@@ -241,6 +241,7 @@ typedef struct {
 
 typedef struct {
     Mesh* items;
+    uint32_t* draw_indices;
     size_t count;
     size_t capacity;
 } Meshes;

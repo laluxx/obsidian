@@ -882,15 +882,16 @@ Vertex* get_dynamic_vertices(void) {
     return &dynVerts[frame_index * MAX_DYNAMIC_VERTICES];
 }
 
-
 void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
+    if (!meshes->draw_indices) return;
     size_t write_idx = 0;
     for (size_t i = 0; i < meshes->count; i++) {
-        if (meshes->items[i].alpha_mode != 2) {
+        uint32_t mesh_idx = meshes->draw_indices[i];
+        if (meshes->items[mesh_idx].alpha_mode != 2) {
             if (i != write_idx) {
-                Mesh tmp = meshes->items[write_idx];
-                meshes->items[write_idx] = meshes->items[i];
-                meshes->items[i] = tmp;
+                uint32_t tmp = meshes->draw_indices[write_idx];
+                meshes->draw_indices[write_idx] = meshes->draw_indices[i];
+                meshes->draw_indices[i] = tmp;
             }
             write_idx++;
         }
@@ -901,24 +902,26 @@ void sort_meshes_by_alpha(Meshes* meshes, vec3 cameraPos) {
     size_t blend_count = meshes->count - write_idx;
     if (blend_count <= 1) return;
 
-    // In-place Shell Sort!
-    // Slashes O(N^2) to O(N log N) without dynamic allocations or deep recursion.
-    Mesh* blend = &meshes->items[write_idx];
+    // Data-Oriented Shell Sort! Sorts indices instead of 1KB Mesh structs.
+    uint32_t* blend = &meshes->draw_indices[write_idx];
     size_t gaps[] = { 701, 301, 132, 57, 23, 10, 4, 1 };
 
     for (int g = 0; g < 8; g++) {
         size_t gap = gaps[g];
         for (size_t i = gap; i < blend_count; i++) {
-            Mesh temp = blend[i];
-            float d_temp = glm_vec3_distance2(cameraPos, (vec3){temp.model[3][0], temp.model[3][1], temp.model[3][2]});
+            uint32_t temp_idx = blend[i];
+            Mesh* temp_mesh = &meshes->items[temp_idx];
+            float d_temp = glm_vec3_distance2(cameraPos, (vec3){temp_mesh->model[3][0], temp_mesh->model[3][1], temp_mesh->model[3][2]});
 
             size_t j;
             for (j = i; j >= gap; j -= gap) {
-                float d_j = glm_vec3_distance2(cameraPos, (vec3){blend[j - gap].model[3][0], blend[j - gap].model[3][1], blend[j - gap].model[3][2]});
+                uint32_t comp_idx = blend[j - gap];
+                Mesh* comp_mesh = &meshes->items[comp_idx];
+                float d_j = glm_vec3_distance2(cameraPos, (vec3){comp_mesh->model[3][0], comp_mesh->model[3][1], comp_mesh->model[3][2]});
                 if (d_j >= d_temp) break;
                 blend[j] = blend[j - gap];
             }
-            blend[j] = temp;
+            blend[j] = temp_idx;
         }
     }
 
@@ -960,6 +963,7 @@ void mesh_destroy(VkDevice device, Mesh* mesh) {
 
 void meshes_init(Meshes* meshes) {
     meshes->items = NULL;
+    meshes->draw_indices = NULL;
     meshes->count = 0;
     meshes->capacity = 0;
 }
@@ -968,9 +972,12 @@ void meshes_add(Meshes* meshes, Mesh mesh) {
     if (meshes->count == meshes->capacity) {
         size_t new_capacity = meshes->capacity ? meshes->capacity * 2 : 4;
         meshes->items = realloc(meshes->items, new_capacity * sizeof(Mesh));
+        meshes->draw_indices = realloc(meshes->draw_indices, new_capacity * sizeof(uint32_t));
         meshes->capacity = new_capacity;
     }
+    meshes->draw_indices[meshes->count] = meshes->count;
     meshes->items[meshes->count++] = mesh;
+    markMeshesSSBODirty(&context); // Mark dirty only when structural additions occur
 }
 
 void meshes_remove(Meshes* meshes, size_t index) {
@@ -978,6 +985,10 @@ void meshes_remove(Meshes* meshes, size_t index) {
     for (size_t i = index; i < meshes->count - 1; ++i)
         meshes->items[i] = meshes->items[i + 1];
     meshes->count--;
+    for (size_t i = 0; i < meshes->count; i++) {
+        meshes->draw_indices[i] = (uint32_t)i;
+    }
+    markMeshesSSBODirty(&context); // Mark dirty only when structural removals occur
 }
 
 void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
@@ -1017,7 +1028,9 @@ void meshes_destroy(VkDevice device, Meshes* meshes) {
         mesh_destroy(device, &meshes->items[i]);
     }
     free(meshes->items);
+    free(meshes->draw_indices);
     meshes->items = NULL;
+    meshes->draw_indices = NULL;
     meshes->count = 0;
     meshes->capacity = 0;
 }

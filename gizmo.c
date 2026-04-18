@@ -712,10 +712,10 @@ static void apply_drag(int mesh_index, double mx, double my) {
 
 /// API
 
-static void cb_mode_translate(void) { gizmo.mode = GIZMO_MODE_TRANSLATE; printf("[Gizmo] Mode: Translate\n"); }
-static void cb_mode_rotate(void)    { gizmo.mode = GIZMO_MODE_ROTATE;    printf("[Gizmo] Mode: Rotate\n"); }
-static void cb_mode_scale(void)     { gizmo.mode = GIZMO_MODE_SCALE;     printf("[Gizmo] Mode: Scale\n"); }
-static void cb_mode_select(void)    { inspector_deselect(); printf("[Gizmo] Mode: Select (Gizmo Hidden)\n"); }
+static void cb_mode_translate(void) { gizmo.mode = GIZMO_MODE_TRANSLATE; }
+static void cb_mode_rotate(void)    { gizmo.mode = GIZMO_MODE_ROTATE;    }
+static void cb_mode_scale(void)     { gizmo.mode = GIZMO_MODE_SCALE;     }
+static void cb_mode_select(void)    { inspector_deselect();              }
 
 void gizmo_init(void) {
     memset(&gizmo, 0, sizeof(GizmoState));
@@ -819,7 +819,6 @@ int gizmo_pick_mesh(double mouse_x, double mouse_y) {
     if (best_idx >= 0) {
         inspector_select_mesh(best_idx);
         gizmo.active = true;
-        printf("[Gizmo] Selected mesh %d\n", best_idx);
     } else {
         inspector_deselect();
         gizmo.active   = false;

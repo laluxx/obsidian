@@ -1,7 +1,53 @@
 #+TITLE: Obsidian Engine TODO
 
 # TODO
-One thing to keep an eye on: the magic constant (16384 + 4096) appears four times across three files now with no named constant. That's going to bite you when you change maxMeshes. Should be a #define MAX_INDIRECT_COMMANDS or pulled from the context struct.
+List of everything flagged across the last commits:
+
+* Cache System (all subsystems) [0/5]
+- [ ] No cache invalidation — no mtime check, no version header, no magic version bump. A source file change silently loads stale data everywhere (.ogeom, .otex, .oibl, .omat, .orgb)
+- [ ] Path sanitization collision — `./assets/foo/bar.gltf` and `./assets/foo_bar.gltf` produce the same cache key (affects geometry, texture, material caches)
+- [ ] `get_texture_cache_path` uses a static buffer — calling it twice in the same scope (as done in `load_texture` for both the .dds and .otex paths) silently clobbers the first result
+- [ ] `get_pipeline_cache_path`, `get_texture_cache_path` etc. should respect `XDG_CACHE_HOME` before falling back to `~/.cache`
+- [ ] `mkdir` calls use `0777` — prefer `0755` to be explicit about intent (umask will handle it anyway but it's clearer)
+
+* Geometry Cache (.ogeom) [0/3]
+- [ ] `fread` return values in `create_mesh_from_primitive` cache hit path are unchecked — truncated file produces partial reads with no error
+- [ ] `mesh.vertexCount` and `mesh.indexCount` are never set on the cache hit path due to brace restructuring — they stay 0 silently
+- [ ] Indentation regression in the `fwrite` morph block in `gltf_loader.c`
+
+* Mega Buffer [0/1]
+- [ ] `megaMorphBufferAllocateFromFile` issues an immediate `beginSingleTimeCommands`/`endSingleTimeCommands` per mesh instead of using a `pendingMorphCopies` deferred batch list like the vertex and index variants do — serializes a GPU submit per morphed mesh on cache hit path
+
+* Texture Cache (.otex / .dds) [0/3]
+- [ ] JIT BC3 compressor only generates a single mip level — first-load DDS has `dwMipMapCount=1`, causing aliasing on surfaces in motion until cache is cleared
+- [ ] DXGI format numbers are hardcoded as magic integers (`98`, `99`, `83`, etc.) — needs comments mapping them to `DXGI_FORMAT_*` names
+- [ ] `fread` return value unchecked in the .otex cache hit path
+
+* *Vulkan Pipeline Cache* [0/1]
+- [ ] Pipeline cache header not validated before feeding to `vkCreatePipelineCache` — should check vendor ID, device ID, and UUID to handle GPU/driver switches safely rather than relying on driver robustness
+
+* Rope / Text Editor [0/2]
+- [ ] Fixed `tmp[4096]` / `tmp[16384]` buffers in `kill_line`, `kill_word`, `kill_region` — silently truncate on large regions
+- [ ] Undo stack eviction uses `memmove` over the full 512-entry array — fine now but worth noting for future scaling
+
+* Editor / Camera [0/3]
+- [ ] `camera.active = false` set in both `camera_init` and `window.c` — one is redundant, should be removed
+- [ ] Removal of `M-b/f/p/n` camera snap bindings should have a comment explaining they were ceded to the text editor keymap
+- [ ] Magic constant `(16384 + 4096)` appears multiple times across files with no named constant — should be `#define MAX_INDIRECT_COMMANDS`
+
+* IBL Cache (.oibl) [0/3]
+- [ ] IBL dimensions (1024, 32, 128, 512) are hardcoded in three places — size calculations, region structs, and `create_ibl_image` calls. A named constant struct would make resolution changes safe
+- [ ] Cache hit path allocates and holds a ~100MB `HOST_VISIBLE` staging buffer for the full duration of the upload — relevant if `loadIBL` is ever called at runtime for environment switching
+- [ ] `fread` return value unchecked on the IBL cache hit path
+
+* Material Cache (.omat) [0/1]
+- [ ] If textures are added to a material directory after first scan, the OMAT cache hit returns stale paths forever
+
+* General / Housekeeping [0/3]
+- [ ] `static char cache_path[512]` declared mid-function in `load_gltf` after a `fclose` — mixed declarations and code, will warn or error depending on compiler flags. Should move to top of function or be extracted like `get_pipeline_cache_path`
+- [ ] Indentation regression in `editor_update` — image viewer block got extra-indented
+- [ ] `int w, h, ch;` at column 0 in `load_texture` — paste artifact, present since the .otex commit and still unresolved
+
 
 Check quad utilization
 

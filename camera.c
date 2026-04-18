@@ -1,7 +1,6 @@
 #include "camera.h"
 #include "easing.h"
 #include "editor.h"
-#include <stdio.h>
 
 Camera camera;
 
@@ -98,9 +97,6 @@ void camera_orbit_around_point(Camera* cam, vec3 pivot_point, float delta_yaw, f
 }
 
 void camera_disable_orbit_mode(Camera* cam) {
-    if (cam->use_look_at) {
-        printf("Orbit disabled. Angles maintained - yaw: %.1f°, pitch: %.1f°\n", cam->yaw, cam->pitch);
-    }
     cam->use_look_at = false;
     camera_update(cam);
 }
@@ -123,7 +119,6 @@ void camera_process_keyboard(Camera* cam, GLFWwindow* window, float delta_time) 
     // When moving with WASD in FPS mode, disable orbit mode
     if (movement_key_pressed && cam->use_look_at) {
         camera_disable_orbit_mode(cam);
-        printf("Movement detected - orbit mode disabled\n");
     }
 
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
@@ -163,7 +158,6 @@ void camera_process_mouse(Camera* cam, double xoffset, double yoffset) {
     // Disable orbit mode when manually moving mouse (any movement)
     if (cam->use_look_at && (fabs(xoffset) > 0.01 || fabs(yoffset) > 0.01)) {
         camera_disable_orbit_mode(cam);
-        printf("Orbit mode disabled - manual camera rotation\n");
     }
 
     // If the camera is currently upside down, normalize it to the right-side-up equivalent view
@@ -254,13 +248,8 @@ bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
     glm_vec3_copy(cam->front, rayDir);
     glm_vec3_normalize(rayDir);
 
-    printf("=== RAYCAST DEBUG ===\n");
-    printf("Camera pos: (%.2f, %.2f, %.2f)\n", rayOrigin[0], rayOrigin[1], rayOrigin[2]);
-    printf("Camera dir: (%.2f, %.2f, %.2f)\n", rayDir[0], rayDir[1], rayDir[2]);
-
     // Check if ray is parallel to ground (no Y component)
     if (fabs(rayDir[1]) < 0.0001f) {
-        printf("Ray parallel to ground - using camera XZ position\n");
         hitPoint[0] = rayOrigin[0];
         hitPoint[1] = 0.0f;
         hitPoint[2] = rayOrigin[2];
@@ -271,10 +260,7 @@ bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
     // t = -rayOrigin.y / rayDir.y
     float t = -rayOrigin[1] / rayDir[1];
 
-    printf("t parameter: %.2f\n", t);
-
     if (t < 0.0f) {
-        printf("Intersection behind camera\n");
         // Project camera position onto ground plane
         hitPoint[0] = rayOrigin[0];
         hitPoint[1] = 0.0f;
@@ -286,9 +272,6 @@ bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
     hitPoint[0] = rayOrigin[0] + rayDir[0] * t;
     hitPoint[1] = 0.0f;
     hitPoint[2] = rayOrigin[2] + rayDir[2] * t;
-
-    printf("Ground intersection: (%.2f, %.2f, %.2f), Distance: %.2f\n",
-           hitPoint[0], hitPoint[1], hitPoint[2], t);
 
     return true;
 }

@@ -2808,7 +2808,6 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
 
 void markMeshesSSBODirty(VulkanContext* ctx)
 {
-    ctx->ssboFramesDirty = MAX_FRAMES_IN_FLIGHT;
     /* mark all meshes dirty across all frames */
     if (ctx->meshDirtyBits) {
         uint32_t words = ctx->meshDirtyCapacity / 64;
@@ -2825,26 +2824,27 @@ void markMeshDirty(VulkanContext* ctx, uint32_t meshIndex)
         for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++)
             ctx->meshDirtyBits[word * MAX_FRAMES_IN_FLIGHT + f] |= bit;
     }
-    ctx->ssboFramesDirty = MAX_FRAMES_IN_FLIGHT;
 }
 
 void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
 {
     uint32_t count = (uint32_t)meshes->count;
+    if (!meshes->draw_indices) return;
 
     // CRITICAL: Shift pointer to the current frame to prevent GPU tearing!
     VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
     VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)((uint8_t*)ctx->srcIndirectBufferMapped + (ctx->currentFrame * drawSize));
 
     for (uint32_t i = 0; i < count; i++) {
-        Mesh* m = &meshes->items[i];
+        uint32_t mesh_idx = meshes->draw_indices[i];
+        Mesh* m = &meshes->items[mesh_idx];
 
         if (m->megaBaseVertex == UINT32_MAX && m->dynamicBaseVertex == UINT32_MAX) {
             cmds[i].indexCount    = 0;
             cmds[i].instanceCount = 0;
             cmds[i].firstIndex    = 0;
             cmds[i].vertexOffset  = 0;
-            cmds[i].firstInstance = i;
+            cmds[i].firstInstance = mesh_idx;
             continue;
         }
 
@@ -2860,10 +2860,13 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
         } else {
             cmds[i].vertexOffset  = (int32_t)(ctx->megaVertexBufferOffset + (ctx->currentFrame * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex);
         }
-        cmds[i].firstInstance = i;
+
+        // AAA DOD ARCHITECTURE: The firstInstance points to the completely STATIC SSBO slot!
+        cmds[i].firstInstance = mesh_idx;
     }
 
-    markMeshesSSBODirty(ctx);
+    // We completely removed markMeshesSSBODirty(ctx); here.
+    // The SSBO is now completely static. It only updates when meshes are actively added/removed!
 }
 
 /* Call once per frame from beginFrame - uploads SSBO only to currentFrame if dirty */
@@ -2895,11 +2898,27 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             }
         }
     }
-    if (ctx->ssboFramesDirty == 0) return;
 
     uint32_t count = (uint32_t)meshes->count;
+    if (count == 0) return;
+
     uint32_t f     = ctx->currentFrame;
     uint32_t words = (count + 63) / 64;
+
+    // Check if the current frame actually has any pending uploads
+    bool has_dirty = false;
+    if (ctx->meshDirtyBits) {
+        for (uint32_t w = 0; w < words; w++) {
+            if (ctx->meshDirtyBits[w * MAX_FRAMES_IN_FLIGHT + f]) {
+                has_dirty = true;
+                break;
+            }
+        }
+    } else {
+        has_dirty = true; // Fallback if bitset isn't allocated
+    }
+
+    if (!has_dirty) return;
 
     MeshGPUData* dst = (MeshGPUData*)ctx->meshSSBOMapped[f];
 
@@ -2977,8 +2996,6 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             ctx->meshDirtyBits[w * MAX_FRAMES_IN_FLIGHT + f] = 0;
         }
     }
-
-    ctx->ssboFramesDirty--;
 }
 
 static void create_ibl_image(VulkanContext* ctx, uint32_t w, uint32_t h, uint32_t mips, uint32_t layers, VkFormat format, VkImageUsageFlags usage, VkImage* img, VkDeviceMemory* mem) {

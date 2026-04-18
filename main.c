@@ -133,13 +133,9 @@ void key_callback(int key, int action, int mods) {
             // When entering FPS mode, disable orbit mode and sync angles
             if (camera.use_look_at) {
                 camera_disable_orbit_mode(&camera);
-                printf("Entered FPS mode - orbit disabled, angles synced\n");
-            } else {
-                printf("Camera control ENABLED\n");
             }
         } else {
             glfwSetInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            printf("Camera control DISABLED - Editor mode\n");
         }
     }
 
@@ -167,10 +163,6 @@ void key_callback(int key, int action, int mods) {
             float scale = glm_vec3_norm((vec3){m->model[0][0], m->model[0][1], m->model[0][2]});
             target_dist = glm_vec3_norm(extents) * scale * 1.2f;
             if (target_dist < 2.0f) target_dist = 2.0f;
-
-            printf("Framing selected mesh %d at (%.2f, %.2f, %.2f)\n", editor.inspector.selected_mesh_index, target_center[0], target_center[1], target_center[2]);
-        } else {
-            printf("Framing world origin (0, 0, 0)\n");
         }
 
         // New camera position: target_center - (camera.front * target_dist)
@@ -237,9 +229,6 @@ void mouse_button_callback(int button, int action, int mods) {
                     vec3 toPivot;
                     glm_vec3_sub(orbitPivot, camera.position, toPivot);
                     orbitDistance = glm_vec3_norm(toPivot);
-
-                    printf("Orbit pivot set to: (%.2f, %.2f, %.2f)\n", orbitPivot[0], orbitPivot[1], orbitPivot[2]);
-                    printf("Orbit distance: %.2f\n", orbitDistance);
                 }
 
             } else if (action == GLFW_RELEASE) {
@@ -247,7 +236,6 @@ void mouse_button_callback(int button, int action, int mods) {
                 shiftMiddleMousePressed = false;
 
                 camera.use_look_at = false;
-                printf("Orbit mode disabled - returning to normal camera control\n");
             }
         }
 
@@ -324,7 +312,6 @@ void cursor_pos_callback(double xpos, double ypos) {
         if (shiftMiddleMousePressed) {
             if (camera.use_look_at) {
                 camera_disable_orbit_mode(&camera);
-                printf("Panning - orbit mode disabled\n");
             }
             // SHIFT + MIDDLE MOUSE: PAN
 
