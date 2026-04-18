@@ -2934,12 +2934,104 @@ static void write_ibl_descriptor_set(VkDevice device, VkSampler tempSampler, VkD
     vkUpdateDescriptorSets(device, sampView ? 2 : 1, sampView ? w : &w[1], 0, NULL);
 }
 
+static const char* get_ibl_cache_path(const char* original_path) {
+    static char cache_path[512];
+    const char* home = getenv("HOME");
+    if (!home) home = ".";
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/ibl", home); mkdir(dir_path, 0777);
+
+    char safe_name[256];
+    strncpy(safe_name, original_path, sizeof(safe_name) - 1);
+    safe_name[sizeof(safe_name) - 1] = '\0';
+    for (int i = 0; safe_name[i]; i++) {
+        if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.') safe_name[i] = '_';
+    }
+    snprintf(cache_path, sizeof(cache_path), "%s/%s.oibl", dir_path, safe_name);
+    return cache_path;
+}
+
 bool loadIBL(VulkanContext* ctx, const char* hdr_path) {
+    const char* cache_path = get_ibl_cache_path(hdr_path);
+    VkFormat fmt32 = VK_FORMAT_R32G32B32A32_SFLOAT;
+    VkFormat brdfFmt = VK_FORMAT_R16G16_SFLOAT;
+
+    size_t skyboxSize = 1024 * 1024 * 16 * 6;
+    size_t irradSize = 32 * 32 * 16 * 6;
+    size_t prefSize = 0;
+    uint32_t pw = 128, ph = 128;
+    VkBufferImageCopy prefRegions[5];
+    for (int i=0; i<5; i++) {
+        prefRegions[i] = (VkBufferImageCopy){ .bufferOffset = skyboxSize + irradSize + prefSize, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 6}, .imageExtent = {pw, ph, 1} };
+        prefSize += pw * ph * 16 * 6;
+        pw /= 2; ph /= 2;
+    }
+    size_t brdfSize = 512 * 512 * 4;
+    size_t totalSize = skyboxSize + irradSize + prefSize + brdfSize;
+
+    FILE* f = fopen(cache_path, "rb");
+    uint32_t magic = 0;
+    if (f && fread(&magic, 4, 1, f) == 1 && magic == 0x4C42494F) {
+        fprintf(stdout, "\033[32m[IBL] Cache Hit (ZERO-COPY Environment Map): %s\033[0m\n", cache_path);
+
+        destroyIBL(ctx);
+
+        create_ibl_image(ctx, 1024, 1024, 1, 6, fmt32, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &iblSkyboxImage, &iblSkyboxMemory);
+        iblSkyboxView = create_ibl_view(ctx, iblSkyboxImage, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 1, 6);
+
+        create_ibl_image(ctx, 32, 32, 1, 6, fmt32, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblIrradianceImage, &ctx->iblIrradianceMemory);
+        ctx->iblIrradianceView = create_ibl_view(ctx, ctx->iblIrradianceImage, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 1, 6);
+
+        create_ibl_image(ctx, 128, 128, 5, 6, fmt32, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblPrefilterImage, &ctx->iblPrefilterMemory);
+        ctx->iblPrefilterView = create_ibl_view(ctx, ctx->iblPrefilterImage, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 5, 6);
+
+        create_ibl_image(ctx, 512, 512, 1, 1, brdfFmt, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblBrdfLutImage, &ctx->iblBrdfLutMemory);
+        ctx->iblBrdfLutView = create_ibl_view(ctx, ctx->iblBrdfLutImage, brdfFmt, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1);
+
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        createBuffer(ctx, totalSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
+        void* mapped; vkMapMemory(ctx->device, stagingMem, 0, totalSize, 0, &mapped);
+        fread(mapped, 1, totalSize, f);
+        vkUnmapMemory(ctx->device, stagingMem);
+        fclose(f);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+
+        transition_image_compute(cmd, iblSkyboxImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1, 6);
+        transition_image_compute(cmd, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1, 6);
+        transition_image_compute(cmd, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 5, 6);
+        transition_image_compute(cmd, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1, 1);
+
+        VkBufferImageCopy skyboxRegion = { .bufferOffset = 0, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6}, .imageExtent = {1024, 1024, 1} };
+        vkCmdCopyBufferToImage(cmd, stagingBuf, iblSkyboxImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &skyboxRegion);
+
+        VkBufferImageCopy irradRegion = { .bufferOffset = skyboxSize, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6}, .imageExtent = {32, 32, 1} };
+        vkCmdCopyBufferToImage(cmd, stagingBuf, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &irradRegion);
+
+        vkCmdCopyBufferToImage(cmd, stagingBuf, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 5, prefRegions);
+
+        VkBufferImageCopy brdfRegion = { .bufferOffset = skyboxSize + irradSize + prefSize, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {512, 512, 1} };
+        vkCmdCopyBufferToImage(cmd, stagingBuf, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &brdfRegion);
+
+        transition_image_compute(cmd, iblSkyboxImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 6);
+        transition_image_compute(cmd, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 6);
+        transition_image_compute(cmd, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 6);
+        transition_image_compute(cmd, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 1);
+
+        endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL); vkFreeMemory(ctx->device, stagingMem, NULL);
+
+        goto bind_samplers;
+    }
+    if (f) fclose(f);
+
+    fprintf(stdout, "\033[33m[IBL] Cache Miss. Baking HDR environment map (Compute Shaders): %s\033[0m\n", hdr_path);
+
     int w, h, channels;
     float* pixels = stbi_loadf(hdr_path, &w, &h, &channels, 4);
     if (!pixels) { fprintf(stderr, "Failed to load HDR: %s\n", hdr_path); return false; }
-
-    VkFormat fmt32 = VK_FORMAT_R32G32B32A32_SFLOAT;
 
     // 1. Source HDR Image
     VkImage hdrImg; VkDeviceMemory hdrMem;
@@ -2955,22 +3047,22 @@ bool loadIBL(VulkanContext* ctx, const char* hdr_path) {
 
     // 2. Temp Environment Cubemap
     VkImage envImg; VkDeviceMemory envMem;
-    create_ibl_image(ctx, 1024, 1024, 1, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &envImg, &envMem);
+    create_ibl_image(ctx, 1024, 1024, 1, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &envImg, &envMem);
     VkImageView envCubeView = create_ibl_view(ctx, envImg, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 1, 6);
     VkImageView envArrayView = create_ibl_view(ctx, envImg, fmt32, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0, 1, 6);
 
     // 3. Final IBL Images
     destroyIBL(ctx);
-    create_ibl_image(ctx, 32, 32, 1, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblIrradianceImage, &ctx->iblIrradianceMemory);
+    create_ibl_image(ctx, 32, 32, 1, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &ctx->iblIrradianceImage, &ctx->iblIrradianceMemory);
     ctx->iblIrradianceView = create_ibl_view(ctx, ctx->iblIrradianceImage, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 1, 6);
     VkImageView irradArrayView = create_ibl_view(ctx, ctx->iblIrradianceImage, fmt32, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0, 1, 6);
 
-    create_ibl_image(ctx, 128, 128, 5, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblPrefilterImage, &ctx->iblPrefilterMemory);
+    create_ibl_image(ctx, 128, 128, 5, 6, fmt32, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &ctx->iblPrefilterImage, &ctx->iblPrefilterMemory);
     ctx->iblPrefilterView = create_ibl_view(ctx, ctx->iblPrefilterImage, fmt32, VK_IMAGE_VIEW_TYPE_CUBE, 0, 5, 6);
     VkImageView prefArrayViews[5];
     for(uint32_t i=0; i<5; i++) prefArrayViews[i] = create_ibl_view(ctx, ctx->iblPrefilterImage, fmt32, VK_IMAGE_VIEW_TYPE_2D_ARRAY, i, 1, 6);
 
-    create_ibl_image(ctx, 512, 512, 1, 1, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &ctx->iblBrdfLutImage, &ctx->iblBrdfLutMemory);
+    create_ibl_image(ctx, 512, 512, 1, 1, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &ctx->iblBrdfLutImage, &ctx->iblBrdfLutMemory);
     ctx->iblBrdfLutView = create_ibl_view(ctx, ctx->iblBrdfLutImage, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1);
 
     // Temp Sampler
@@ -3065,6 +3157,46 @@ bool loadIBL(VulkanContext* ctx, const char* hdr_path) {
 
     endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
 
+    FILE* fout = fopen(cache_path, "wb");
+    if (fout) {
+        uint32_t magic_write = 0x4C42494F; // 'OIBL'
+        fwrite(&magic_write, 4, 1, fout);
+
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        createBuffer(ctx, totalSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuf, &stagingMem);
+
+        VkCommandBuffer copyCmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+
+        transition_image_compute(copyCmd, envImg, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1, 6);
+        transition_image_compute(copyCmd, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1, 6);
+        transition_image_compute(copyCmd, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 5, 6);
+        transition_image_compute(copyCmd, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1, 1);
+
+        VkBufferImageCopy skyboxRegion = { .bufferOffset = 0, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6}, .imageExtent = {1024, 1024, 1} };
+        vkCmdCopyImageToBuffer(copyCmd, envImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 1, &skyboxRegion);
+
+        VkBufferImageCopy irradRegion = { .bufferOffset = skyboxSize, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6}, .imageExtent = {32, 32, 1} };
+        vkCmdCopyImageToBuffer(copyCmd, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 1, &irradRegion);
+
+        vkCmdCopyImageToBuffer(copyCmd, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 5, prefRegions);
+
+        VkBufferImageCopy brdfRegion = { .bufferOffset = skyboxSize + irradSize + prefSize, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {512, 512, 1} };
+        vkCmdCopyImageToBuffer(copyCmd, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 1, &brdfRegion);
+
+        transition_image_compute(copyCmd, envImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 6);
+        transition_image_compute(copyCmd, ctx->iblIrradianceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 6);
+        transition_image_compute(copyCmd, ctx->iblPrefilterImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 6);
+        transition_image_compute(copyCmd, ctx->iblBrdfLutImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 1);
+
+        endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, copyCmd);
+
+        void* mapped; vkMapMemory(ctx->device, stagingMem, 0, totalSize, 0, &mapped);
+        fwrite(mapped, 1, totalSize, fout);
+        vkUnmapMemory(ctx->device, stagingMem);
+        fclose(fout);
+        vkDestroyBuffer(ctx->device, stagingBuf, NULL); vkFreeMemory(ctx->device, stagingMem, NULL);
+    }
+
     // Persist the Skybox
     iblSkyboxImage = envImg;
     iblSkyboxMemory = envMem;
@@ -3085,10 +3217,12 @@ bool loadIBL(VulkanContext* ctx, const char* hdr_path) {
     vkDestroyShaderModule(ctx->device, modEq, NULL); vkDestroyShaderModule(ctx->device, modIrr, NULL);
     vkDestroyShaderModule(ctx->device, modPref, NULL); vkDestroyShaderModule(ctx->device, modBrdf, NULL);
 
+bind_samplers:
     // Create Permanent Samplers
-    sci.maxLod = 1.0f; vkCreateSampler(ctx->device, &sci, NULL, &ctx->iblIrradianceSampler);
-    sci.maxLod = 5.0f; vkCreateSampler(ctx->device, &sci, NULL, &ctx->iblPrefilterSampler);
-    sci.maxLod = 1.0f; vkCreateSampler(ctx->device, &sci, NULL, &ctx->iblBrdfLutSampler);
+    VkSamplerCreateInfo finalSci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxAnisotropy = 1.0f };
+    finalSci.maxLod = 1.0f; vkCreateSampler(ctx->device, &finalSci, NULL, &ctx->iblIrradianceSampler);
+    finalSci.maxLod = 5.0f; vkCreateSampler(ctx->device, &finalSci, NULL, &ctx->iblPrefilterSampler);
+    finalSci.maxLod = 1.0f; vkCreateSampler(ctx->device, &finalSci, NULL, &ctx->iblBrdfLutSampler);
 
     // Inject directly into lighting sets (set = 3) for ALL frames!
     VkDescriptorImageInfo iInfos[4] = {
