@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "stb_image.h"
 
 #include "pbr.vert.spv.h"
@@ -674,6 +676,21 @@ void createAllPipelineLayouts(VulkanContext* ctx)
 
 /// GRAPHICS PIPELINES
 // all created in ONE batch call
+static const char* get_pipeline_cache_path() {
+    static char cache_path[512];
+    const char* home = getenv("HOME");
+    if (!home) home = ".";
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
+    mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
+    mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/pipelines", home);
+    mkdir(dir_path, 0777);
+    snprintf(cache_path, sizeof(cache_path), "%s/vk_pipeline_cache.bin", dir_path);
+    return cache_path;
+}
+
 void createGraphicsPipelines(VulkanContext* ctx)
 {
     VkDescriptorSetLayout skyboxLayouts[2] = { ctx->descriptorSetLayout, ctx->lightingSetLayout };
@@ -681,7 +698,30 @@ void createGraphicsPipelines(VulkanContext* ctx)
     vkCreatePipelineLayout(ctx->device, &skyboxPlci, NULL, &skyboxPipelineLayout);
 
     VkPipelineCacheCreateInfo cacheCI = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
-    vkCreatePipelineCache(ctx->device, &cacheCI, NULL, &pipelineCache);
+
+    size_t cacheSize = 0;
+    void* cacheData = NULL;
+    const char* cachePath = get_pipeline_cache_path();
+    FILE* f = fopen(cachePath, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        cacheSize = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        cacheData = malloc(cacheSize);
+        if (fread(cacheData, 1, cacheSize, f) == cacheSize) {
+            cacheCI.initialDataSize = cacheSize;
+            cacheCI.pInitialData = cacheData;
+            fprintf(stdout, "\033[32m[PIPELINE] Cache Hit: Loaded %zu bytes from %s\033[0m\n", cacheSize, cachePath);
+        }
+        fclose(f);
+    } else {
+        fprintf(stdout, "\033[33m[PIPELINE] Cache Miss: Building pipelines from scratch\033[0m\n");
+    }
+
+    if (vkCreatePipelineCache(ctx->device, &cacheCI, NULL, &pipelineCache) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create pipeline cache\n");
+    }
+    if (cacheData) free(cacheData);
 
     VkPipelineRasterizationStateCreateInfo rast1  = makeRasterizer(1.0f);
     VkPipelineRasterizationStateCreateInfo rastLW = makeRasterizer(2.0f);
@@ -2045,7 +2085,24 @@ void cleanup(VulkanContext* ctx)
         if (ctx->frustumUBOBuffer[i])   { vkDestroyBuffer(ctx->device, ctx->frustumUBOBuffer[i],   NULL);            ctx->frustumUBOBuffer[i]       = VK_NULL_HANDLE; }
         if (ctx->frustumUBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->frustumUBOMemory[i],   NULL);            ctx->frustumUBOMemory[i]       = VK_NULL_HANDLE; }
     }
-    if (pipelineCache != VK_NULL_HANDLE) { vkDestroyPipelineCache(ctx->device, pipelineCache, NULL); pipelineCache = VK_NULL_HANDLE; }
+    if (pipelineCache != VK_NULL_HANDLE) {
+        size_t cacheSize = 0;
+        if (vkGetPipelineCacheData(ctx->device, pipelineCache, &cacheSize, NULL) == VK_SUCCESS && cacheSize > 0) {
+            void* cacheData = malloc(cacheSize);
+            if (vkGetPipelineCacheData(ctx->device, pipelineCache, &cacheSize, cacheData) == VK_SUCCESS) {
+                const char* cachePath = get_pipeline_cache_path();
+                FILE* f = fopen(cachePath, "wb");
+                if (f) {
+                    fwrite(cacheData, 1, cacheSize, f);
+                    fclose(f);
+                    fprintf(stdout, "\033[32m[PIPELINE] Saved %zu bytes to cache\033[0m\n", cacheSize);
+                }
+            }
+            free(cacheData);
+        }
+        vkDestroyPipelineCache(ctx->device, pipelineCache, NULL);
+        pipelineCache = VK_NULL_HANDLE;
+    }
 
 #define CLEANUP_BUFFER(b, m) \
     if(ctx->b) { vkDestroyBuffer(ctx->device, ctx->b, NULL); ctx->b = VK_NULL_HANDLE; } \
