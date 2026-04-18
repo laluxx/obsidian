@@ -3,8 +3,12 @@
 #include <string.h>
 #include "context.h"
 #include "vulkan_setup.h"
+#include <sys/stat.h>
+#include <sys/types.h>
 
 static int32_t gltf_texture_indices[MAX_TEXTURES];
+static FILE* geom_cache_in = NULL;
+static FILE* geom_cache_out = NULL;
 static size_t gltf_texture_count = 0;
 
 typedef struct {
@@ -102,19 +106,11 @@ bool load_gltf_textures(cgltf_data* data, const char* base_path) {
     return true;
 }
 
-// GPU Morph Upload: pack all target deltas into megaMorphBuffer.
-// Layout: for each vertex V, for each target T: delta[V * target_count + T]
-// This is the transposed (vertex-major) layout the vertex shader expects.
-static MorphData* load_morph_targets_gpu(cgltf_primitive* prim, uint32_t vertex_count, uint32_t* out_delta_offset) {
-    if (prim->targets_count == 0) {
-        *out_delta_offset = 0;
-        return NULL;
-    }
-
+// CPU Morph Extraction: pack all target deltas into a staging array.
+static MorphDelta* extract_morph_targets(cgltf_primitive* prim, uint32_t vertex_count) {
+    if (prim->targets_count == 0) return NULL;
     size_t target_count = prim->targets_count;
-    printf("  Uploading %zu morph targets to megaMorphBuffer (vertex-major layout)\n", target_count);
 
-    // Collect position and normal delta accessors for each target
     cgltf_accessor** pos_accessors = calloc(target_count, sizeof(cgltf_accessor*));
     cgltf_accessor** nrm_accessors = calloc(target_count, sizeof(cgltf_accessor*));
 
@@ -125,11 +121,8 @@ static MorphData* load_morph_targets_gpu(cgltf_primitive* prim, uint32_t vertex_
             if (attr->type == cgltf_attribute_type_position) pos_accessors[t] = attr->data;
             else if (attr->type == cgltf_attribute_type_normal) nrm_accessors[t] = attr->data;
         }
-        if (!nrm_accessors[t])
-            printf("    Target %zu: WARNING - No normal deltas, will use zero\n", t);
     }
 
-    // Allocate CPU staging: vertex-major interleaved MorphDelta[vertex_count * target_count]
     size_t total_deltas = (size_t)vertex_count * target_count;
     MorphDelta* staging = calloc(total_deltas, sizeof(MorphDelta));
 
@@ -157,24 +150,7 @@ static MorphData* load_morph_targets_gpu(cgltf_primitive* prim, uint32_t vertex_
 
     free(pos_accessors);
     free(nrm_accessors);
-
-    // Upload to megaMorphBuffer via staging
-    uint32_t base_delta = megaMorphBufferAllocate(&context, staging, (uint32_t)total_deltas);
-    free(staging);
-
-    if (base_delta == UINT32_MAX) {
-        fprintf(stderr, "  ERROR: megaMorphBuffer overflow during morph upload!\n");
-        *out_delta_offset = 0;
-        return NULL;
-    }
-
-    *out_delta_offset = base_delta;
-    printf("  -> Packed %zu deltas at megaMorphBuffer offset %u\n", total_deltas, base_delta);
-
-    MorphData* morph_data = malloc(sizeof(MorphData));
-    morph_data->target_count = target_count;
-    morph_data->weights = calloc(target_count, sizeof(float));
-    return morph_data;
+    return staging;
 }
 
 static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, const char* name) {
@@ -417,114 +393,134 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             mesh.emissiveStrength = prim->material->emissive_strength.emissive_strength;
     }
 
-    // Create vertex array with material colors
-    Vertex* vertices = malloc(vertex_count * sizeof(Vertex));
+    Vertex* final_vertices = NULL;
+    uint32_t* final_indices = NULL;
+    MorphDelta* final_morphs = NULL;
+    uint32_t final_vertex_count = 0;
+    uint32_t final_index_count = 0;
+    uint32_t final_morph_count = 0;
 
-    for (size_t v = 0; v < vertex_count; v++) {
-        // Position
-        if (pos_accessor) {
-            cgltf_accessor_read_float(pos_accessor, v, vertices[v].pos, 3);
+    bool loaded_from_cache = false;
+    if (geom_cache_in) {
+        fread(&final_vertex_count, sizeof(uint32_t), 1, geom_cache_in);
+        fread(&final_index_count, sizeof(uint32_t), 1, geom_cache_in);
+        fread(&final_morph_count, sizeof(uint32_t), 1, geom_cache_in);
+        fread(mesh.aabbMin, sizeof(vec3), 1, geom_cache_in);
+        fread(mesh.aabbMax, sizeof(vec3), 1, geom_cache_in);
+
+        if (final_vertex_count > 0) {
+            final_vertices = malloc(final_vertex_count * sizeof(Vertex));
+            fread(final_vertices, sizeof(Vertex), final_vertex_count, geom_cache_in);
+        }
+        if (final_index_count > 0) {
+            final_indices = malloc(final_index_count * sizeof(uint32_t));
+            fread(final_indices, sizeof(uint32_t), final_index_count, geom_cache_in);
+        }
+        if (final_morph_count > 0) {
+            size_t total_deltas = (size_t)final_vertex_count * final_morph_count;
+            final_morphs = malloc(total_deltas * sizeof(MorphDelta));
+            fread(final_morphs, sizeof(MorphDelta), total_deltas, geom_cache_in);
+        }
+        loaded_from_cache = true;
+    }
+
+    if (!loaded_from_cache) {
+        final_vertex_count = (uint32_t)vertex_count;
+        final_index_count = (uint32_t)index_count;
+        final_morph_count = (uint32_t)prim->targets_count;
+
+        final_vertices = malloc(final_vertex_count * sizeof(Vertex));
+        for (size_t v = 0; v < vertex_count; v++) {
+            if (pos_accessor) cgltf_accessor_read_float(pos_accessor, v, final_vertices[v].pos, 3);
+            if (normal_accessor) {
+                cgltf_accessor_read_float(normal_accessor, v, final_vertices[v].normal, 3);
+            } else {
+                final_vertices[v].normal[0] = 0.0f; final_vertices[v].normal[1] = 1.0f; final_vertices[v].normal[2] = 0.0f;
+            }
+            if (texcoord_accessor) {
+                cgltf_accessor_read_float(texcoord_accessor, v, final_vertices[v].texCoord, 2);
+            } else {
+                final_vertices[v].texCoord[0] = 0.0f; final_vertices[v].texCoord[1] = 0.0f;
+            }
+            if (tangent_accessor) {
+                cgltf_accessor_read_float(tangent_accessor, v, final_vertices[v].tangent, 4);
+            } else {
+                final_vertices[v].tangent[0] = 1.0f; final_vertices[v].tangent[1] = 0.0f; final_vertices[v].tangent[2] = 0.0f; final_vertices[v].tangent[3] = 1.0f;
+            }
+            if (color_accessor) {
+                cgltf_accessor_read_float(color_accessor, v, final_vertices[v].color, 4);
+            } else {
+                final_vertices[v].color[0] = base_color[0]; final_vertices[v].color[1] = base_color[1]; final_vertices[v].color[2] = base_color[2]; final_vertices[v].color[3] = base_color[3];
+            }
+            final_vertices[v].textureIndex = 0;
+            if (joints_accessor) {
+                uint32_t j[4] = {0,0,0,0};
+                cgltf_accessor_read_uint(joints_accessor, v, j, 4);
+                final_vertices[v].joints[0] = j[0]; final_vertices[v].joints[1] = j[1]; final_vertices[v].joints[2] = j[2]; final_vertices[v].joints[3] = j[3];
+            } else {
+                final_vertices[v].joints[0] = 0; final_vertices[v].joints[1] = 0; final_vertices[v].joints[2] = 0; final_vertices[v].joints[3] = 0;
+            }
+            if (weights_accessor) {
+                cgltf_accessor_read_float(weights_accessor, v, final_vertices[v].weights, 4);
+            } else {
+                final_vertices[v].weights[0] = 0.0f; final_vertices[v].weights[1] = 0.0f; final_vertices[v].weights[2] = 0.0f; final_vertices[v].weights[3] = 0.0f;
+            }
         }
 
-        // Normal
-        if (normal_accessor) {
-            cgltf_accessor_read_float(normal_accessor, v, vertices[v].normal, 3);
-        } else {
-            vertices[v].normal[0] = 0.0f;
-            vertices[v].normal[1] = 1.0f;
-            vertices[v].normal[2] = 0.0f;
+        final_indices = indices;
+        indices = NULL;
+
+        final_morphs = extract_morph_targets(prim, final_vertex_count);
+
+        vec3 bmin = { 1e30f,  1e30f,  1e30f};
+        vec3 bmax = {-1e30f, -1e30f, -1e30f};
+        for (size_t v = 0; v < vertex_count; v++) {
+            bmin[0] = fminf(bmin[0], final_vertices[v].pos[0]);
+            bmin[1] = fminf(bmin[1], final_vertices[v].pos[1]);
+            bmin[2] = fminf(bmin[2], final_vertices[v].pos[2]);
+            bmax[0] = fmaxf(bmax[0], final_vertices[v].pos[0]);
+            bmax[1] = fmaxf(bmax[1], final_vertices[v].pos[1]);
+            bmax[2] = fmaxf(bmax[2], final_vertices[v].pos[2]);
         }
+        glm_vec3_copy(bmin, mesh.aabbMin);
+        glm_vec3_copy(bmax, mesh.aabbMax);
 
-        // Texture coordinates
-        if (texcoord_accessor) {
-            cgltf_accessor_read_float(texcoord_accessor, v, vertices[v].texCoord, 2);
-        } else {
-            vertices[v].texCoord[0] = 0.0f;
-            vertices[v].texCoord[1] = 0.0f;
-        }
+        if (geom_cache_out) {
+            fwrite(&final_vertex_count, sizeof(uint32_t), 1, geom_cache_out);
+            fwrite(&final_index_count, sizeof(uint32_t), 1, geom_cache_out);
+            fwrite(&final_morph_count, sizeof(uint32_t), 1, geom_cache_out);
+            fwrite(mesh.aabbMin, sizeof(vec3), 1, geom_cache_out);
+            fwrite(mesh.aabbMax, sizeof(vec3), 1, geom_cache_out);
 
-        // Tangent (vec4: xyz=tangent, w=bitangent sign)
-        if (tangent_accessor) {
-            cgltf_accessor_read_float(tangent_accessor, v, vertices[v].tangent, 4);
-        } else {
-            // Fallback tangent — will look wrong for normal maps but won't crash
-            vertices[v].tangent[0] = 1.0f;
-            vertices[v].tangent[1] = 0.0f;
-            vertices[v].tangent[2] = 0.0f;
-            vertices[v].tangent[3] = 1.0f;
-        }
-
-        // Color - prioritize vertex colors, fallback to material base color
-        if (color_accessor) {
-            float color[4];
-            cgltf_accessor_read_float(color_accessor, v, color, 4);
-            vertices[v].color[0] = color[0];
-            vertices[v].color[1] = color[1];
-            vertices[v].color[2] = color[2];
-            vertices[v].color[3] = color[3];
-        } else {
-            // Use material base color
-            vertices[v].color[0] = base_color[0];
-            vertices[v].color[1] = base_color[1];
-            vertices[v].color[2] = base_color[2];
-            vertices[v].color[3] = base_color[3];
-        }
-
-        vertices[v].textureIndex = 0;
-
-        // AAA: Parse Joints (cgltf handles the 8/16/32-bit type conversions automatically)
-        if (joints_accessor) {
-            uint32_t j[4] = {0,0,0,0};
-            cgltf_accessor_read_uint(joints_accessor, v, j, 4);
-            vertices[v].joints[0] = j[0]; vertices[v].joints[1] = j[1];
-            vertices[v].joints[2] = j[2]; vertices[v].joints[3] = j[3];
-        } else {
-            vertices[v].joints[0] = 0; vertices[v].joints[1] = 0;
-            vertices[v].joints[2] = 0; vertices[v].joints[3] = 0;
-        }
-
-        // AAA: Parse Bone Weights
-        if (weights_accessor) {
-            float w[4] = {0,0,0,0};
-            cgltf_accessor_read_float(weights_accessor, v, w, 4);
-            vertices[v].weights[0] = w[0]; vertices[v].weights[1] = w[1];
-            vertices[v].weights[2] = w[2]; vertices[v].weights[3] = w[3];
-        } else {
-            vertices[v].weights[0] = 0.0f; vertices[v].weights[1] = 0.0f;
-            vertices[v].weights[2] = 0.0f; vertices[v].weights[3] = 0.0f;
+            if (final_vertex_count > 0) fwrite(final_vertices, sizeof(Vertex), final_vertex_count, geom_cache_out);
+            if (final_index_count > 0) fwrite(final_indices, sizeof(uint32_t), final_index_count, geom_cache_out);
+            if (final_morph_count > 0) {
+                size_t total_deltas = (size_t)final_vertex_count * final_morph_count;
+                fwrite(final_morphs, sizeof(MorphDelta), total_deltas, geom_cache_out);
+            }
         }
     }
 
-    /* For ALL meshes: vertices and indices stay separate — no CPU expansion ever.
-       Morph targets are uploaded directly to megaMorphBuffer in vertex-major layout.
-       The vertex shader handles all blending on GPU with zero CPU work per frame.   */
-    Vertex*   final_vertices    = vertices;
-    uint32_t* final_indices     = indices;
-    size_t    final_vertex_count = vertex_count;
-    size_t    final_index_count  = index_count;
-    indices = NULL; // ownership transferred
-
-    // Upload morph deltas to GPU — must happen BEFORE megaBufferAllocate
-    // so morphDeltaOffset is set correctly before SSBO is written.
-    uint32_t delta_offset = 0;
-    mesh.morph_data = load_morph_targets_gpu(prim, (uint32_t)vertex_count, &delta_offset);
-    if (mesh.morph_data) {
-        mesh.morphDeltaOffset  = (int)delta_offset;
-        mesh.morphCount        = (int)mesh.morph_data->target_count;
-        // morphWeightOffset is assigned globally after all meshes are loaded
-        // (done in load_gltf via the morph weight offset packer below)
+    if (final_morph_count > 0 && final_morphs) {
+        uint32_t delta_offset = megaMorphBufferAllocate(&context, final_morphs, final_vertex_count * final_morph_count);
+        if (delta_offset != UINT32_MAX) {
+            mesh.morph_data = malloc(sizeof(MorphData));
+            mesh.morph_data->target_count = final_morph_count;
+            mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
+            mesh.morphDeltaOffset = (int)delta_offset;
+            mesh.morphCount = (int)final_morph_count;
+        }
+        free(final_morphs);
     }
 
-    mesh.vertexCount = (uint32_t)(mesh.morph_data ? final_vertex_count : final_vertex_count);
-    mesh.indexCount  = (uint32_t)final_index_count;
+    mesh.vertexCount = final_vertex_count;
+    mesh.indexCount  = final_index_count;
 
     // Load texture if present
     if (prim->material && prim->material->has_pbr_metallic_roughness) {
         cgltf_pbr_metallic_roughness* pbr = &prim->material->pbr_metallic_roughness;
-
         if (pbr->base_color_texture.texture) {
             cgltf_texture* base_texture = pbr->base_color_texture.texture;
-
             for (size_t t = 0; t < data->textures_count; t++) {
                 if (&data->textures[t] == base_texture) {
                     if (t < gltf_texture_count && gltf_texture_indices[t] >= 0) {
@@ -538,48 +534,18 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
     }
 
-    /* ── compute local-space AABB directly from position accessor ────── */
-    /* Use the raw accessor before any expansion — always correct,
-       works for both indexed and non-indexed, morph and static.          */
-    {
-        vec3 bmin = { 1e30f,  1e30f,  1e30f};
-        vec3 bmax = {-1e30f, -1e30f, -1e30f};
-        for (size_t v = 0; v < vertex_count; v++) {
-            float p[3];
-            cgltf_accessor_read_float(pos_accessor, v, p, 3);
-            bmin[0] = fminf(bmin[0], p[0]);
-            bmin[1] = fminf(bmin[1], p[1]);
-            bmin[2] = fminf(bmin[2], p[2]);
-            bmax[0] = fmaxf(bmax[0], p[0]);
-            bmax[1] = fmaxf(bmax[1], p[1]);
-            bmax[2] = fmaxf(bmax[2], p[2]);
-        }
-
-        glm_vec3_copy(bmin, mesh.aabbMin);
-        glm_vec3_copy(bmax, mesh.aabbMax);
-    }
-
     mesh.megaBaseVertex     = UINT32_MAX;
     mesh.megaBaseIndex      = UINT32_MAX;
     mesh.dynamicBaseVertex  = UINT32_MAX;
 
-    // AAA: ALL meshes (even morphed ones) are now 100% STATIC in the mega vertex buffer!
-    mesh.megaBaseVertex = megaBufferAllocate(&context,
-                                             final_vertices,
-                                             (uint32_t)final_vertex_count);
+    mesh.megaBaseVertex = megaBufferAllocate(&context, final_vertices, final_vertex_count);
     if (final_indices && final_index_count > 0) {
-        mesh.megaBaseIndex = megaIndexBufferAllocate(&context,
-                                                     final_indices,
-                                                     (uint32_t)final_index_count);
+        mesh.megaBaseIndex = megaIndexBufferAllocate(&context, final_indices, final_index_count);
     }
 
-    // We keep the morph_data pointer alive strictly to extract target counts later in renderer.c
-    if (mesh.morph_data) {
-        mesh.dynamicBaseVertex = UINT32_MAX; // No more dynamic CPU uploads!
-    }
-    free(final_indices);
-
-    free(final_vertices);
+    if (mesh.morph_data) mesh.dynamicBaseVertex = UINT32_MAX;
+    if (final_indices) free(final_indices);
+    if (final_vertices) free(final_vertices);
 
     printf("Loaded mesh '%s' with %zu vertices", mesh.name, final_vertex_count);
     if (is_unlit) {
@@ -766,6 +732,34 @@ bool load_gltf(const char* filepath, Scene* scene) {
     }
     fclose(test);
 
+static char cache_path[512];
+    const char* home = getenv("HOME");
+    if (!home) home = ".";
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
+    mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
+    mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/geometry", home);
+    mkdir(dir_path, 0777);
+
+    char safe_name[256];
+    strncpy(safe_name, filepath, sizeof(safe_name) - 1);
+    safe_name[sizeof(safe_name) - 1] = '\0';
+    for (int i = 0; safe_name[i]; i++) {
+        if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.') safe_name[i] = '_';
+    }
+    snprintf(cache_path, sizeof(cache_path), "%s/%s.ogeom", dir_path, safe_name);
+
+    geom_cache_in = fopen(cache_path, "rb");
+    geom_cache_out = NULL;
+    if (geom_cache_in) {
+        fprintf(stdout, "\033[32m[GEOMETRY] Cache Hit: Loading pre-processed mesh data from %s\033[0m\n", cache_path);
+    } else {
+        fprintf(stdout, "\033[33m[GEOMETRY] Cache Miss: Extracting attributes and building %s\033[0m\n", cache_path);
+        geom_cache_out = fopen(cache_path, "wb");
+    }
+
     printf("Parsing glTF file: %s\n", filepath);
 
     cgltf_result result = cgltf_parse_file(&options, filepath, &data);
@@ -869,6 +863,9 @@ bool load_gltf(const char* filepath, Scene* scene) {
     /* Rebuild indirect draw commands after every GLTF load so the
        indirect pass stays in sync with the current mesh list.      */
     updateMeshSSBOAndIndirect(&context, &scene->meshes);
+
+    if (geom_cache_in) { fclose(geom_cache_in); geom_cache_in = NULL; }
+    if (geom_cache_out) { fclose(geom_cache_out); geom_cache_out = NULL; }
 
     return true;
 }

@@ -256,13 +256,80 @@ static bool load_texture_from_float_pixels(VulkanContext* ctx, float* pixels, in
     return ok;
 }
 
+typedef struct {
+    uint32_t magic; // 0x5845544F 'OTEX'
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t data_size;
+} OtexHeader;
+
+static const char* get_texture_cache_path(const char* original_path, bool is_roughness) {
+    static char cache_path[512];
+    const char* home = getenv("HOME");
+    if (!home) home = ".";
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/textures", home); mkdir(dir_path, 0777);
+
+    char safe_name[256];
+    strncpy(safe_name, original_path, sizeof(safe_name) - 1);
+    safe_name[sizeof(safe_name) - 1] = '\0';
+    for (int i = 0; safe_name[i]; i++) {
+        if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.') safe_name[i] = '_';
+    }
+    snprintf(cache_path, sizeof(cache_path), "%s/%s%s.otex", dir_path, safe_name, is_roughness ? "_rough" : "");
+    return cache_path;
+}
+
+// Forward declaration
+static bool upload_file_to_image_direct(VulkanContext *ctx, const char *filepath,
+                                        VkDeviceSize imageSize, VkImage image,
+                                        uint32_t w, uint32_t h, VkFormat fmt,
+                                        size_t file_offset);
+
 static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const char* roughPath) {
     if (!roughPath) return -1;
+
+    const char* cache_path = get_texture_cache_path(roughPath, true);
+    FILE* f = fopen(cache_path, "rb");
+    if (f) {
+        OtexHeader header;
+        if (fread(&header, sizeof(OtexHeader), 1, f) == 1 && header.magic == 0x5845544F) {
+            fclose(f);
+            fprintf(stdout, "\033[32m[TEXTURE] Cache Hit Roughness (ZERO-COPY): %s\033[0m\n", cache_path);
+            if (textureCount >= MAX_TEXTURES) return -1;
+            Texture2D* texture = &texturePool[textureCount];
+            if (alloc_texture_image(ctx, header.width, header.height, header.format, &texture->image, &texture->memory)) {
+                if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader))) {
+                    if (finalize_texture(ctx, texture, header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
+                        texture->width = header.width; texture->height = header.height; texture->loaded = true;
+                        return textureCount++;
+                    }
+                }
+            }
+        } else {
+            fclose(f);
+        }
+    }
+
+    fprintf(stdout, "\033[33m[TEXTURE] Cache Miss Roughness. Decoding: %s\033[0m\n", roughPath);
+
     int w, h, ch;
 
     if (strstr(roughPath, ".exr")) {
         float* floatPixels = load_exr_as_float(roughPath, &w, &h, false, true);
         if (!floatPixels) return -1;
+
+        FILE* fout = fopen(cache_path, "wb");
+        if (fout) {
+            OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(w * h * 16) };
+            fwrite(&header, sizeof(OtexHeader), 1, fout);
+            fwrite(floatPixels, 1, header.data_size, fout);
+            fclose(fout);
+        }
+
         if (textureCount >= MAX_TEXTURES) { free(floatPixels); return -1; }
         if (load_texture_from_float_pixels(ctx, floatPixels, w, h, &texturePool[textureCount])) {
             free(floatPixels);
@@ -291,6 +358,14 @@ static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const cha
     if (textureCount >= MAX_TEXTURES) {
         free(packed);
         return -1;
+    }
+
+FILE* fout = fopen(cache_path, "wb");
+    if (fout) {
+        OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)(w * h * 4) };
+        fwrite(&header, sizeof(OtexHeader), 1, fout);
+        fwrite(packed, 1, header.data_size, fout);
+        fclose(fout);
     }
 
     bool ok = load_texture_from_pixels(ctx, packed, w, h, &texturePool[textureCount]);
@@ -1133,10 +1208,12 @@ bool update_texture_from_rgba(VulkanContext* context, Texture2D* texture,
 // Zero-copy direct-to-GPU upload helper. Reads from disk directly into Vulkan mapped memory.
 static bool upload_file_to_image_direct(VulkanContext* ctx, const char* filepath,
                                         VkDeviceSize imageSize, VkImage image,
-                                        uint32_t w, uint32_t h, VkFormat fmt)
+                                        uint32_t w, uint32_t h, VkFormat fmt, size_t file_offset)
 {
     FILE* f = fopen(filepath, "rb");
     if (!f) return false;
+
+    if (file_offset > 0) fseek(f, file_offset, SEEK_SET);
 
     VkBuffer stagingBuf; VkDeviceMemory stagingMem;
     VkBufferCreateInfo bci = {
@@ -1381,8 +1458,8 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
 
     // 1. Try blazing-fast ZERO-COPY binary cache read
     if (alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory)) {
-        // Attempt to read from disk DIRECTLY into the mapped Vulkan staging buffer
-        if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width, height, fmt)) {
+            // Attempt to read from disk DIRECTLY into the mapped Vulkan staging buffer
+            if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width, height, fmt, 0)) {
             // UI Icons must use CLAMP_TO_EDGE, not REPEAT, to prevent edge bleeding!
             if (finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)) {
                 fprintf(stdout, "\033[32m[SVG] Cache Hit (ZERO-COPY to GPU): %s\033[0m\n", cache_file);
@@ -1450,25 +1527,67 @@ int32_t texture_pool_add_svg(VulkanContext* ctx, const char* filename, int width
 }
 
 bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) {
+    const char* cache_path = get_texture_cache_path(filename, false);
+    FILE* f = fopen(cache_path, "rb");
+    if (f) {
+        OtexHeader header;
+        if (fread(&header, sizeof(OtexHeader), 1, f) == 1 && header.magic == 0x5845544F) {
+            fclose(f);
+            fprintf(stdout, "\033[32m[TEXTURE] Cache Hit (ZERO-COPY): %s\033[0m\n", cache_path);
+            if (alloc_texture_image(ctx, header.width, header.height, header.format, &texture->image, &texture->memory)) {
+                if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader))) {
+                    if (finalize_texture(ctx, texture, header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
+                        texture->width = header.width; texture->height = header.height; texture->loaded = true;
+                        return true;
+                    }
+                }
+            }
+        } else {
+            fclose(f);
+        }
+    }
+
+    fprintf(stdout, "\033[33m[TEXTURE] Cache Miss. Decoding: %s\033[0m\n", filename);
+
     int w, h, ch;
+    void* pixels = NULL;
+    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    size_t data_size = 0;
+    bool is_float = false;
 
     if (strstr(filename, ".exr")) {
         bool is_normal = (strstr(filename, "nor") != NULL);
-        // Do not pack roughness here, that is handled explicitly by texture_pool_load_roughness_to_gltf
-        float* floatPixels = load_exr_as_float(filename, &w, &h, is_normal, false);
-        if (!floatPixels) return false;
-        bool res = load_texture_from_float_pixels(ctx, floatPixels, w, h, texture);
-        free(floatPixels);
-        return res;
+        pixels = load_exr_as_float(filename, &w, &h, is_normal, false);
+        if (!pixels) return false;
+        format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        data_size = w * h * 16;
+        is_float = true;
+    } else {
+        pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
+        if (!pixels) {
+            fprintf(stderr, "[WARNING] Failed to load texture: %s\n", filename);
+            return false;
+        }
+        format = VK_FORMAT_R8G8B8A8_UNORM;
+        data_size = w * h * 4;
     }
 
-    stbi_uc* pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
-    if (!pixels) {
-        fprintf(stderr, "[WARNING] Failed to load texture: %s\n", filename);
-        return false;
+    f = fopen(cache_path, "wb");
+    if (f) {
+        OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, format, (uint32_t)data_size };
+        fwrite(&header, sizeof(OtexHeader), 1, f);
+        fwrite(pixels, 1, data_size, f);
+        fclose(f);
     }
-    bool res = load_texture_from_pixels(ctx, pixels, w, h, texture);
-    stbi_image_free(pixels);
+
+    bool res = false;
+    if (is_float) {
+        res = load_texture_from_float_pixels(ctx, (float*)pixels, w, h, texture);
+        free(pixels);
+    } else {
+        res = load_texture_from_pixels(ctx, (stbi_uc*)pixels, w, h, texture);
+        stbi_image_free(pixels);
+    }
     return res;
 }
 
