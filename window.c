@@ -52,7 +52,7 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
 
     vec3 camera_pos = {0.0f, 3.0f, 0.0f};
     camera_init(&camera, camera_pos, 90.0f, 0.0f, (float)WIDTH / (float)HEIGHT);
-    camera.active = true;
+    camera.active = false;
 
     if (glfwCreateWindowSurface(context.instance, context.window, NULL, &context.surface) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create window surface\n");

@@ -37,8 +37,7 @@ bool shiftMiddleMousePressed = false;
 double lastPanX = 0.0, lastPanY = 0.0;
 double lastOrbitX = 0.0, lastOrbitY = 0.0;
 vec3 orbitPivot = {0.0f, 0.0f, 0.0f};  // The point we're orbiting around
-float orbitDistance = 10.0f;           // Distance from pivot
-
+float orbitDistance = 15.0f;           // Distance from pivot
 
 bool keyW = false, keyA = false, keyS = false, keyD = false;
 bool keyQ = false, keyE = false;
@@ -375,13 +374,12 @@ vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 int main() {
     /* context.currentFrame = 0; */
 
-    initWindow(WIDTH, HEIGHT, "OBSIDIAN ENGINE");
+    initWindow(WIDTH, HEIGHT, "Obsidian Engine");
 
-    setInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    setInputMode(context.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
     editor_init();
     gizmo_init();
-
 
     /* load_obj("./assets/teapot.obj", "teapot",  red); */
     /* load_obj("./assets/cow.obj", "cow", blue); */
@@ -459,10 +457,6 @@ int main() {
     keychord_bind(&keymap, "<right>",   camera_snap_right,  "Camera snap right",    PRESS);
     keychord_bind(&keymap, "<up>",      camera_snap_up,     "Camera snap up",       PRESS);
     keychord_bind(&keymap, "<down>",    camera_snap_down,   "Camera snap down",     PRESS);
-    keychord_bind(&keymap, "M-b",       camera_snap_left,   "Camera snap left",     PRESS);
-    keychord_bind(&keymap, "M-f",       camera_snap_right,  "Camera snap right",    PRESS);
-    keychord_bind(&keymap, "M-p",       camera_snap_up,     "Camera snap up",       PRESS);
-    keychord_bind(&keymap, "M-n",       camera_snap_down,   "Camera snap down",     PRESS);
     keychord_bind(&keymap, "TAB",       toggle_skybox,             "Toggle the skybox",    PRESS);
     keychord_bind(&keymap, "t",         toggle_ibl_lighting,       "Toggle IBL lighting",  PRESS);
     keychord_bind(&keymap, "l",         toggle_shadows,            "Toggle shadows",       PRESS);

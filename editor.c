@@ -600,8 +600,6 @@ static void panel_draw_titlebar(Panel* p, float x, float y, float w, float h) {
 }
 
 //  Content area helper: shifts area depending on titlebar location
-//  Content area helper: shifts area depending on titlebar location
-
 static void content_area(Panel* p, float px, float py, float pw, float ph,
                           float* cx, float* cy, float* cw, float* ch) {
     *cx = px + PAD;
@@ -1883,6 +1881,11 @@ void editor_search_kill_line(void) {
 static void search_start(void) {
     FileManagerState* s = &editor.file_manager;
     if (s_is_searching) return;
+
+    if (!editor.panels[PANEL_RIGHT].open) {
+        editor_open_panel(PANEL_RIGHT);
+    }
+
     s_is_searching = true;
     s_search_query[0] = '\0';
     s_search_cursor = 0;
@@ -1945,7 +1948,7 @@ static void search_commit(void) {
 
 static void cb_open_color_picker(void) {
     if (editor.inspector.selected_mesh_index < 0 || editor.inspector.selected_mesh_index >= (int)scene.meshes.count) {
-        message(MSG_ERROR, "No mesh selected! Cannot pick color.");
+        message(MSG_WARNING, "No mesh selected! Cannot pick color.");
         return;
     }
     Mesh* m = &scene.meshes.items[editor.inspector.selected_mesh_index];
@@ -1987,13 +1990,13 @@ void editor_init(void) {
         .render_content = render_right_panel,
     };
 
-    // ── Top — Console / Vertico ───────────────────────────────────────────
+    // ── Top — Vertico ─────────────────────────────────────────────────────
     editor.panels[PANEL_TOP] = (Panel){
         .side           = PANEL_TOP,
         .open           = false,
         .t              = 0.0f,
         .target_t       = 0.0f,
-        .size           = 380.0f, // Taller to fit ~10 candidates cleanly
+        .size           = 380.0f,
         .min_size       = 100.0f,
         .max_size       = 800.0f,
         .ease_fn        = ease_quart_out,
@@ -2040,10 +2043,10 @@ void editor_init(void) {
     editor.font = load_font("./assets/fonts/MapleMono-NF-Regular.ttf", 18);
 
     // ── Keybindings ───────────────────────────────────────────────────────
-    keychord_bind(&keymap, "M-j", toggle_bottom, "Toggle file manager", PRESS);
-    keychord_bind(&keymap, "M-l", toggle_right,  "Toggle inspector",    PRESS);
-    /* keychord_bind(&keymap, "M-k", toggle_top,    "Toggle console",      PRESS); */
-    keychord_bind(&keymap, "M-h", toggle_left,   "Toggle hierarchy",    PRESS);
+    /* keychord_bind(&keymap, "M-j", toggle_bottom, "Toggle file manager", PRESS); */
+    keychord_bind(&keymap, "M-l", toggle_right,  "Toggle Inspector",    PRESS);
+    /* keychord_bind(&keymap, "M-k", toggle_top,    "Toggle Vertico",      PRESS); */
+    keychord_bind(&keymap, "M-h", toggle_left,   "Toggle Hierarchy",    PRESS);
     keychord_bind(&keymap, "C-s", search_start,  "Start search", PRESS);
     keychord_bind(&keymap, "c",   cb_open_color_picker, "Pick Mesh Color", PRESS);
 

@@ -6,20 +6,26 @@
 Camera camera;
 
 void camera_init(Camera* cam, vec3 position, float yaw, float pitch, float aspect_ratio) {
-    glm_vec3_copy(position, cam->position);
-    cam->yaw = yaw;
-    cam->pitch = pitch;
+    cam->yaw = -135.0f;
+    cam->pitch = -30.0f;
     cam->movement_speed = 3.0f;
     cam->mouse_sensitivity = 0.1f;
     cam->aspect_ratio = aspect_ratio;
     cam->fov = 45.0f;
     cam->near_plane = 0.1f;
     cam->far_plane = 100.0f;
-    cam->active = true;
-    cam->use_look_at = false; // Start in normal FPS mode
+    cam->active = false;
+    cam->use_look_at = true;
 
     glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, cam->up);
-    glm_vec3_copy((vec3){0.0f, 0.0f, 0.0f}, cam->look_at); // Initialize to zero
+    glm_vec3_copy((vec3){0.0f, 0.0f, 0.0f}, cam->look_at);
+
+    float distance = 15.0f;
+    float yaw_rad = glm_rad(cam->yaw);
+    float pitch_rad = glm_rad(cam->pitch);
+    cam->position[0] = cam->look_at[0] - distance * cosf(pitch_rad) * cosf(yaw_rad);
+    cam->position[1] = cam->look_at[1] - distance * sinf(pitch_rad);
+    cam->position[2] = cam->look_at[2] - distance * cosf(pitch_rad) * sinf(yaw_rad);
 
     camera_update(cam);
 }
@@ -394,8 +400,21 @@ void get_target_pivot(vec3 out_pivot) {
     }
 }
 
-void camera_snap_left()  { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, true,  false, p); }
-void camera_snap_right() { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, false, false, p); }
+void camera_snap_left() {
+    vec3 p; get_target_pivot(p);
+    float current_pitch = is_snapping ? snap_target_pitch : camera.pitch;
+    float norm_pitch = normalize_angle(current_pitch);
+    bool upside_down = (norm_pitch > 90.0f || norm_pitch < -90.0f);
+    camera_snap_to_next_angle(&camera, upside_down ? false : true, false, p);
+}
+
+void camera_snap_right() {
+    vec3 p; get_target_pivot(p);
+    float current_pitch = is_snapping ? snap_target_pitch : camera.pitch;
+    float norm_pitch = normalize_angle(current_pitch);
+    bool upside_down = (norm_pitch > 90.0f || norm_pitch < -90.0f);
+    camera_snap_to_next_angle(&camera, upside_down ? true : false, false, p);
+}
 void camera_snap_up()    { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, false, true,  p); }
 void camera_snap_down()  { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, true,  true,  p); }
 
