@@ -180,7 +180,7 @@ static uint32_t vertex_count = 0;
 static uint32_t dynamic_draw_count = 0;
 static uint32_t frame_index = 0;
 
-static bool scene_topology_dirty = true;
+bool scene_topology_dirty = true;
 static bool indirect_buffer_dirty[MAX_FRAMES_IN_FLIGHT] = {true, true};
 static vec3 last_camera_pos = { -1e7f, -1e7f, -1e7f };
 static float* mesh_distances = NULL;

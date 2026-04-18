@@ -7,9 +7,74 @@
 #include <sys/types.h>
 
 static int32_t gltf_texture_indices[MAX_TEXTURES];
-static FILE* geom_cache_in = NULL;
-static FILE* geom_cache_out = NULL;
 static size_t gltf_texture_count = 0;
+
+#define OMDL_MAGIC 0x4C444D4F // 'OMDL'
+
+typedef struct {
+    uint32_t magic;
+    uint32_t mesh_count;
+    uint32_t total_vertices;
+    uint32_t total_indices;
+    uint32_t total_morph_deltas;
+    uint32_t reserved[3];
+} OmdlHeader;
+
+typedef struct {
+    char name[256];
+    vec3 aabbMin;
+    vec3 aabbMax;
+    uint32_t vertexCount;
+    uint32_t indexCount;
+    uint32_t morphCount;
+    uint32_t vertexOffset;
+    uint32_t indexOffset;
+    uint32_t morphOffset;
+
+    vec4 baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    float emissiveStrength;
+    vec3 emissiveFactor;
+    int alpha_mode;
+    float alpha_cutoff;
+    bool is_unlit;
+
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    vec3 attenuationColor;
+    float attenuationDistance;
+    float dispersion;
+
+    char tex_albedo[512];
+    char tex_normal[512];
+    char tex_metallicRoughness[512];
+    char tex_occlusion[512];
+    char tex_emissive[512];
+    char tex_transmission[512];
+    char tex_thickness[512];
+} OmdlMeshMeta;
+
+static char gltf_texture_paths[MAX_TEXTURES][512];
+
+// OMDL Cooker Arrays
+static Vertex* omdl_vertices = NULL;
+static uint32_t* omdl_indices = NULL;
+static MorphDelta* omdl_morphs = NULL;
+static OmdlMeshMeta* omdl_metas = NULL;
+static uint32_t omdl_vertex_count = 0;
+static uint32_t omdl_index_count = 0;
+static uint32_t omdl_morph_count = 0;
+static uint32_t omdl_mesh_count = 0;
+
+// OMDL Loader State
+static bool is_omdl_cache_hit = false;
+static OmdlMeshMeta* omdl_cache_metas = NULL;
+static uint32_t omdl_cache_idx = 0;
+static uint32_t omdl_base_v = 0;
+static uint32_t omdl_base_i = 0;
+static uint32_t omdl_base_m = 0;
 
 typedef struct {
     cgltf_node* node;
@@ -22,6 +87,7 @@ static size_t node_mapping_count = 0;
 
 static int global_joint_counter = 0;
 extern mat4* jointSSBOMapped[MAX_FRAMES_IN_FLIGHT];
+extern bool scene_topology_dirty;
 
 extern uint32_t megaBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t vertexCount);
 extern uint32_t megaIndexBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t indexCount);
@@ -41,76 +107,44 @@ void get_directory(const char* filepath, char* dir, size_t dir_size) {
 }
 
 bool load_gltf_textures(cgltf_data* data, const char* base_path) {
-    if (data->textures_count == 0) {
-        printf("No textures in glTF file\n");
-        return true;
-    }
+    if (data->textures_count == 0) return true;
 
     char dir[512];
     get_directory(base_path, dir, sizeof(dir));
-
-    printf("Loading %zu textures from glTF...\n", data->textures_count);
     gltf_texture_count = 0;
     memset(gltf_texture_indices, -1, sizeof(gltf_texture_indices));
+    memset(gltf_texture_paths, 0, sizeof(gltf_texture_paths));
 
     for (size_t i = 0; i < data->textures_count; i++) {
         cgltf_texture* tex = &data->textures[i];
-
-        if (!tex->image) {
-            printf("  Texture %zu: No image data\n", i);
-            gltf_texture_indices[i] = -1;
-            continue;
-        }
-
+        if (!tex->image) { gltf_texture_indices[i] = -1; continue; }
         cgltf_image* img = tex->image;
         int32_t tex_id = -1;
 
-        // Case 1: External texture file (typical in .gltf)
         if (img->uri && !strstr(img->uri, "data:")) {
             char full_path[1024];
             snprintf(full_path, sizeof(full_path), "%s%s", dir, img->uri);
-            printf("  Texture %zu: Loading from file '%s'\n", i, full_path);
-
+            strcpy(gltf_texture_paths[i], full_path);
             tex_id = texture_pool_add(&context, full_path);
         }
-        // Case 2: Embedded texture data (typical in .glb)
         else if (img->buffer_view) {
-            printf("  Texture %zu: Loading from embedded buffer\n", i);
+            char virtual_filename[1024];
+            snprintf(virtual_filename, sizeof(virtual_filename), "%s_embedded_tex_%zu.png", base_path, i);
+            strcpy(gltf_texture_paths[i], virtual_filename);
 
             cgltf_buffer_view* view = img->buffer_view;
             unsigned char* buffer_data = (unsigned char*)view->buffer->data + view->offset;
-            size_t buffer_size = view->size;
-
-            // Generate a deterministic virtual filename for the cache cooker to use
-            char virtual_filename[1024];
-            snprintf(virtual_filename, sizeof(virtual_filename), "%s_embedded_tex_%zu.png", base_path, i);
-
-            // Load texture from memory buffer, routing it through the DDS JIT pipeline
-            tex_id = texture_pool_add_embedded(&context, virtual_filename, buffer_data, buffer_size);
-        }
-        // Case 3: Data URI embedded in .gltf file
-        else if (img->uri && strstr(img->uri, "data:")) {
-            printf("  Texture %zu: Data URI not yet supported\n", i);
-            gltf_texture_indices[i] = -1;
-            continue;
+            tex_id = texture_pool_add_embedded(&context, virtual_filename, buffer_data, view->size);
         }
         else {
-            printf("  Texture %zu: Unknown image format\n", i);
-            gltf_texture_indices[i] = -1;
-            continue;
+            gltf_texture_indices[i] = -1; continue;
         }
 
-        if (tex_id < 0) {
-            fprintf(stderr, "  Failed to load texture %zu\n", i);
-            gltf_texture_indices[i] = -1;
-            continue;
+        if (tex_id >= 0) {
+            gltf_texture_indices[i] = tex_id;
+            gltf_texture_count = i + 1;
         }
-
-        gltf_texture_indices[i] = tex_id;
-        gltf_texture_count = i + 1;
-        printf("  -> Loaded as texture #%d\n", tex_id);
     }
-
     return true;
 }
 
@@ -165,15 +199,70 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     Mesh mesh = {0};
     mesh.name = strdup(name);
     mesh.textureIndex = -1;
+    mesh.normalMapIndex = -1;
+    mesh.metallicRoughIndex = -1;
+    mesh.aoIndex = -1;
+    mesh.emissiveIndex = -1;
+    mesh.transmissionIndex = -1;
+    mesh.thicknessIndex = -1;
     mesh.node = NULL;
     mesh.morph_data = NULL;
     mesh.is_unlit = false;
-    mesh.alpha_mode = 0; // OPAQUE by default
-    mesh.alpha_cutoff = 0.5f; // Default cutoff
-    mesh.jointOffset = -1; // CRITICAL FIX: Disable skinning by default to prevent GPU page faults!
+    mesh.alpha_mode = 0;
+    mesh.alpha_cutoff = 0.5f;
+    mesh.jointOffset = -1;
     mesh.jointCount = 0;
     glm_mat4_identity(mesh.model);
     glm_mat4_identity(mesh.local_transform);
+
+    // OMDL CACHE HIT PATH: INSTANT RECONSTRUCTION (ZERO CPU MATH)
+    if (is_omdl_cache_hit) {
+        OmdlMeshMeta meta = omdl_cache_metas[omdl_cache_idx++];
+        glm_vec3_copy(meta.aabbMin, mesh.aabbMin);
+        glm_vec3_copy(meta.aabbMax, mesh.aabbMax);
+        mesh.vertexCount = meta.vertexCount;
+        mesh.indexCount = meta.indexCount;
+
+        mesh.megaBaseVertex = (omdl_base_v != UINT32_MAX) ? omdl_base_v + meta.vertexOffset : UINT32_MAX;
+        mesh.megaBaseIndex = (omdl_base_i != UINT32_MAX && meta.indexCount > 0) ? omdl_base_i + meta.indexOffset : UINT32_MAX;
+        mesh.dynamicBaseVertex = UINT32_MAX;
+
+        glm_vec4_copy(meta.baseColorFactor, mesh.baseColorFactor);
+        mesh.metallicFactor = meta.metallicFactor;
+        mesh.roughnessFactor = meta.roughnessFactor;
+        mesh.emissiveStrength = meta.emissiveStrength;
+        glm_vec3_copy(meta.emissiveFactor, mesh.emissiveFactor);
+        mesh.alpha_mode = meta.alpha_mode;
+        mesh.alpha_cutoff = meta.alpha_cutoff;
+        mesh.is_unlit = meta.is_unlit;
+        mesh.transmissionFactor = meta.transmissionFactor;
+        mesh.ior = meta.ior;
+        mesh.thicknessFactor = meta.thicknessFactor;
+        glm_vec3_copy(meta.attenuationColor, mesh.attenuationColor);
+        mesh.attenuationDistance = meta.attenuationDistance;
+        mesh.dispersion = meta.dispersion;
+
+        // Route cached texture paths back through the instant DDS pipeline
+        if (meta.tex_albedo[0]) mesh.textureIndex = texture_pool_add(&context, meta.tex_albedo);
+        if (meta.tex_normal[0]) mesh.normalMapIndex = texture_pool_add(&context, meta.tex_normal);
+        if (meta.tex_metallicRoughness[0]) mesh.metallicRoughIndex = texture_pool_add(&context, meta.tex_metallicRoughness);
+        if (meta.tex_occlusion[0]) mesh.aoIndex = texture_pool_add(&context, meta.tex_occlusion);
+        if (meta.tex_emissive[0]) mesh.emissiveIndex = texture_pool_add(&context, meta.tex_emissive);
+        if (meta.tex_transmission[0]) mesh.transmissionIndex = texture_pool_add(&context, meta.tex_transmission);
+        if (meta.tex_thickness[0]) mesh.thicknessIndex = texture_pool_add(&context, meta.tex_thickness);
+        if (mesh.textureIndex >= 0) mesh.texture = texture_pool_get(mesh.textureIndex);
+
+        if (meta.morphCount > 0) {
+            mesh.morphCount = meta.morphCount;
+            mesh.morphDeltaOffset = (omdl_base_m != UINT32_MAX) ? omdl_base_m + meta.morphOffset : UINT32_MAX;
+            mesh.morph_data = malloc(sizeof(MorphData));
+            mesh.morph_data->target_count = meta.morphCount;
+            mesh.morph_data->weights = calloc(meta.morphCount, sizeof(float));
+        }
+
+        return mesh;
+    }
+    // ====================================================================
 
     // Find all attribute accessors
     cgltf_accessor* pos_accessor = NULL;
@@ -187,29 +276,29 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     for (size_t j = 0; j < prim->attributes_count; ++j) {
         cgltf_attribute* attr = &prim->attributes[j];
         switch (attr->type) {
-            case cgltf_attribute_type_position:
-                pos_accessor = attr->data;
-                break;
-            case cgltf_attribute_type_normal:
-                normal_accessor = attr->data;
-                break;
-            case cgltf_attribute_type_texcoord:
-                texcoord_accessor = attr->data;
-                break;
-            case cgltf_attribute_type_color:
-                color_accessor = attr->data;
-                break;
-            case cgltf_attribute_type_tangent:
-                tangent_accessor = attr->data;
-                break;
-            case cgltf_attribute_type_joints:
-                joints_accessor = attr->data;
-                break;
-            case cgltf_attribute_type_weights:
-                weights_accessor = attr->data;
-                break;
-            default:
-                break;
+        case cgltf_attribute_type_position:
+            pos_accessor = attr->data;
+            break;
+        case cgltf_attribute_type_normal:
+            normal_accessor = attr->data;
+            break;
+        case cgltf_attribute_type_texcoord:
+            texcoord_accessor = attr->data;
+            break;
+        case cgltf_attribute_type_color:
+            color_accessor = attr->data;
+            break;
+        case cgltf_attribute_type_tangent:
+            tangent_accessor = attr->data;
+            break;
+        case cgltf_attribute_type_joints:
+            joints_accessor = attr->data;
+            break;
+        case cgltf_attribute_type_weights:
+            weights_accessor = attr->data;
+            break;
+        default:
+            break;
         }
     }
 
@@ -256,22 +345,22 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
 
         // Load alpha mode from glTF material
         switch (prim->material->alpha_mode) {
-            case cgltf_alpha_mode_opaque:
-                mesh.alpha_mode = 0;
-                printf("  -> Alpha mode: OPAQUE\n");
-                break;
-            case cgltf_alpha_mode_mask:
-                mesh.alpha_mode = 1;
-                mesh.alpha_cutoff = prim->material->alpha_cutoff;
-                printf("  -> Alpha mode: MASK (cutoff: %.2f)\n", mesh.alpha_cutoff);
-                break;
-            case cgltf_alpha_mode_blend:
-                mesh.alpha_mode = 2;
-                printf("  -> Alpha mode: BLEND\n");
-                break;
-            default:
-                mesh.alpha_mode = 0;
-                break;
+        case cgltf_alpha_mode_opaque:
+            mesh.alpha_mode = 0;
+            printf("  -> Alpha mode: OPAQUE\n");
+            break;
+        case cgltf_alpha_mode_mask:
+            mesh.alpha_mode = 1;
+            mesh.alpha_cutoff = prim->material->alpha_cutoff;
+            printf("  -> Alpha mode: MASK (cutoff: %.2f)\n", mesh.alpha_cutoff);
+            break;
+        case cgltf_alpha_mode_blend:
+            mesh.alpha_mode = 2;
+            printf("  -> Alpha mode: BLEND\n");
+            break;
+        default:
+            mesh.alpha_mode = 0;
+            break;
         }
 
         if (is_unlit) {
@@ -401,183 +490,154 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             mesh.emissiveStrength = prim->material->emissive_strength.emissive_strength;
     }
 
-    uint32_t final_vertex_count = 0;
-    uint32_t final_index_count = 0;
-    uint32_t final_morph_count = 0;
+    uint32_t final_vertex_count = (uint32_t)vertex_count;
+    uint32_t final_index_count = (uint32_t)index_count;
+    uint32_t final_morph_count = (uint32_t)prim->targets_count;
 
-    mesh.megaBaseVertex     = UINT32_MAX;
-    mesh.megaBaseIndex      = UINT32_MAX;
-    mesh.dynamicBaseVertex  = UINT32_MAX;
+    Vertex* final_vertices = malloc(final_vertex_count * sizeof(Vertex));
+    uint32_t* final_indices = NULL;
+    MorphDelta* final_morphs = NULL;
 
-    bool loaded_from_cache = false;
-    if (geom_cache_in) {
-        fread(&final_vertex_count, sizeof(uint32_t), 1, geom_cache_in);
-        fread(&final_index_count, sizeof(uint32_t), 1, geom_cache_in);
-        fread(&final_morph_count, sizeof(uint32_t), 1, geom_cache_in);
-        fread(mesh.aabbMin, sizeof(vec3), 1, geom_cache_in);
-        fread(mesh.aabbMax, sizeof(vec3), 1, geom_cache_in);
-
-        // AAA Zero-Copy NVMe to GPU Staging Buffer
-        if (final_vertex_count > 0) {
-            mesh.megaBaseVertex = megaBufferAllocateFromFile(&context, geom_cache_in, final_vertex_count);
+    for (size_t v = 0; v < vertex_count; v++) {
+        if (pos_accessor) cgltf_accessor_read_float(pos_accessor, v, final_vertices[v].pos, 3);
+        if (normal_accessor) {
+            cgltf_accessor_read_float(normal_accessor, v, final_vertices[v].normal, 3);
+        } else {
+            final_vertices[v].normal[0] = 0.0f; final_vertices[v].normal[1] = 1.0f; final_vertices[v].normal[2] = 0.0f;
         }
-        if (final_index_count > 0) {
-            mesh.megaBaseIndex = megaIndexBufferAllocateFromFile(&context, geom_cache_in, final_index_count);
+        if (texcoord_accessor) {
+            cgltf_accessor_read_float(texcoord_accessor, v, final_vertices[v].texCoord, 2);
+        } else {
+            final_vertices[v].texCoord[0] = 0.0f; final_vertices[v].texCoord[1] = 0.0f;
         }
-        if (final_morph_count > 0) {
-            uint32_t delta_offset = megaMorphBufferAllocateFromFile(&context, geom_cache_in, final_vertex_count * final_morph_count);
-            if (delta_offset != UINT32_MAX) {
-                mesh.morph_data = malloc(sizeof(MorphData));
-                mesh.morph_data->target_count = final_morph_count;
-                mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
-                mesh.morphDeltaOffset = (int)delta_offset;
-                mesh.morphCount = (int)final_morph_count;
-                mesh.dynamicBaseVertex = UINT32_MAX;
-            }
+        if (tangent_accessor) {
+            cgltf_accessor_read_float(tangent_accessor, v, final_vertices[v].tangent, 4);
+        } else {
+            final_vertices[v].tangent[0] = 1.0f; final_vertices[v].tangent[1] = 0.0f; final_vertices[v].tangent[2] = 0.0f; final_vertices[v].tangent[3] = 1.0f;
         }
-        loaded_from_cache = true;
+        if (color_accessor) {
+            cgltf_accessor_read_float(color_accessor, v, final_vertices[v].color, 4);
+        } else {
+            final_vertices[v].color[0] = base_color[0]; final_vertices[v].color[1] = base_color[1]; final_vertices[v].color[2] = base_color[2]; final_vertices[v].color[3] = base_color[3];
+        }
+        final_vertices[v].textureIndex = 0;
+        if (joints_accessor) {
+            uint32_t j[4] = {0,0,0,0};
+            cgltf_accessor_read_uint(joints_accessor, v, j, 4);
+            final_vertices[v].joints[0] = j[0]; final_vertices[v].joints[1] = j[1]; final_vertices[v].joints[2] = j[2]; final_vertices[v].joints[3] = j[3];
+        } else {
+            final_vertices[v].joints[0] = 0; final_vertices[v].joints[1] = 0; final_vertices[v].joints[2] = 0; final_vertices[v].joints[3] = 0;
+        }
+        if (weights_accessor) {
+            cgltf_accessor_read_float(weights_accessor, v, final_vertices[v].weights, 4);
+        } else {
+            final_vertices[v].weights[0] = 0.0f; final_vertices[v].weights[1] = 0.0f; final_vertices[v].weights[2] = 0.0f; final_vertices[v].weights[3] = 0.0f;
+        }
     }
 
-    if (!loaded_from_cache) {
-        Vertex* final_vertices = NULL;
-        uint32_t* final_indices = NULL;
-        MorphDelta* final_morphs = NULL;
-        final_vertex_count = (uint32_t)vertex_count;
-        final_index_count = (uint32_t)index_count;
-        final_morph_count = (uint32_t)prim->targets_count;
+    final_indices = indices;
+    indices = NULL;
 
-        final_vertices = malloc(final_vertex_count * sizeof(Vertex));
-        for (size_t v = 0; v < vertex_count; v++) {
-            if (pos_accessor) cgltf_accessor_read_float(pos_accessor, v, final_vertices[v].pos, 3);
-            if (normal_accessor) {
-                cgltf_accessor_read_float(normal_accessor, v, final_vertices[v].normal, 3);
-            } else {
-                final_vertices[v].normal[0] = 0.0f; final_vertices[v].normal[1] = 1.0f; final_vertices[v].normal[2] = 0.0f;
-            }
-            if (texcoord_accessor) {
-                cgltf_accessor_read_float(texcoord_accessor, v, final_vertices[v].texCoord, 2);
-            } else {
-                final_vertices[v].texCoord[0] = 0.0f; final_vertices[v].texCoord[1] = 0.0f;
-            }
-            if (tangent_accessor) {
-                cgltf_accessor_read_float(tangent_accessor, v, final_vertices[v].tangent, 4);
-            } else {
-                final_vertices[v].tangent[0] = 1.0f; final_vertices[v].tangent[1] = 0.0f; final_vertices[v].tangent[2] = 0.0f; final_vertices[v].tangent[3] = 1.0f;
-            }
-            if (color_accessor) {
-                cgltf_accessor_read_float(color_accessor, v, final_vertices[v].color, 4);
-            } else {
-                final_vertices[v].color[0] = base_color[0]; final_vertices[v].color[1] = base_color[1]; final_vertices[v].color[2] = base_color[2]; final_vertices[v].color[3] = base_color[3];
-            }
-            final_vertices[v].textureIndex = 0;
-            if (joints_accessor) {
-                uint32_t j[4] = {0,0,0,0};
-                cgltf_accessor_read_uint(joints_accessor, v, j, 4);
-                final_vertices[v].joints[0] = j[0]; final_vertices[v].joints[1] = j[1]; final_vertices[v].joints[2] = j[2]; final_vertices[v].joints[3] = j[3];
-            } else {
-                final_vertices[v].joints[0] = 0; final_vertices[v].joints[1] = 0; final_vertices[v].joints[2] = 0; final_vertices[v].joints[3] = 0;
-            }
-            if (weights_accessor) {
-                cgltf_accessor_read_float(weights_accessor, v, final_vertices[v].weights, 4);
-            } else {
-                final_vertices[v].weights[0] = 0.0f; final_vertices[v].weights[1] = 0.0f; final_vertices[v].weights[2] = 0.0f; final_vertices[v].weights[3] = 0.0f;
-            }
-        }
+    final_morphs = extract_morph_targets(prim, final_vertex_count);
 
-        final_indices = indices;
-        indices = NULL;
+    vec3 bmin = { 1e30f,  1e30f,  1e30f};
+    vec3 bmax = {-1e30f, -1e30f, -1e30f};
+    for (size_t v = 0; v < vertex_count; v++) {
+        bmin[0] = fminf(bmin[0], final_vertices[v].pos[0]);
+        bmin[1] = fminf(bmin[1], final_vertices[v].pos[1]);
+        bmin[2] = fminf(bmin[2], final_vertices[v].pos[2]);
+        bmax[0] = fmaxf(bmax[0], final_vertices[v].pos[0]);
+        bmax[1] = fmaxf(bmax[1], final_vertices[v].pos[1]);
+        bmax[2] = fmaxf(bmax[2], final_vertices[v].pos[2]);
+    }
+    glm_vec3_copy(bmin, mesh.aabbMin);
+    glm_vec3_copy(bmax, mesh.aabbMax);
 
-        final_morphs = extract_morph_targets(prim, final_vertex_count);
+    // OMDL COOKER PATH: Append to massive flat arrays
+    OmdlMeshMeta meta = {0};
+    strncpy(meta.name, name, sizeof(meta.name)-1);
+    glm_vec3_copy(mesh.aabbMin, meta.aabbMin);
+    glm_vec3_copy(mesh.aabbMax, meta.aabbMax);
+    meta.vertexCount = final_vertex_count;
+    meta.indexCount = final_index_count;
+    meta.morphCount = final_morph_count;
+    meta.vertexOffset = omdl_vertex_count;
+    meta.indexOffset = omdl_index_count;
+    meta.morphOffset = omdl_morph_count;
 
-        vec3 bmin = { 1e30f,  1e30f,  1e30f};
-        vec3 bmax = {-1e30f, -1e30f, -1e30f};
-        for (size_t v = 0; v < vertex_count; v++) {
-            bmin[0] = fminf(bmin[0], final_vertices[v].pos[0]);
-            bmin[1] = fminf(bmin[1], final_vertices[v].pos[1]);
-            bmin[2] = fminf(bmin[2], final_vertices[v].pos[2]);
-            bmax[0] = fmaxf(bmax[0], final_vertices[v].pos[0]);
-            bmax[1] = fmaxf(bmax[1], final_vertices[v].pos[1]);
-            bmax[2] = fmaxf(bmax[2], final_vertices[v].pos[2]);
-        }
-        glm_vec3_copy(bmin, mesh.aabbMin);
-        glm_vec3_copy(bmax, mesh.aabbMax);
+    glm_vec4_copy(mesh.baseColorFactor, meta.baseColorFactor);
+    meta.metallicFactor = mesh.metallicFactor;
+    meta.roughnessFactor = mesh.roughnessFactor;
+    meta.emissiveStrength = mesh.emissiveStrength;
+    glm_vec3_copy(mesh.emissiveFactor, meta.emissiveFactor);
+    meta.alpha_mode = mesh.alpha_mode;
+    meta.alpha_cutoff = mesh.alpha_cutoff;
+    meta.is_unlit = mesh.is_unlit;
+    meta.transmissionFactor = mesh.transmissionFactor;
+    meta.ior = mesh.ior;
+    meta.thicknessFactor = mesh.thicknessFactor;
+    glm_vec3_copy(mesh.attenuationColor, meta.attenuationColor);
+    meta.attenuationDistance = mesh.attenuationDistance;
+    meta.dispersion = mesh.dispersion;
 
-        if (geom_cache_out) {
-            fwrite(&final_vertex_count, sizeof(uint32_t), 1, geom_cache_out);
-            fwrite(&final_index_count, sizeof(uint32_t), 1, geom_cache_out);
-            fwrite(&final_morph_count, sizeof(uint32_t), 1, geom_cache_out);
-            fwrite(mesh.aabbMin, sizeof(vec3), 1, geom_cache_out);
-            fwrite(mesh.aabbMax, sizeof(vec3), 1, geom_cache_out);
-
-            if (final_vertex_count > 0) fwrite(final_vertices, sizeof(Vertex), final_vertex_count, geom_cache_out);
-            if (final_index_count > 0) fwrite(final_indices, sizeof(uint32_t), final_index_count, geom_cache_out);
-            if (final_morph_count > 0) {
-                    size_t total_deltas = (size_t)final_vertex_count * final_morph_count;
-                    fwrite(final_morphs, sizeof(MorphDelta), total_deltas, geom_cache_out);
-                }
-            }
-
-            if (final_morph_count > 0 && final_morphs) {
-                uint32_t delta_offset = megaMorphBufferAllocate(&context, final_morphs, final_vertex_count * final_morph_count);
-                if (delta_offset != UINT32_MAX) {
-                    mesh.morph_data = malloc(sizeof(MorphData));
-                    mesh.morph_data->target_count = final_morph_count;
-                    mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
-                    mesh.morphDeltaOffset = (int)delta_offset;
-                    mesh.morphCount = (int)final_morph_count;
-                }
-                free(final_morphs);
-            }
-
-            mesh.megaBaseVertex = megaBufferAllocate(&context, final_vertices, final_vertex_count);
-            if (final_indices && final_index_count > 0) {
-                mesh.megaBaseIndex = megaIndexBufferAllocate(&context, final_indices, final_index_count);
-            }
-
-            if (mesh.morph_data) mesh.dynamicBaseVertex = UINT32_MAX;
-            if (final_indices) free(final_indices);
-            if (final_vertices) free(final_vertices);
-        }
-
-        mesh.vertexCount = final_vertex_count;
-
-    mesh.indexCount  = final_index_count;
-
-    // Load texture if present
+    // Safely extract paths
+#define EXTRACT_TEX(field, ptr) if(ptr) { size_t t = ptr - data->textures; if(t < data->textures_count) strcpy(meta.field, gltf_texture_paths[t]); }
     if (prim->material && prim->material->has_pbr_metallic_roughness) {
         cgltf_pbr_metallic_roughness* pbr = &prim->material->pbr_metallic_roughness;
-        if (pbr->base_color_texture.texture) {
-            cgltf_texture* base_texture = pbr->base_color_texture.texture;
-            for (size_t t = 0; t < data->textures_count; t++) {
-                if (&data->textures[t] == base_texture) {
-                    if (t < gltf_texture_count && gltf_texture_indices[t] >= 0) {
-                        mesh.textureIndex = gltf_texture_indices[t];
-                        mesh.texture = texture_pool_get(mesh.textureIndex);
-                        printf("  -> Using texture pool #%d\n", mesh.textureIndex);
-                    }
-                    break;
-                }
-            }
+        EXTRACT_TEX(tex_albedo, pbr->base_color_texture.texture);
+        EXTRACT_TEX(tex_metallicRoughness, pbr->metallic_roughness_texture.texture);
+        if (meta.tex_albedo[0]) {
+            size_t t = pbr->base_color_texture.texture - data->textures;
+            mesh.textureIndex = gltf_texture_indices[t];
+            if (mesh.textureIndex >= 0) mesh.texture = texture_pool_get(mesh.textureIndex);
         }
     }
-
-    printf("Loaded mesh '%s' with %zu vertices", mesh.name, (size_t)final_vertex_count);
-
-    if (is_unlit) {
-        printf(" (UNLIT)");
+    if (prim->material) {
+        EXTRACT_TEX(tex_normal, prim->material->normal_texture.texture);
+        EXTRACT_TEX(tex_occlusion, prim->material->occlusion_texture.texture);
+        EXTRACT_TEX(tex_emissive, prim->material->emissive_texture.texture);
+        if (prim->material->has_transmission) EXTRACT_TEX(tex_transmission, prim->material->transmission.transmission_texture.texture);
+        if (prim->material->has_volume) EXTRACT_TEX(tex_thickness, prim->material->volume.thickness_texture.texture);
     }
-    switch (mesh.alpha_mode) {
-        case 1:
-            printf(" (ALPHA_MASK cutoff=%.2f)", mesh.alpha_cutoff);
-            break;
-        case 2:
-            printf(" (ALPHA_BLEND)");
-            break;
+#undef EXTRACT_TEX
+
+    omdl_metas = realloc(omdl_metas, (omdl_mesh_count + 1) * sizeof(OmdlMeshMeta));
+    omdl_metas[omdl_mesh_count++] = meta;
+
+    if (final_vertex_count > 0) {
+        omdl_vertices = realloc(omdl_vertices, (omdl_vertex_count + final_vertex_count) * sizeof(Vertex));
+        memcpy(&omdl_vertices[omdl_vertex_count], final_vertices, final_vertex_count * sizeof(Vertex));
+        omdl_vertex_count += final_vertex_count;
     }
-    printf("\n");
+    if (final_index_count > 0) {
+        omdl_indices = realloc(omdl_indices, (omdl_index_count + final_index_count) * sizeof(uint32_t));
+        memcpy(&omdl_indices[omdl_index_count], final_indices, final_index_count * sizeof(uint32_t));
+        omdl_index_count += final_index_count;
+    }
+    if (final_morph_count > 0) {
+        size_t total_deltas = final_vertex_count * final_morph_count;
+        omdl_morphs = realloc(omdl_morphs, (omdl_morph_count + total_deltas) * sizeof(MorphDelta));
+        memcpy(&omdl_morphs[omdl_morph_count], final_morphs, total_deltas * sizeof(MorphDelta));
+        omdl_morph_count += total_deltas;
+
+        mesh.morph_data = malloc(sizeof(MorphData));
+        mesh.morph_data->target_count = final_morph_count;
+        mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
+    }
+
+    if (final_vertices) free(final_vertices);
+    if (final_indices) free(final_indices);
+    if (final_morphs) free(final_morphs);
+
+    mesh.vertexCount = final_vertex_count;
+    mesh.indexCount  = final_index_count;
+    mesh.megaBaseVertex = UINT32_MAX;
+    mesh.megaBaseIndex = UINT32_MAX;
+    mesh.dynamicBaseVertex = UINT32_MAX;
 
     return mesh;
 }
+
 
 static void process_node(cgltf_node* node, cgltf_data* data, Meshes* meshes, mat4 parent_transform) {
     mat4 local_transform;
@@ -737,66 +797,62 @@ bool load_gltf_animations(cgltf_data* data, GLTFInstance* instance) {
 }
 
 bool load_gltf(const char* filepath, Scene* scene) {
-    cgltf_options options = {0};
-    cgltf_data* data = NULL;
-
-    FILE* test = fopen(filepath, "r");
-    if (!test) {
-        printf("Cannot open file '%s'\n", filepath);
-        return false;
-    }
-    fclose(test);
-
-static char cache_path[512];
+    char omdl_path[512];
     const char* home = getenv("HOME");
     if (!home) home = ".";
     char dir_path[512];
-    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
-    mkdir(dir_path, 0777);
-    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
-    mkdir(dir_path, 0777);
-    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/geometry", home);
-    mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home); mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/models", home); mkdir(dir_path, 0777);
 
     char safe_name[256];
     strncpy(safe_name, filepath, sizeof(safe_name) - 1);
-    safe_name[sizeof(safe_name) - 1] = '\0';
     for (int i = 0; safe_name[i]; i++) {
         if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.') safe_name[i] = '_';
     }
-    snprintf(cache_path, sizeof(cache_path), "%s/%s.ogeom", dir_path, safe_name);
+    snprintf(omdl_path, sizeof(omdl_path), "%s/%s.omdl", dir_path, safe_name);
 
-    geom_cache_in = fopen(cache_path, "rb");
-    geom_cache_out = NULL;
-    if (geom_cache_in) {
-        fprintf(stdout, "\033[32m[GEOMETRY] Cache Hit: Loading pre-processed mesh data from %s\033[0m\n", cache_path);
-    } else {
-        fprintf(stdout, "\033[33m[GEOMETRY] Cache Miss: Extracting attributes and building %s\033[0m\n", cache_path);
-        geom_cache_out = fopen(cache_path, "wb");
+    is_omdl_cache_hit = false;
+    FILE* fomdl = fopen(omdl_path, "rb");
+    if (fomdl) {
+        OmdlHeader header;
+        if (fread(&header, sizeof(OmdlHeader), 1, fomdl) == 1 && header.magic == OMDL_MAGIC) {
+            fprintf(stdout, "\033[32m[OMDL] AAA Pipeline: Instant Cache Hit -> %s\033[0m\n", omdl_path);
+            is_omdl_cache_hit = true;
+
+            omdl_cache_metas = malloc(header.mesh_count * sizeof(OmdlMeshMeta));
+            fread(omdl_cache_metas, sizeof(OmdlMeshMeta), header.mesh_count, fomdl);
+
+            omdl_base_v = header.total_vertices > 0 ? megaBufferAllocateFromFile(&context, fomdl, header.total_vertices) : UINT32_MAX;
+            omdl_base_i = header.total_indices > 0 ? megaIndexBufferAllocateFromFile(&context, fomdl, header.total_indices) : UINT32_MAX;
+            omdl_base_m = header.total_morph_deltas > 0 ? megaMorphBufferAllocateFromFile(&context, fomdl, header.total_morph_deltas) : UINT32_MAX;
+
+            /* CRITICAL FIX: Flush the pending staging buffer! The NVMe read the data into the
+               persistent CPU-mapped staging memory, but the GPU copy commands were never submitted! */
+            flushUploadStagingBuffer(&context);
+
+            omdl_cache_idx = 0;
+        }
+        fclose(fomdl);
     }
 
-    printf("Parsing glTF file: %s\n", filepath);
+    cgltf_options options = {0};
+    cgltf_data* data = NULL;
+    if (cgltf_parse_file(&options, filepath, &data) != cgltf_result_success) return false;
 
-    cgltf_result result = cgltf_parse_file(&options, filepath, &data);
-    if (result != cgltf_result_success) {
-        printf("Failed to parse GLTF file '%s': %d\n", filepath, result);
-        return false;
-    }
-
-    printf("Successfully parsed GLTF: %s\n", filepath);
-    printf("  Scenes: %zu\n", data->scenes_count);
-    printf("  Nodes: %zu\n", data->nodes_count);
-    printf("  Meshes: %zu\n", data->meshes_count);
-    printf("  Materials: %zu\n", data->materials_count);
-    printf("  Textures: %zu\n", data->textures_count);
-    printf("  Animations: %zu\n", data->animations_count);
-    printf("\n");
-
-    result = cgltf_load_buffers(&options, data, filepath);
-    if (result != cgltf_result_success) {
-        printf("Failed to load buffers: %d\n", result);
+    // Must load buffers even on cache hit until animations/skins are fully serialized into OMDL
+    if (cgltf_load_buffers(&options, data, filepath) != cgltf_result_success) {
         cgltf_free(data);
         return false;
+    }
+
+    if (!is_omdl_cache_hit) {
+        fprintf(stdout, "\033[33m[OMDL] Cache Miss: Compiling GLTF to monolithic binary...\033[0m\n");
+
+        omdl_vertex_count = 0; omdl_index_count = 0; omdl_morph_count = 0; omdl_mesh_count = 0;
+        omdl_vertices = NULL; omdl_indices = NULL; omdl_morphs = NULL; omdl_metas = NULL;
+
+        load_gltf_textures(data, filepath);
     }
 
     // Create new glTF instance
@@ -813,21 +869,46 @@ static char cache_path[512];
     instance->animation_count = 0;
     instance->mesh_count = 0;
 
-    if (!load_gltf_textures(data, filepath)) {
-        printf("Warning: Failed to load some textures\n");
-    }
-
-    /* create one large staging buffer for the entire model upload —
-       all mesh vertex/index data is batched and transferred in one GPU command */
-    createUploadStagingBuffer(&context, 256 * 1024 * 1024); /* 256 MB upload window */
-
     load_gltf_meshes(data, &scene->meshes);
-
-    /* flush all accumulated vertex+index copies in a single command buffer */
-    flushUploadStagingBuffer(&context);
-    destroyUploadStagingBuffer(&context);
-
     instance->mesh_count = scene->meshes.count - instance->mesh_start_index;
+
+    if (!is_omdl_cache_hit) {
+        // 1. Bulk GPU Allocation
+        createUploadStagingBuffer(&context, 256 * 1024 * 1024);
+        uint32_t base_v = omdl_vertex_count > 0 ? megaBufferAllocate(&context, omdl_vertices, omdl_vertex_count) : UINT32_MAX;
+        uint32_t base_i = omdl_index_count > 0 ? megaIndexBufferAllocate(&context, omdl_indices, omdl_index_count) : UINT32_MAX;
+        uint32_t base_m = omdl_morph_count > 0 ? megaMorphBufferAllocate(&context, omdl_morphs, omdl_morph_count) : UINT32_MAX;
+        flushUploadStagingBuffer(&context);
+        destroyUploadStagingBuffer(&context);
+
+        // 2. Patch Runtime Meshes
+        for (size_t i = 0; i < omdl_mesh_count; i++) {
+            Mesh* m = &scene->meshes.items[instance->mesh_start_index + i];
+            m->megaBaseVertex = (base_v != UINT32_MAX) ? base_v + omdl_metas[i].vertexOffset : UINT32_MAX;
+            if (m->indexCount > 0) m->megaBaseIndex = (base_i != UINT32_MAX) ? base_i + omdl_metas[i].indexOffset : UINT32_MAX;
+            if (m->morphCount > 0) m->morphDeltaOffset = (base_m != UINT32_MAX) ? base_m + omdl_metas[i].morphOffset : UINT32_MAX;
+        }
+
+        // 3. Write Monolithic OMDL Binary
+        FILE* fout = fopen(omdl_path, "wb");
+        if (fout) {
+            OmdlHeader header = { OMDL_MAGIC, omdl_mesh_count, omdl_vertex_count, omdl_index_count, omdl_morph_count, {0,0,0} };
+            fwrite(&header, sizeof(OmdlHeader), 1, fout);
+            fwrite(omdl_metas, sizeof(OmdlMeshMeta), omdl_mesh_count, fout);
+            if (omdl_vertex_count > 0) fwrite(omdl_vertices, sizeof(Vertex), omdl_vertex_count, fout);
+            if (omdl_index_count > 0) fwrite(omdl_indices, sizeof(uint32_t), omdl_index_count, fout);
+            if (omdl_morph_count > 0) fwrite(omdl_morphs, sizeof(MorphDelta), omdl_morph_count, fout);
+            fclose(fout);
+        }
+
+        if (omdl_vertices) free(omdl_vertices);
+        if (omdl_indices) free(omdl_indices);
+        if (omdl_morphs) free(omdl_morphs);
+        if (omdl_metas) free(omdl_metas);
+    } else {
+        if (omdl_cache_metas) free(omdl_cache_metas);
+        omdl_cache_metas = NULL;
+    }
 
     // Assign morphWeightOffset: pack each morph mesh into a unique slice of morphWeightBuffer.
     // The buffer is 1MB = 262144 floats, more than enough for all meshes combined.
@@ -877,11 +958,14 @@ static char cache_path[512];
 
     /* Rebuild indirect draw commands after every GLTF load so the
        indirect pass stays in sync with the current mesh list.      */
-    updateMeshSSBOAndIndirect(&context, &scene->meshes);
+    scene_topology_dirty = true;
 
-    if (geom_cache_in) { fclose(geom_cache_in); geom_cache_in = NULL; }
-    if (geom_cache_out) { fclose(geom_cache_out); geom_cache_out = NULL; }
+    /* CRITICAL FIX: Guarantee static meshes without animations push their
+       initial transforms and PBR materials to the GPU SSBO. */
+    markMeshesSSBODirty(&context);
 
+    // Do NOT free cgltf_data here! The runtime animation/hierarchy system holds
+    // pointers to it. It must stay alive for the lifetime of the scene.
     return true;
 }
 
