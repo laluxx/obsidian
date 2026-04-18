@@ -51,4 +51,10 @@ void camera_snap_to_angles(Camera* cam, float target_yaw, float target_pitch, ve
 void camera_snap_to_next_angle(Camera* cam, bool forward, bool vertical, vec3 pivot);
 void look_at_world_origin();
 
+
+void camera_snap_left();
+void camera_snap_right();
+void camera_snap_up();
+void camera_snap_down();
+
 #endif

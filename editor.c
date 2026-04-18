@@ -10,13 +10,13 @@
 #include "easing.h"
 #include "vulkan_setup.h"
 #include "vertico.h"
+#include "text_editor.h"
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
 #include <math.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <GLFW/glfw3.h>
 #include <ctype.h>
 
 ///  Globals
@@ -86,6 +86,12 @@ typedef struct {
 static ImageViewerState s_image_viewer = {0};
 static double s_last_item_click_time = 0.0;
 static int s_last_clicked_item = -1;
+
+static double s_bottom_click_time = 0.0;
+static float s_bottom_saved_size = 280.0f;
+static float s_bottom_anim_t = 1.0f;
+static float s_bottom_start_size = 280.0f;
+static float s_bottom_target_size = 280.0f;
 
 // --- Search & Incremental Caching State ---
 static bool  s_is_searching = false;
@@ -318,6 +324,7 @@ bool editor_wants_mouse(void) {
     double raw_y = sh - s_ui_my;
     if (s_image_viewer.visible && ui_window_wants_mouse(&s_image_viewer.window, s_ui_mx, raw_y)) return true;
     if (s_color_picker.visible && colorpicker_wants_mouse(&s_color_picker, s_ui_mx, raw_y)) return true;
+    if (text_editor_wants_mouse(s_ui_mx, s_ui_my)) return true;
 
     if (editor.font) {
         float h = editor.font->ascent - editor.font->descent + 32.0f;
@@ -387,15 +394,66 @@ void editor_mouse_button(int button, int action) {
                 }
             }
 
+            if (editor.panels[PANEL_BOTTOM].open && editor.panels[PANEL_BOTTOM].t > 0.01f) {
+                float px, py, pw, ph;
+                panel_get_rect(&editor.panels[PANEL_BOTTOM], &px, &py, &pw, &ph);
+                float bar_y = py + ph - TEXT_EDITOR_TITLE_H;
+
+                float close_size = 16.0f;
+                float close_x = px + pw - 14.0f - close_size;
+                if (s_ui_mx >= close_x - 8.0f && s_ui_mx <= close_x + close_size + 8.0f &&
+                    s_ui_my >= bar_y && s_ui_my <= bar_y + TEXT_EDITOR_TITLE_H) {
+                    extern void text_editor_close(void);
+                    text_editor_close();
+                    s_ui_mdown = true;
+                    s_ui_mclicked = true;
+                    return; /* Consumed! */
+                }
+
+                /* Relaxed bounds so fast or slight-off clicks on the title bar still capture */
+                if (s_ui_mx >= px && s_ui_mx <= px + pw && s_ui_my >= bar_y - 8.0f && s_ui_my <= bar_y + TEXT_EDITOR_TITLE_H + 8.0f) {
+                    if (editor.panels[PANEL_BOTTOM].size <= TEXT_EDITOR_TITLE_H + 2.0f) {
+                        s_bottom_start_size = editor.panels[PANEL_BOTTOM].size;
+                        s_bottom_target_size = s_bottom_saved_size > TEXT_EDITOR_TITLE_H + 20.0f ? s_bottom_saved_size : 280.0f;
+                        s_bottom_anim_t = 0.0f;
+                    } else {
+                        double now = glfwGetTime();
+                        if (now - s_bottom_click_time < 0.3) {
+                            s_bottom_saved_size = editor.panels[PANEL_BOTTOM].size;
+                            s_bottom_start_size = editor.panels[PANEL_BOTTOM].size;
+                            s_bottom_target_size = TEXT_EDITOR_TITLE_H;
+                            s_bottom_anim_t = 0.0f;
+                        } else {
+                            s_ui_active_id = &editor.panels[PANEL_BOTTOM].size;
+                            s_ui_drag_start_y = (float)s_ui_my;
+                            s_ui_drag_start_val = editor.panels[PANEL_BOTTOM].size;
+                        }
+                    }
+                    s_bottom_click_time = glfwGetTime();
+                    s_ui_mdown = true;
+                    s_ui_mclicked = true;
+                    return; /* Consumed! */
+                }
+            }
+
+            if (text_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
+                text_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
+                return; /* Consumed! */
+            }
+
             s_ui_mdown = true;
             s_ui_mclicked = true;
         } else if (action == GLFW_RELEASE) {
             if (s_message.is_dragging) {
                 s_message.is_dragging = false;
-                return; // Consumed!
+                return; /* Consumed! */
             }
+
+            /* Forward release to text editor to clear selection state */
+            text_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
+
             s_ui_mdown = false;
-            s_ui_active_id = NULL; // Release drag
+            s_ui_active_id = NULL; /* Release drag */
         }
     }
 }
@@ -432,12 +490,14 @@ static void panel_get_rect(Panel* p,
     switch (p->side) {
 
         case PANEL_BOTTOM: {
+            // Centered, width mirrors the Vertico top panel.
             // Slides up from below the screen.
-            // When t=1: y = 0 (bottom edge flush), height = size.
-            // When t=0: y = -size (completely off-screen below).
             float h = p->size;
-            *out_x = 0.0f;
-            *out_w = sw;
+            float w = sw * 0.45f;
+            if (w < 450.0f) w = 450.0f;
+            if (w > sw - 40.0f) w = sw - 40.0f;
+            *out_x = (sw - w) * 0.5f;
+            *out_w = w;
             *out_h = h;
             *out_y = lerpf(-h, 0.0f, et);
             break;
@@ -488,8 +548,25 @@ static void panel_get_rect(Panel* p,
 
 ///  Panel Chrome
 
-static void panel_draw_chrome(Panel* p, float x, float y, float w, float h) {
-    // Determine corner radii based on panel side (TL, TR, BR, BL)
+static void panel_draw_bg(Panel* p, float x, float y, float w, float h) {
+    vec4 radii = {0.0f, 0.0f, 0.0f, 0.0f};
+    switch (p->side) {
+        case PANEL_BOTTOM: radii[0] = PANEL_RADIUS; radii[1] = PANEL_RADIUS; break;
+        case PANEL_TOP:    radii[2] = PANEL_RADIUS; radii[3] = PANEL_RADIUS; break;
+        case PANEL_LEFT:   radii[1] = PANEL_RADIUS; radii[2] = PANEL_RADIUS; break;
+        case PANEL_RIGHT:  radii[0] = PANEL_RADIUS; radii[3] = PANEL_RADIUS; break;
+        default: break;
+    }
+    exQuad2D((vec2){x, y}, (vec2){w, h}, radii, 0.0f, CT.bg, CT.bg);
+
+    if (p->side == PANEL_TOP) {
+        Color bar = CT.bg_alt;
+        float bar_h = TITLE_H;
+        exQuad2D((vec2){x, y}, (vec2){w, bar_h}, (vec4){0.0f, 0.0f, radii[2], radii[3]}, 0.0f, bar, bar);
+    }
+}
+
+static void panel_draw_titlebar(Panel* p, float x, float y, float w, float h) {
     vec4 radii = {0.0f, 0.0f, 0.0f, 0.0f};
     switch (p->side) {
         case PANEL_BOTTOM: radii[0] = PANEL_RADIUS; radii[1] = PANEL_RADIUS; break;
@@ -499,30 +576,27 @@ static void panel_draw_chrome(Panel* p, float x, float y, float w, float h) {
         default: break;
     }
 
-    // Fully opaque background (Borders removed entirely)
-    exQuad2D((vec2){x, y}, (vec2){w, h}, radii, 0.0f, CT.bg, CT.bg);
-
     Color bar = CT.bg_alt;
     float bar_h = TITLE_H;
-
     float tx = x + PAD;
     float ty;
 
     switch (p->side) {
         case PANEL_TOP:
-            // Title bar INVERTED to BOTTOM of panel
-            exQuad2D((vec2){x, y}, (vec2){w, bar_h}, (vec4){0.0f, 0.0f, radii[2], radii[3]}, 0.0f, bar, bar);
             ty = y + bar_h  * 0.5f;
             break;
         default:
-            // Title bar at TOP of panel
             exQuad2D((vec2){x, y + h - bar_h}, (vec2){w, bar_h}, (vec4){radii[0], radii[1], 0.0f, 0.0f}, 0.0f, bar, bar);
             ty = y + h - bar_h * 0.5f;
             break;
     }
 
-    // Title text
-    text(editor.font, p->title, tx, ty, CT.text);
+    if (p->side == PANEL_BOTTOM && p->open) {
+        extern void text_editor_draw_titlebar(float x, float y, float w, float h, float mx, float my);
+        text_editor_draw_titlebar(x, y + h - bar_h, w, bar_h, (float)s_ui_mx, (float)s_ui_my);
+    } else if (p->title && p->title[0] != '\0') {
+        text(editor.font, p->title, tx, ty, CT.text);
+    }
 }
 
 //  Content area helper: shifts area depending on titlebar location
@@ -1127,7 +1201,11 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
                                     float sh = (float)context.swapChainExtent.height;
                                     image_viewer_open(&s_image_viewer, item, s_ui_mx, sh - s_ui_my);
                                 } else {
-                                    message(MSG_WARNING, "File format not yet supported!");
+                                    if (!text_editor_open(item->full_path)) {
+                                        message(MSG_ERROR, "Failed to open file in text editor");
+                                    }
+                                    // Pop the bottom panel open so the text editor is visible
+                                    editor_open_panel(PANEL_BOTTOM);
                                 }
                             }
                         }
@@ -1391,7 +1469,7 @@ static void render_vertico_panel(Panel* panel, float px, float py, float pw, flo
     // Calculate Match Counter Badge
     char counter_str[32] = "0/0";
     if (vertico.is_active && vertico.filtered_count > 0) {
-        snprintf(counter_str, sizeof(counter_str), "%d/%zu", vertico.selected_index + 1, vertico.filtered_count);
+        snprintf(counter_str, sizeof(counter_str), "%zu/%zu", (size_t)(vertico.selected_index + 1), vertico.filtered_count);
     }
     float counter_text_w = measure_text_width(editor.font, counter_str, 1.0f);
     float mc_w = counter_text_w + 16.0f;
@@ -1881,7 +1959,7 @@ static void cb_open_color_picker(void) {
 void editor_init(void) {
     memset(&editor, 0, sizeof(Editor));
 
-    // ── Bottom — File Manager ─────────────────────────────────────────────
+    // ── Bottom — Text Editor ──────────────────────────────────────────────
     editor.panels[PANEL_BOTTOM] = (Panel){
         .side           = PANEL_BOTTOM,
         .open           = false,
@@ -1891,8 +1969,8 @@ void editor_init(void) {
         .min_size       = 140.0f,
         .max_size       = 600.0f,
         .ease_fn        = ease_quart_out,
-        .title          = "Files",
-        .render_content = render_file_manager,
+        .title          = "Text Editor",
+        .render_content = render_text_editor_panel,
     };
 
     // ── Right — Inspector ─────────────────────────────────────────────────
@@ -1991,11 +2069,14 @@ void editor_init(void) {
     editor.last_time   = glfwGetTime();
     editor.initialized = true;
 
+    text_editor_init();
+
     fprintf(stdout, "[Editor] Initialized — easeOutExpo panels, MapleMono 18px\n");
 }
 
 void editor_cleanup(void) {
     if (!editor.initialized) return;
+    text_editor_cleanup();
     if (editor.font) {
         destroy_font(editor.font);
         editor.font = NULL;
@@ -2011,15 +2092,35 @@ void editor_update(void) {
     editor.last_time = now;
     if (dt > EDITOR_MAX_DT) dt = EDITOR_MAX_DT;
 
+    if (s_ui_active_id == &editor.panels[PANEL_BOTTOM].size) {
+        float sh = (float)context.swapChainExtent.height;
+        float delta = (float)s_ui_my - s_ui_drag_start_y;
+        float new_size = s_ui_drag_start_val + delta;
+        if (new_size < TEXT_EDITOR_TITLE_H) new_size = TEXT_EDITOR_TITLE_H;
+        if (new_size > sh - TITLE_H) new_size = sh - TITLE_H;
+        editor.panels[PANEL_BOTTOM].size = new_size;
+    } else if (s_bottom_anim_t < 1.0f) {
+        s_bottom_anim_t += 5.0f * dt;
+        if (s_bottom_anim_t >= 1.0f) {
+            s_bottom_anim_t = 1.0f;
+            editor.panels[PANEL_BOTTOM].size = s_bottom_target_size;
+        } else {
+            editor.panels[PANEL_BOTTOM].size = s_bottom_start_size + (s_bottom_target_size - s_bottom_start_size) * ease_quart_in_out(s_bottom_anim_t);
+        }
+    }
+
     if (s_color_picker.visible) {
         colorpicker_update(&s_color_picker, dt, s_ui_mx, s_ui_my);
     }
 
     if (s_image_viewer.visible) {
-        image_viewer_update(&s_image_viewer, dt, s_ui_mx, s_ui_my);
-    }
+            image_viewer_update(&s_image_viewer, dt, s_ui_mx, s_ui_my);
+        }
 
-    if (s_is_searching) {
+        float sh = (float)context.swapChainExtent.height;
+        text_editor_update(dt, s_ui_mx, sh - s_ui_my);
+
+        if (s_is_searching) {
         if (s_search_anim_t < 1.0f) {
             s_search_anim_t += 3.0f * dt;
         }
@@ -2136,14 +2237,17 @@ void editor_render(void) {
         float x, y, w, h;
         panel_get_rect(p, &x, &y, &w, &h);
 
-        panel_draw_chrome(p, x, y, w, h);
+        panel_draw_bg(p, x, y, w, h);
 
         if (p->render_content)
             p->render_content(p, x, y, w, h);
+
+        panel_draw_titlebar(p, x, y, w, h);
     }
 
     colorpicker_render(&s_color_picker, editor.font);
     image_viewer_render(&s_image_viewer, editor.font);
+    text_editor_render(editor.font);
 
     // Render the active notification popup
     float msg_h = editor.font ? (editor.font->ascent - editor.font->descent + 32.0f) : 50.0f;
