@@ -1523,7 +1523,7 @@ int32_t texture_pool_add_from_memory(unsigned char* data, size_t data_size) {
 
 // --- SVG High-Performance Caching ---
 
-// Generates: ~/.cache/obsidian/assets_icons_Close.svg_32x32.rgba
+// Generates: ~/.cache/obsidian/svg/assets_icons_Close_svg_32x32.orgb
 static const char* get_svg_cache_path(const char* original_path, int w, int h) {
     static char cache_path[512];
     const char* home = getenv("HOME");
@@ -1531,19 +1531,26 @@ static const char* get_svg_cache_path(const char* original_path, int w, int h) {
 
     char dir_path[512];
     snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
-    mkdir(dir_path, 0777); // Ignores if it already exists
+    mkdir(dir_path, 0777);
     snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
     mkdir(dir_path, 0777);
+    snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/svg", home);
+    mkdir(dir_path, 0777);
+
+    // Strip leading './' or '/' to avoid creating hidden files in Linux/Unix
+    const char* start = original_path;
+    while (*start == '.' && *(start + 1) == '/') start += 2;
+    while (*start == '/') start++;
 
     // Flatten original path to make a safe filesystem name
     char safe_name[256];
-    strncpy(safe_name, original_path, sizeof(safe_name) - 1);
+    strncpy(safe_name, start, sizeof(safe_name) - 1);
     safe_name[sizeof(safe_name) - 1] = '\0';
     for (int i = 0; safe_name[i]; i++) {
-        if (safe_name[i] == '/' || safe_name[i] == '\\') safe_name[i] = '_';
+        if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.') safe_name[i] = '_';
     }
 
-    snprintf(cache_path, sizeof(cache_path), "%s/%s_%dx%d.rgba", dir_path, safe_name, w, h);
+    snprintf(cache_path, sizeof(cache_path), "%s/%s_%dx%d.orgb", dir_path, safe_name, w, h);
     return cache_path;
 }
 
