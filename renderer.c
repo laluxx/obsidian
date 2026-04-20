@@ -959,7 +959,7 @@ void begin_frame(void) {
             bindlessRegisterTexture(&context, texturePool[i].bindlessSlot, texturePool[i].view, texturePool[i].sampler);
             texturePool[i].status = TEXTURE_STATUS_READY;
             markMeshesSSBODirty(&context); // Force SSBO to drop the -1 fallback and use the real texture slot
-            fprintf(stdout, "\033[36m[GPU PUMP] Zero-flicker swap complete! Texture %d is live.\033[0m\n", i);
+            fprintf(stdout, "\033[36m[GPU PUMP] Swap complete! Texture %d is live.\033[0m\n", i);
         }
     }
 

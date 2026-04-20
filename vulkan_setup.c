@@ -1243,29 +1243,12 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
         uint32_t shadowStride = 20480u / 3u; // 6826 — matches compact.comp
         uint32_t frustumIdx = (uint32_t)(i + 1); // shadow frustums are 1..4
 
-        // Opaque shadows: stream 0 of this frustum
-        VkDeviceSize offset   = (VkDeviceSize)(frustumIdx * 20480u)          * sizeof(VkDrawIndexedIndirectCommand);
-        VkDeviceSize countOff = (VkDeviceSize)(frustumIdx * 3u + 0u)         * sizeof(uint32_t);
-        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, offset,
-                                      ctx->drawCountBuffer, countOff,
-                                      ctx->indirectDrawCount,
-                                      sizeof(VkDrawIndexedIndirectCommand));
+        for (uint32_t stream = 0; stream < 3; stream++) {
+            VkDeviceSize offset   = (VkDeviceSize)(frustumIdx * 20480u + stream * shadowStride) * sizeof(VkDrawIndexedIndirectCommand);
+            VkDeviceSize countOff = (VkDeviceSize)(frustumIdx * 3u + stream) * sizeof(uint32_t);
+            vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, offset, ctx->drawCountBuffer, countOff, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+        }
 
-        // Transmission shadows: stream 1 of this frustum (transmission casts shadows too)
-        VkDeviceSize xmtOffset   = (VkDeviceSize)(frustumIdx * 20480u + shadowStride) * sizeof(VkDrawIndexedIndirectCommand);
-        VkDeviceSize xmtCountOff = (VkDeviceSize)(frustumIdx * 3u + 1u)               * sizeof(uint32_t);
-        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, xmtOffset,
-                                      ctx->drawCountBuffer, xmtCountOff,
-                                      ctx->indirectDrawCount,
-                                      sizeof(VkDrawIndexedIndirectCommand));
-
-        // Transparent shadows: stream 2
-        VkDeviceSize trpOffset   = (VkDeviceSize)(frustumIdx * 20480u + 2u * shadowStride) * sizeof(VkDrawIndexedIndirectCommand);
-        VkDeviceSize trpCountOff = (VkDeviceSize)(frustumIdx * 3u + 2u)                    * sizeof(uint32_t);
-        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, trpOffset,
-                                      ctx->drawCountBuffer, trpCountOff,
-                                      ctx->indirectDrawCount,
-                                      sizeof(VkDrawIndexedIndirectCommand));
     }
 }
 
@@ -1761,23 +1744,10 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
                            0, sizeof(PushConstants), &pushConstants);
         vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        // Stream 1: Transmission (opaqueScreenMap is now valid)
-        // Camera frustum = frustumIdx 0, stream 1 offset = sStride draws
-        // drawCounts[0*3+1] byte offset = 4
-        VkDeviceSize xmtOffset = (VkDeviceSize)sStride * sizeof(VkDrawIndexedIndirectCommand);
-        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, xmtOffset,
-                                      ctx->drawCountBuffer, 4,
-                                      ctx->indirectDrawCount,
-                                      sizeof(VkDrawIndexedIndirectCommand));
-
-        // Stream 2: Alpha-blend transparent
-        // Camera frustum = frustumIdx 0, stream 2 offset = 2*sStride draws
-        // drawCounts[0*3+2] byte offset = 8
-        VkDeviceSize trpOffset = (VkDeviceSize)(2u * sStride) * sizeof(VkDrawIndexedIndirectCommand);
-        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, trpOffset,
-                                      ctx->drawCountBuffer, 8,
-                                      ctx->indirectDrawCount,
-                                      sizeof(VkDrawIndexedIndirectCommand));
+        for (uint32_t stream = 1; stream <= 2; stream++) {
+            vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, (VkDeviceSize)(stream * sStride) * sizeof(VkDrawIndexedIndirectCommand),
+                                          ctx->drawCountBuffer, stream * 4, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+        }
 
         vkCmdEndRendering(cmd);
     }
@@ -2070,14 +2040,17 @@ void cleanup(VulkanContext* ctx)
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
 
-    if (ctx->computeCullPipeline)         { vkDestroyPipeline            (ctx->device, ctx->computeCullPipeline,         NULL); ctx->computeCullPipeline = VK_NULL_HANDLE; }
-    if (ctx->computeCullPipelineLayout)   { vkDestroyPipelineLayout      (ctx->device, ctx->computeCullPipelineLayout,   NULL); ctx->computeCullPipelineLayout   = VK_NULL_HANDLE; }
-    if (ctx->computeCullSetLayout)        { vkDestroyDescriptorSetLayout  (ctx->device, ctx->computeCullSetLayout,        NULL); ctx->computeCullSetLayout        = VK_NULL_HANDLE; }
-    if (ctx->computeCullPool)             { vkDestroyDescriptorPool       (ctx->device, ctx->computeCullPool,             NULL); ctx->computeCullPool             = VK_NULL_HANDLE; }
-    if (ctx->computeCompactPipeline)      { vkDestroyPipeline            (ctx->device, ctx->computeCompactPipeline,      NULL); ctx->computeCompactPipeline      = VK_NULL_HANDLE; }
-    if (ctx->computeCompactPipelineLayout){ vkDestroyPipelineLayout      (ctx->device, ctx->computeCompactPipelineLayout,NULL); ctx->computeCompactPipelineLayout= VK_NULL_HANDLE; }
-    if (ctx->computeCompactSetLayout)     { vkDestroyDescriptorSetLayout  (ctx->device, ctx->computeCompactSetLayout,     NULL); ctx->computeCompactSetLayout     = VK_NULL_HANDLE; }
-    if (ctx->computeCompactPool)          { vkDestroyDescriptorPool       (ctx->device, ctx->computeCompactPool,          NULL); ctx->computeCompactPool          = VK_NULL_HANDLE; }
+#define VK_DEL(func, obj) if (ctx->obj) { func(ctx->device, ctx->obj, NULL); ctx->obj = VK_NULL_HANDLE; }
+    VK_DEL(vkDestroyPipeline,            computeCullPipeline);
+    VK_DEL(vkDestroyPipelineLayout,      computeCullPipelineLayout);
+    VK_DEL(vkDestroyDescriptorSetLayout, computeCullSetLayout);
+    VK_DEL(vkDestroyDescriptorPool,      computeCullPool);
+    VK_DEL(vkDestroyPipeline,            computeCompactPipeline);
+    VK_DEL(vkDestroyPipelineLayout,      computeCompactPipelineLayout);
+    VK_DEL(vkDestroyDescriptorSetLayout, computeCompactSetLayout);
+    VK_DEL(vkDestroyDescriptorPool,      computeCompactPool);
+#undef VK_DEL
+
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (ctx->frustumUBOMapped[i])   { vkUnmapMemory  (ctx->device, ctx->frustumUBOMemory[i]);                    ctx->frustumUBOMapped[i]       = NULL;            }
         if (ctx->frustumUBOBuffer[i])   { vkDestroyBuffer(ctx->device, ctx->frustumUBOBuffer[i],   NULL);            ctx->frustumUBOBuffer[i]       = VK_NULL_HANDLE; }
