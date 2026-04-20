@@ -396,11 +396,11 @@ int main() {
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                         // PASS */
     /* load_gltf("./assets/gltf/Box.glb", &scene);                                 // PASS */
     /* load_gltf("./assets/gltf/Corset.glb", &scene);                              // PASS (but it's really small) */
-    load_gltf("./assets/gltf/CesiumMan.glb", &scene);                           // PASS
+    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene);                           // PASS */
     /* load_gltf("./assets/gltf/Fox.glb", &scene);                                 // PASS */
     /* load_gltf("./assets/gltf/RecursiveSkeletons.glb", &scene);                  // PASS */
     /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene);                        // PASS */
-    /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene);                 // PASS */
+    load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene);                 // PASS
     /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene);                         // PASS */
     /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene);                     // PASS */
     /* load_gltf("./assets/gltf/Avocado.glb", &scene);                             // PASS */

@@ -6,7 +6,7 @@
 #include <cglm/cglm.h>
 
 #define MAX_VERTICES 65536 * 32
-#define MAX_TEXTURES 256
+#define MAX_TEXTURES 8192
 
 // Last 3 slots in the bindless array are reserved for IBL
 #define IBL_IRRADIANCE_SLOT  (MAX_TEXTURES - 3)
@@ -78,6 +78,16 @@ void renderer2D_init();
 
 void renderer2D_draw(VkCommandBuffer cmd);
 
+typedef enum {
+    TEXTURE_STATUS_EMPTY = 0,
+    TEXTURE_STATUS_QUEUED_FOR_COOKING = 1,
+    TEXTURE_STATUS_COOKING = 2,
+    TEXTURE_STATUS_READY_FOR_UPLOAD = 3,
+    TEXTURE_STATUS_UPLOADING = 4,
+    TEXTURE_STATUS_READY = 5,
+    TEXTURE_STATUS_FAILED = 6
+} TextureStatus;
+
 typedef struct {
     VkImage         image;
     VkDeviceMemory  memory;
@@ -86,7 +96,8 @@ typedef struct {
     VkDescriptorSet descriptorSet;   // kept for legacy 2D per-batch path
     uint32_t        bindlessSlot;    // index into the bindless texture array
     uint32_t        width, height;
-    bool            loaded;
+    bool            loaded;          // Legacy flag, will be phased out for status
+    volatile TextureStatus status;   // Thread-safe async state tracking
 } Texture2D;
 
 extern Vertex2D vertices2D[MAX_VERTICES];

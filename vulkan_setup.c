@@ -1134,7 +1134,9 @@ static void update_cascade_matrices(VulkanContext* ctx) {
     CTX_LIGHTING(ctx)->sun.direction[2] = lightDir[2];
 
     // Tight Cascades: Cascade 0 is now extremely dense for objects close to the camera!
-    float cascadeSplits[5] = { 0.1f, 5.0f, 15.0f, 50.0f, 200.0f };
+    /* float cascadeSplits[5] = { 0.1f, 5.0f, 15.0f, 50.0f, 200.0f }; */
+    float cascadeSplits[5] = { 0.1f, 40.0f, 100.0f, 220.0f, 500.0f };
+
     for(int i=0; i<4; i++) CTX_LIGHTING(ctx)->cascadeSplits[i] = cascadeSplits[i+1];
 
     float fov = glm_rad(camera.fov);
@@ -2038,36 +2040,32 @@ void cleanup(VulkanContext* ctx)
 #define DESTROY_PIPELINE(p)       if (ctx->p) { vkDestroyPipeline      (ctx->device, ctx->p, NULL); ctx->p = VK_NULL_HANDLE; }
 #define DESTROY_LAYOUT(l)         if (ctx->l) { vkDestroyPipelineLayout(ctx->device, ctx->l, NULL); ctx->l = VK_NULL_HANDLE; }
     /* pipelineIndirectSolid and pipelineIndirectTextured alias graphicsPipeline[0] —
-       null them out first so DESTROY_PIPELINE doesn't double-free.                   */
+       null them out first so DESTROY_PIPELINE doesn't double-free.                    */
     pipelineIndirectSolid    = VK_NULL_HANDLE;
     pipelineIndirectTextured = VK_NULL_HANDLE;
 
     /* graphicsPipelineTextured3D aliases graphicsPipeline (pipelines[0]).
-       Null the aliases before the macro runs to prevent double-destroy.               */
+       graphicsPipelineTextured2D aliases graphicsPipeline2D (pipelines[2]).
+       Null the aliases before the macro runs to prevent double-destroy.                */
     ctx->graphicsPipelineTextured3D = VK_NULL_HANDLE;
+    ctx->graphicsPipelineTextured2D = VK_NULL_HANDLE;
 
     DESTROY_PIPELINE(graphicsPipeline)       /* pipelines[0] */
     DESTROY_PIPELINE(graphicsPipelineLine)   /* pipelines[1] */
     DESTROY_PIPELINE(graphicsPipeline2D)     /* pipelines[2] */
-    DESTROY_PIPELINE(graphicsPipelineTextured2D) /* pipelines[3] */
-    /* aliases already nulled — these are no-ops but kept for safety */
-    DESTROY_PIPELINE(graphicsPipelineTextured3D)
 
     /* These all alias other layouts — null before destroy to prevent double-free */
     ctx->pipelineLayoutLine       = VK_NULL_HANDLE;
     ctx->pipelineLayoutTextured3D = VK_NULL_HANDLE; /* aliases pipelineLayout */
     ctx->pipelineLayoutIndirect   = VK_NULL_HANDLE; /* aliases pipelineLayout */
+    ctx->pipelineLayout2D         = VK_NULL_HANDLE; /* aliases pipelineLayoutTextured2D */
 
     DESTROY_LAYOUT(pipelineLayout)           /* the real 3D PBR layout */
-    DESTROY_LAYOUT(pipelineLayout2D)
-    DESTROY_LAYOUT(pipelineLayoutTextured2D)
-    /* aliases already nulled — these are no-ops */
-    DESTROY_LAYOUT(pipelineLayoutTextured3D)
-    DESTROY_LAYOUT(pipelineLayoutLine)
-    DESTROY_LAYOUT(pipelineLayoutIndirect)
+    DESTROY_LAYOUT(pipelineLayoutTextured2D) /* the real 2D layout */
 
     if (skyboxPipeline) { vkDestroyPipeline(ctx->device, skyboxPipeline, NULL); skyboxPipeline = VK_NULL_HANDLE; }
     if (skyboxPipelineLayout) { vkDestroyPipelineLayout(ctx->device, skyboxPipelineLayout, NULL); skyboxPipelineLayout = VK_NULL_HANDLE; }
+    if (shadowPipeline) { vkDestroyPipeline(ctx->device, shadowPipeline, NULL); shadowPipeline = VK_NULL_HANDLE; }
 
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
@@ -2085,6 +2083,14 @@ void cleanup(VulkanContext* ctx)
         if (ctx->frustumUBOBuffer[i])   { vkDestroyBuffer(ctx->device, ctx->frustumUBOBuffer[i],   NULL);            ctx->frustumUBOBuffer[i]       = VK_NULL_HANDLE; }
         if (ctx->frustumUBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->frustumUBOMemory[i],   NULL);            ctx->frustumUBOMemory[i]       = VK_NULL_HANDLE; }
     }
+
+    destroyUploadStagingBuffer(ctx);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (jointSSBOMapped[i]) { vkUnmapMemory(ctx->device, jointSSBOMemory[i]); jointSSBOMapped[i] = NULL; }
+        if (jointSSBO[i]) { vkDestroyBuffer(ctx->device, jointSSBO[i], NULL); jointSSBO[i] = VK_NULL_HANDLE; }
+        if (jointSSBOMemory[i]) { vkFreeMemory(ctx->device, jointSSBOMemory[i], NULL); jointSSBOMemory[i] = VK_NULL_HANDLE; }
+    }
+
     if (pipelineCache != VK_NULL_HANDLE) {
         size_t cacheSize = 0;
         if (vkGetPipelineCacheData(ctx->device, pipelineCache, &cacheSize, NULL) == VK_SUCCESS && cacheSize > 0) {

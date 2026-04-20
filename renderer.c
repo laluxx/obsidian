@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <pthread.h>
 
 #ifndef MIN
 #define MIN(a,b) (((a)<(b))?(a):(b))
@@ -90,18 +91,51 @@ static AsyncUpload* async_uploads = NULL;
 static uint32_t async_upload_count = 0;
 static uint32_t async_upload_capacity = 0;
 
-static void submit_async_upload(VulkanContext* ctx, VkBuffer buf, VkDeviceMemory mem, VkCommandBuffer cmd, bool* loaded_flag) {
-    vkEndCommandBuffer(cmd);
-    VkSubmitInfo submitInfo = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
-    VkFenceCreateInfo fenceInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    VkFence fence; vkCreateFence(ctx->device, &fenceInfo, NULL, &fence);
-    vkQueueSubmit(ctx->graphicsQueue, 1, &submitInfo, fence);
+static VkCommandPool async_cmd_pool = VK_NULL_HANDLE;
+typedef struct { VkBuffer buffer; VkDeviceMemory memory; VkCommandBuffer cmd; bool* loaded_flag; } PendingUpload;
+static PendingUpload pending_uploads[8192];
+static uint32_t pending_upload_count = 0;
+static pthread_mutex_t upload_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-    if (async_upload_count == async_upload_capacity) {
-        async_upload_capacity = async_upload_capacity == 0 ? 128 : async_upload_capacity * 2;
-        async_uploads = realloc(async_uploads, async_upload_capacity * sizeof(AsyncUpload));
+static VkCommandBuffer begin_async_cmd(VulkanContext* ctx) {
+    pthread_mutex_lock(&upload_mutex);
+    if (async_cmd_pool == VK_NULL_HANDLE) {
+        VkCommandPoolCreateInfo poolInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+            .queueFamilyIndex = ctx->graphicsQueueFamily
+        };
+        vkCreateCommandPool(ctx->device, &poolInfo, NULL, &async_cmd_pool);
     }
-    async_uploads[async_upload_count++] = (AsyncUpload){ buf, mem, fence, cmd, loaded_flag };
+    VkCommandBufferAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandPool = async_cmd_pool,
+        .commandBufferCount = 1
+    };
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(ctx->device, &allocInfo, &cmd);
+    VkCommandBufferBeginInfo beginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    };
+    vkBeginCommandBuffer(cmd, &beginInfo);
+    return cmd;
+}
+
+static void end_async_cmd(VkCommandBuffer cmd) {
+    vkEndCommandBuffer(cmd);
+    pthread_mutex_unlock(&upload_mutex);
+}
+
+static void submit_async_upload(VulkanContext* ctx, VkBuffer buf, VkDeviceMemory mem, VkCommandBuffer cmd, bool* loaded_flag) {
+    pthread_mutex_lock(&upload_mutex);
+    if (pending_upload_count < 8192) {
+        pending_uploads[pending_upload_count++] = (PendingUpload){ buf, mem, cmd, loaded_flag };
+    } else {
+        fprintf(stderr, "\033[31m[CRITICAL] Pending uploads overflow! Skipping upload.\033[0m\n");
+    }
+    pthread_mutex_unlock(&upload_mutex);
 }
 
 void pump_async_uploads(VulkanContext* ctx) {
@@ -109,46 +143,263 @@ void pump_async_uploads(VulkanContext* ctx) {
         if (vkGetFenceStatus(ctx->device, async_uploads[i].fence) == VK_SUCCESS) {
             vkDestroyBuffer(ctx->device, async_uploads[i].buffer, NULL);
             vkFreeMemory(ctx->device, async_uploads[i].memory, NULL);
-            vkFreeCommandBuffers(ctx->device, ctx->commandPool, 1, &async_uploads[i].cmd);
+            pthread_mutex_lock(&upload_mutex);
+            vkFreeCommandBuffers(ctx->device, async_cmd_pool, 1, &async_uploads[i].cmd);
+            pthread_mutex_unlock(&upload_mutex);
             vkDestroyFence(ctx->device, async_uploads[i].fence, NULL);
-
-            // Defuse race condition: Texture pops in precisely when GPU completes
             if (async_uploads[i].loaded_flag) *async_uploads[i].loaded_flag = true;
-
             async_uploads[i] = async_uploads[--async_upload_count]; i--;
         }
     }
+    pthread_mutex_lock(&upload_mutex);
+    for (uint32_t i = 0; i < pending_upload_count; i++) {
+        VkSubmitInfo submitInfo = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &pending_uploads[i].cmd };
+        VkFenceCreateInfo fenceInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        VkFence fence; vkCreateFence(ctx->device, &fenceInfo, NULL, &fence);
+        vkQueueSubmit(ctx->graphicsQueue, 1, &submitInfo, fence);
+
+        if (async_upload_count == async_upload_capacity) {
+            uint32_t new_cap = async_upload_capacity == 0 ? 128 : async_upload_capacity * 2;
+            AsyncUpload* new_arr = realloc(async_uploads, new_cap * sizeof(AsyncUpload));
+            if (new_arr) {
+                async_uploads = new_arr;
+                async_upload_capacity = new_cap;
+            } else {
+                fprintf(stderr, "\033[31m[CRITICAL] Failed to allocate memory for async uploads!\033[0m\n");
+                continue;
+            }
+        }
+        async_uploads[async_upload_count++] = (AsyncUpload){ pending_uploads[i].buffer, pending_uploads[i].memory, fence, pending_uploads[i].cmd, pending_uploads[i].loaded_flag };
+    }
+    pending_upload_count = 0;
+    pthread_mutex_unlock(&upload_mutex);
 }
+
+// --- BACKGROUND TEXTURE COOKER ---
+typedef struct {
+    char filepath[512];
+    int32_t pool_index;
+    bool is_roughness;
+} CookerJob;
+
+#define MAX_COOKER_JOBS 8192
+static CookerJob cooker_queue[MAX_COOKER_JOBS];
+static volatile uint32_t cooker_head = 0;
+static volatile uint32_t cooker_tail = 0;
+static pthread_mutex_t cooker_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cooker_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t cooker_threads[8];
+static bool cooker_running = true;
+
+// Forward declarations for cooker thread
+static float* load_exr_as_float(const char* path, int* out_w, int* out_h, bool is_normal, bool is_roughness);
+static const char* get_texture_cache_path(const char* original_path, bool is_roughness);
+static bool load_texture_dds(VulkanContext* ctx, const char* filepath, Texture2D* texture);
+
+typedef struct {
+    uint32_t magic; // 0x5845544F 'OTEX'
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t data_size;
+} OtexHeader;
 
 // --- Texture Pool Management ---
 static Texture2D texturePool[MAX_TEXTURES];
+static char texturePoolPaths[MAX_TEXTURES][512];
+static bool texturePoolIsRoughness[MAX_TEXTURES];
 static uint32_t textureCount = 0;
+static Texture2D dummyWhiteTexture;
+
+static void* cooker_worker_thread(void* arg) {
+    (void)arg;
+    while (cooker_running) {
+        pthread_mutex_lock(&cooker_mutex);
+        while (cooker_head == cooker_tail && cooker_running) {
+            pthread_cond_wait(&cooker_cond, &cooker_mutex);
+        }
+        if (!cooker_running) { pthread_mutex_unlock(&cooker_mutex); break; }
+
+        CookerJob job = cooker_queue[cooker_head];
+        cooker_head = (cooker_head + 1) % MAX_COOKER_JOBS;
+        pthread_mutex_unlock(&cooker_mutex);
+
+        Texture2D* tex = &texturePool[job.pool_index];
+        tex->status = TEXTURE_STATUS_COOKING;
+
+        fprintf(stdout, "\033[35m[BACKGROUND COOKER] Compiling %s...\033[0m\n", job.filepath);
+
+        const char* cache_path = get_texture_cache_path(job.filepath, job.is_roughness);
+        int w, h, ch;
+
+        if (job.is_roughness) {
+            if (strstr(job.filepath, ".exr")) {
+                float* floatPixels = load_exr_as_float(job.filepath, &w, &h, false, true);
+                if (floatPixels) {
+                    FILE* fout = fopen(cache_path, "wb");
+                    if (fout) {
+                        OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(w * h * 16) };
+                        fwrite(&header, sizeof(OtexHeader), 1, fout);
+                        fwrite(floatPixels, 1, header.data_size, fout);
+                        fclose(fout);
+                    }
+                    free(floatPixels);
+                    tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+                } else { tex->status = TEXTURE_STATUS_FAILED; }
+            } else {
+                stbi_uc* roughPixels = stbi_load(job.filepath, &w, &h, &ch, 1);
+                if (roughPixels) {
+                    size_t size = (size_t)w * h * 4;
+                    stbi_uc* packed = malloc(size);
+                    for (int i = 0; i < w * h; i++) {
+                        packed[i*4 + 0] = 255;             // AO default
+                        packed[i*4 + 1] = roughPixels[i];  // Roughness correctly packed in G!
+                        packed[i*4 + 2] = 0;               // Metallic default
+                        packed[i*4 + 3] = 255;
+                    }
+                    free(roughPixels);
+                    FILE* fout = fopen(cache_path, "wb");
+                    if (fout) {
+                        OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)(size) };
+                        fwrite(&header, sizeof(OtexHeader), 1, fout);
+                        fwrite(packed, 1, header.data_size, fout);
+                        fclose(fout);
+                    }
+                    free(packed);
+                    tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+                } else { tex->status = TEXTURE_STATUS_FAILED; }
+            }
+        } else {
+            // Standard Albedo/Normal/etc JIT to DDS
+            if (strstr(job.filepath, ".exr")) {
+                bool is_normal = (strstr(job.filepath, "nor") != NULL);
+                float* float_pixels = load_exr_as_float(job.filepath, &w, &h, is_normal, false);
+                if (float_pixels) {
+                    FILE* fout = fopen(cache_path, "wb");
+                    if (fout) {
+                        OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(w * h * 16) };
+                        fwrite(&header, sizeof(OtexHeader), 1, fout);
+                        fwrite(float_pixels, 1, header.data_size, fout);
+                        fclose(fout);
+                    }
+                    free(float_pixels);
+                    tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+                } else { tex->status = TEXTURE_STATUS_FAILED; }
+            } else {
+                unsigned char* pixels = stbi_load(job.filepath, &w, &h, &ch, STBI_rgb_alpha);
+                if (pixels) {
+                    uint32_t num_blocks_x = (w + 3) / 4;
+                    uint32_t num_blocks_y = (h + 3) / 4;
+                    uint32_t dxt_size = num_blocks_x * num_blocks_y * 16;
+                    unsigned char* dxt_data = malloc(dxt_size);
+
+                    for (uint32_t by = 0; by < num_blocks_y; by++) {
+                        for (uint32_t bx = 0; bx < num_blocks_x; bx++) {
+                            unsigned char block[64];
+                            for (uint32_t y = 0; y < 4; y++) {
+                                for (uint32_t x = 0; x < 4; x++) {
+                                    uint32_t px = (bx * 4) + x;
+                                    uint32_t py = (by * 4) + y;
+                                    uint32_t idx = ((py < (uint32_t)h ? py : (uint32_t)h - 1) * w + (px < (uint32_t)w ? px : (uint32_t)w - 1)) * 4;
+                                    memcpy(&block[(y * 4 + x) * 4], &pixels[idx], 4);
+                                }
+                            }
+                            stb_compress_dxt_block(&dxt_data[(by * num_blocks_x + bx) * 16], block, 1, STB_DXT_NORMAL);
+                        }
+                    }
+
+                    char out_dds_path[512];
+                    strncpy(out_dds_path, job.filepath, sizeof(out_dds_path) - 1);
+                    char* out_ext = strrchr(out_dds_path, '.');
+                    if (out_ext) strcpy(out_ext, ".dds");
+                    const char* out_dds_cache = get_texture_cache_path(out_dds_path, false);
+
+                    FILE* fdds = fopen(out_dds_cache, "wb");
+                    if (fdds) {
+                        uint32_t magic = DDS_MAGIC;
+                        DDS_HEADER header = {0};
+                        header.dwSize = 124;
+                        header.dwFlags = 0x1007 | 0x80000;
+                        header.dwHeight = h;
+                        header.dwWidth = w;
+                        header.dwPitchOrLinearSize = dxt_size;
+                        header.dwMipMapCount = 1;
+                        header.ddspf.dwSize = 32;
+                        header.ddspf.dwFlags = 0x4;
+                        header.ddspf.dwFourCC = 0x35545844;
+                        header.dwCaps = 0x1000;
+
+                        fwrite(&magic, 4, 1, fdds);
+                        fwrite(&header, sizeof(DDS_HEADER), 1, fdds);
+                        fwrite(dxt_data, 1, dxt_size, fdds);
+                        fclose(fdds);
+                    }
+                    free(dxt_data);
+                    stbi_image_free(pixels);
+                    tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+                } else { tex->status = TEXTURE_STATUS_FAILED; }
+            }
+        }
+    }
+    return NULL;
+}
 
 void texture_pool_init() {
     textureCount = 0;
     memset(texturePool, 0, sizeof(texturePool));
+
+    // Generate Dummy 1x1 White Texture Fallback
+    unsigned char white_pixel[4] = {255, 255, 255, 255};
+    dummyWhiteTexture.loaded = false;
+    load_texture_from_rgba(&context, white_pixel, 1, 1, &dummyWhiteTexture);
+    dummyWhiteTexture.status = TEXTURE_STATUS_READY;
+
+    // Launch 8 Background Cooker Threads
+    cooker_running = true;
+    for(int i = 0; i < 8; i++) {
+        pthread_create(&cooker_threads[i], NULL, cooker_worker_thread, NULL);
+    }
 }
 
 void texture_pool_cleanup(VulkanContext* context) {
+    cooker_running = false;
+    pthread_cond_broadcast(&cooker_cond);
+    for(int i = 0; i < 8; i++) {
+        if (cooker_threads[i] != 0) {
+            pthread_join(cooker_threads[i], NULL);
+            cooker_threads[i] = 0;
+        }
+    }
+
+    pump_async_uploads(context);
     for (uint32_t i = 0; i < async_upload_count; i++) {
         vkWaitForFences(context->device, 1, &async_uploads[i].fence, VK_TRUE, UINT64_MAX);
     }
     pump_async_uploads(context);
 
+    destroy_texture(context, &dummyWhiteTexture);
+
     for (uint32_t i = 0; i < textureCount; i++) {
-        if (texturePool[i].loaded) {
-            destroy_texture(context, &texturePool[i]);
-        }
+        destroy_texture(context, &texturePool[i]);
     }
     textureCount = 0;
 
     for (uint32_t i = 0; i < texture_page_count; i++) {
-        vkFreeMemory(context->device, texture_pages[i].memory, NULL);
+        if (texture_pages[i].memory) {
+            vkFreeMemory(context->device, texture_pages[i].memory, NULL);
+            texture_pages[i].memory = VK_NULL_HANDLE;
+        }
     }
     texture_page_count = 0;
 
     if (async_uploads) { free(async_uploads); async_uploads = NULL; }
     async_upload_capacity = 0;
+    async_upload_count = 0;
+
+    if (async_cmd_pool) {
+        vkDestroyCommandPool(context->device, async_cmd_pool, NULL);
+        async_cmd_pool = VK_NULL_HANDLE;
+    }
 }
 
 int32_t texture_pool_add(VulkanContext* context, const char* filename) {
@@ -371,14 +622,6 @@ static bool load_texture_from_float_pixels(VulkanContext* ctx, float* pixels, in
     return ok;
 }
 
-typedef struct {
-    uint32_t magic; // 0x5845544F 'OTEX'
-    uint32_t width;
-    uint32_t height;
-    uint32_t format;
-    uint32_t data_size;
-} OtexHeader;
-
 static const char* get_texture_cache_path(const char* original_path, bool is_roughness) {
     static char cache_path[512];
     const char* home = getenv("HOME");
@@ -420,6 +663,7 @@ static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const cha
                 if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader), &texture->loaded)) {
                     if (finalize_texture(ctx, texture, header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
                         texture->width = header.width; texture->height = header.height;
+                        texture->status = TEXTURE_STATUS_READY;
                         return textureCount++;
                     }
                 }
@@ -429,67 +673,45 @@ static int32_t texture_pool_load_roughness_to_gltf(VulkanContext* ctx, const cha
         }
     }
 
-    fprintf(stdout, "\033[33m[TEXTURE] Cache Miss Roughness. Decoding: %s\033[0m\n", roughPath);
+    fprintf(stdout, "\033[33m[TEXTURE] Cache Miss Roughness. Queueing Background Cook: %s\033[0m\n", roughPath);
+    if (textureCount >= MAX_TEXTURES) return -1;
 
-    int w, h, ch;
+    int32_t tIdx = textureCount++;
+    Texture2D* texture = &texturePool[tIdx];
 
-    if (strstr(roughPath, ".exr")) {
-        float* floatPixels = load_exr_as_float(roughPath, &w, &h, false, true);
-        if (!floatPixels) return -1;
-
-        FILE* fout = fopen(cache_path, "wb");
-        if (fout) {
-            OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(w * h * 16) };
-            fwrite(&header, sizeof(OtexHeader), 1, fout);
-            fwrite(floatPixels, 1, header.data_size, fout);
-            fclose(fout);
-        }
-
-        if (textureCount >= MAX_TEXTURES) { free(floatPixels); return -1; }
-        if (load_texture_from_float_pixels(ctx, floatPixels, w, h, &texturePool[textureCount])) {
-            free(floatPixels);
-            return textureCount++;
-        }
-        free(floatPixels);
-        return -1;
+    // AAA Instant metadata parsing for Editor UI sizing
+    int w = 1, h = 1, ch;
+    if (stbi_info(roughPath, &w, &h, &ch)) {
+        texture->width = w;
+        texture->height = h;
+    } else {
+        texture->width = 1;
+        texture->height = 1;
     }
 
-    stbi_uc* roughPixels = stbi_load(roughPath, &w, &h, &ch, 1);
-    if (!roughPixels) {
-        fprintf(stderr, "[WARNING] Failed to load roughness: %s\n", roughPath);
-        return -1;
+    texture->status = TEXTURE_STATUS_QUEUED_FOR_COOKING;
+
+    // Pre-allocate bindless slot to eliminate gray flickering
+    if (texture->bindlessSlot == 0) {
+        texture->bindlessSlot = ctx->bindlessTextureCount++;
+        bindlessRegisterTexture(ctx, texture->bindlessSlot, dummyWhiteTexture.view, dummyWhiteTexture.sampler);
     }
 
-    size_t size = (size_t)w * h * 4;
-    stbi_uc* packed = malloc(size);
-    for (int i = 0; i < w * h; i++) {
-        packed[i*4 + 0] = 255;             // AO default
-        packed[i*4 + 1] = roughPixels[i];  // Roughness correctly packed in G!
-        packed[i*4 + 2] = 0;               // Metallic default
-        packed[i*4 + 3] = 255;
-    }
-    free(roughPixels);
+    strncpy(texturePoolPaths[tIdx], roughPath, 511);
+    texturePoolIsRoughness[tIdx] = true;
 
-    if (textureCount >= MAX_TEXTURES) {
-        free(packed);
-        return -1;
+    pthread_mutex_lock(&cooker_mutex);
+    uint32_t next = (cooker_tail + 1) % MAX_COOKER_JOBS;
+    if (next != cooker_head) {
+        strncpy(cooker_queue[cooker_tail].filepath, roughPath, 511);
+        cooker_queue[cooker_tail].pool_index = tIdx;
+        cooker_queue[cooker_tail].is_roughness = true;
+        cooker_tail = next;
+        pthread_cond_signal(&cooker_cond);
     }
+    pthread_mutex_unlock(&cooker_mutex);
 
-FILE* fout = fopen(cache_path, "wb");
-    if (fout) {
-        OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)(w * h * 4) };
-        fwrite(&header, sizeof(OtexHeader), 1, fout);
-        fwrite(packed, 1, header.data_size, fout);
-        fclose(fout);
-    }
-
-    bool ok = load_texture_from_pixels(ctx, packed, w, h, &texturePool[textureCount]);
-    free(packed); // Always free the packed roughness buffer after uploading it to the GPU!
-
-    if (ok) {
-        return textureCount++;
-    }
-    return -1;
+    return tIdx;
 }
 
 Material load_pbr_material(const char* albedoPath, const char* normalPath, const char* roughnessPath) {
@@ -685,7 +907,64 @@ int alloc_slot(mat4 model) {
 
 void begin_frame(void) {
     pump_async_uploads(&context); // Garbage collect finished staging buffers asynchronously
+
+    // Async GPU Upload Pipeline: Pump compiled cache files back to VRAM
+    for (uint32_t i = 0; i < textureCount; i++) {
+        if (texturePool[i].status == TEXTURE_STATUS_READY_FOR_UPLOAD) {
+            texturePool[i].status = TEXTURE_STATUS_UPLOADING;
+            texturePool[i].loaded = false; // Arm the DMA fence flag
+
+            if (texturePoolIsRoughness[i]) {
+                const char* cache_path = get_texture_cache_path(texturePoolPaths[i], true);
+                FILE* f = fopen(cache_path, "rb");
+                if (f) {
+                    OtexHeader header;
+                    if (fread(&header, sizeof(OtexHeader), 1, f) == 1) {
+                        alloc_texture_image(&context, header.width, header.height, header.format, &texturePool[i].image, &texturePool[i].memory);
+                        upload_file_to_image_direct(&context, cache_path, header.data_size, texturePool[i].image, header.width, header.height, header.format, sizeof(OtexHeader), &texturePool[i].loaded);
+                        finalize_texture(&context, &texturePool[i], header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+                        texturePool[i].width = header.width; texturePool[i].height = header.height;
+                    }
+                    fclose(f);
+                }
+            } else {
+                char dds_path[512];
+                strncpy(dds_path, texturePoolPaths[i], sizeof(dds_path) - 1);
+                char* ext = strrchr(dds_path, '.');
+                if (ext) strcpy(ext, ".dds");
+
+                const char* dds_cache = get_texture_cache_path(dds_path, false);
+                if (ext && load_texture_dds(&context, dds_cache, &texturePool[i])) {
+                    // load_texture_dds handles async flag setting
+                } else {
+                    const char* cache_path = get_texture_cache_path(texturePoolPaths[i], false);
+                    FILE* f = fopen(cache_path, "rb");
+                    if (f) {
+                        OtexHeader header;
+                        if (fread(&header, sizeof(OtexHeader), 1, f) == 1) {
+                            alloc_texture_image(&context, header.width, header.height, header.format, &texturePool[i].image, &texturePool[i].memory);
+                            upload_file_to_image_direct(&context, cache_path, header.data_size, texturePool[i].image, header.width, header.height, header.format, sizeof(OtexHeader), &texturePool[i].loaded);
+                            finalize_texture(&context, &texturePool[i], header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+                            texturePool[i].width = header.width; texturePool[i].height = header.height;
+                        }
+                        fclose(f);
+                    }
+                }
+            }
+        }
+
+        // Zero-flicker DMA validation
+        // Only swap the global bindless slot ONCE the GPU fence signals the DMA transfer is fully complete
+        if (texturePool[i].status == TEXTURE_STATUS_UPLOADING && texturePool[i].loaded == true) {
+            bindlessRegisterTexture(&context, texturePool[i].bindlessSlot, texturePool[i].view, texturePool[i].sampler);
+            texturePool[i].status = TEXTURE_STATUS_READY;
+            markMeshesSSBODirty(&context); // Force SSBO to drop the -1 fallback and use the real texture slot
+            fprintf(stdout, "\033[36m[GPU PUMP] Zero-flicker swap complete! Texture %d is live.\033[0m\n", i);
+        }
+    }
+
     frame_index = context.currentFrame;
+
     dynamic_draw_count = 0;
     vertex_count = 0;
     line_renderer_clear();
@@ -1439,11 +1718,12 @@ static bool upload_file_to_image_direct(VulkanContext* ctx, const char* filepath
         return false;
     }
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+    VkCommandBuffer cmd = begin_async_cmd(ctx);
     transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     copyBufferToImage(cmd, stagingBuf, image, w, h);
     transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    end_async_cmd(cmd);
     submit_async_upload(ctx, stagingBuf, stagingMem, cmd, loaded_flag);
     return true;
 }
@@ -1480,11 +1760,12 @@ static bool upload_pixels_to_image(VulkanContext* ctx, unsigned char* pixels,
     memcpy(mapped, pixels, imageSize);
     vkUnmapMemory(ctx->device, stagingMem);
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+    VkCommandBuffer cmd = begin_async_cmd(ctx);
     transitionImageLayout(cmd, image, fmt, srcLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     copyBufferToImage(cmd, stagingBuf, image, w, h);
     transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    end_async_cmd(cmd);
     submit_async_upload(ctx, stagingBuf, stagingMem, cmd, loaded_flag);
     return true;
 }
@@ -1548,8 +1829,12 @@ static bool finalize_texture_mips(VulkanContext* ctx, Texture2D* texture, VkForm
     VkDescriptorImageInfo dii = { .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = texture->view, .sampler = texture->sampler };
     VkWriteDescriptorSet wds = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = texture->descriptorSet, .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dii };
     vkUpdateDescriptorSets(ctx->device, 1, &wds, 0, NULL);
-    texture->bindlessSlot = ctx->bindlessTextureCount;
-    bindlessRegisterTexture(ctx, texture->bindlessSlot, texture->view, texture->sampler);
+    if (texture->bindlessSlot == 0) {
+        texture->bindlessSlot = ctx->bindlessTextureCount++;
+    }
+    if (texture->status != TEXTURE_STATUS_UPLOADING) {
+        bindlessRegisterTexture(ctx, texture->bindlessSlot, texture->view, texture->sampler);
+    }
     return true;
 }
 
@@ -1599,8 +1884,13 @@ static bool finalize_texture(VulkanContext* ctx, Texture2D* texture,
     vkUpdateDescriptorSets(ctx->device, 1, &wds, 0, NULL);
 
     /* Register into bindless array */
-    texture->bindlessSlot = ctx->bindlessTextureCount;
-    bindlessRegisterTexture(ctx, texture->bindlessSlot, texture->view, texture->sampler);
+    if (texture->bindlessSlot == 0) {
+        texture->bindlessSlot = ctx->bindlessTextureCount++;
+    }
+
+    if (texture->status != TEXTURE_STATUS_UPLOADING) {
+        bindlessRegisterTexture(ctx, texture->bindlessSlot, texture->view, texture->sampler);
+    }
 
     return true;
 }
@@ -1793,7 +2083,7 @@ static bool load_texture_dds(VulkanContext* ctx, const char* filepath, Texture2D
     vkUnmapMemory(ctx->device, stagingMem);
     fclose(f);
 
-    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+    VkCommandBuffer cmd = begin_async_cmd(ctx);
 
     VkImageMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = texture->image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipMapCount, 0, 1}, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
@@ -1813,6 +2103,7 @@ static bool load_texture_dds(VulkanContext* ctx, const char* filepath, Texture2D
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 
+    end_async_cmd(cmd);
     submit_async_upload(ctx, stagingBuf, stagingMem, cmd, &texture->loaded);
 
     if (finalize_texture_mips(ctx, texture, format, VK_SAMPLER_ADDRESS_MODE_REPEAT, mipMapCount)) {
@@ -1828,20 +2119,19 @@ bool load_texture_ex(VulkanContext* ctx, const char* filename, unsigned char* me
     char* ext = strrchr(dds_path, '.');
     if (ext) strcpy(ext, ".dds");
 
-    // 1. Check local offline-compressed .dds first (only if it's a real file)
     if (!mem_data && ext && load_texture_dds(ctx, dds_path, texture)) {
         fprintf(stdout, "\033[36m[TEXTURE] AAA Pipeline: Zero-Copy Local DDS Loaded -> %s\033[0m\n", dds_path);
+        texture->status = TEXTURE_STATUS_READY;
         return true;
     }
 
-    // 2. Check the engine's JIT-compiled .dds cache
     const char* dds_cache = get_texture_cache_path(dds_path, false);
     if (ext && load_texture_dds(ctx, dds_cache, texture)) {
         fprintf(stdout, "\033[32m[TEXTURE] Cache Hit (JIT DDS): %s\033[0m\n", dds_cache);
+        texture->status = TEXTURE_STATUS_READY;
         return true;
     }
 
-    // 3. Check the .otex cache (used primarily for HDR EXRs that skip DDS)
     const char* cache_path = get_texture_cache_path(filename, false);
     FILE* f = fopen(cache_path, "rb");
     if (f) {
@@ -1853,6 +2143,7 @@ bool load_texture_ex(VulkanContext* ctx, const char* filename, unsigned char* me
                 if (upload_file_to_image_direct(ctx, cache_path, header.data_size, texture->image, header.width, header.height, header.format, sizeof(OtexHeader), &texture->loaded)) {
                     if (finalize_texture(ctx, texture, header.format, VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
                         texture->width = header.width; texture->height = header.height;
+                        texture->status = TEXTURE_STATUS_READY;
                         return true;
                     }
                 }
@@ -1862,98 +2153,53 @@ bool load_texture_ex(VulkanContext* ctx, const char* filename, unsigned char* me
         }
     }
 
-    fprintf(stdout, "\033[33m[TEXTURE] Cache Miss. Decoding: %s\033[0m\n", filename);
-
-    int w, h, ch;
-
-    // EXR HDR textures stay uncompressed (32-bit float) to preserve physical light values
-    if (strstr(filename, ".exr")) {
-        bool is_normal = (strstr(filename, "nor") != NULL);
-        float* float_pixels = load_exr_as_float(filename, &w, &h, is_normal, false);
-        if (!float_pixels) return false;
-
-        f = fopen(cache_path, "wb");
-        if (f) {
-            OtexHeader header = { 0x5845544F, (uint32_t)w, (uint32_t)h, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(w * h * 16) };
-            fwrite(&header, sizeof(OtexHeader), 1, f);
-            fwrite(float_pixels, 1, header.data_size, f);
-            fclose(f);
-        }
-
-        bool res = load_texture_from_float_pixels(ctx, float_pixels, w, h, texture);
-        free(float_pixels);
-        return res;
-    }
-
-    // Standard LDR textures (PNG/JPG) get JIT compiled into BC3 (DXT5) DDS files
-    unsigned char* pixels = NULL;
     if (mem_data) {
-        pixels = stbi_load_from_memory(mem_data, (int)mem_size, &w, &h, &ch, STBI_rgb_alpha);
+        int w, h, ch;
+        unsigned char* pixels = stbi_load_from_memory(mem_data, (int)mem_size, &w, &h, &ch, STBI_rgb_alpha);
+        if (!pixels) return false;
+        bool ok = load_texture_from_pixels(ctx, pixels, w, h, texture);
+        stbi_image_free(pixels);
+        if(ok) texture->status = TEXTURE_STATUS_READY;
+        return ok;
+    }
+
+    fprintf(stdout, "\033[33m[TEXTURE] Cache Miss. Queueing Background Cook: %s\033[0m\n", filename);
+
+    // Instant metadata parsing for Editor UI sizing
+    int w = 1, h = 1, ch;
+    if (stbi_info(filename, &w, &h, &ch)) {
+        texture->width = w;
+        texture->height = h;
     } else {
-        pixels = stbi_load(filename, &w, &h, &ch, STBI_rgb_alpha);
+        texture->width = 1;
+        texture->height = 1;
     }
 
-    if (!pixels) {
-        fprintf(stderr, "[WARNING] Failed to load texture: %s\n", filename);
-        return false;
+    texture->status = TEXTURE_STATUS_QUEUED_FOR_COOKING;
+
+    // Pre-allocate bindless slot to eliminate gray flickering
+    if (texture->bindlessSlot == 0) {
+        texture->bindlessSlot = ctx->bindlessTextureCount++;
+        bindlessRegisterTexture(ctx, texture->bindlessSlot, dummyWhiteTexture.view, dummyWhiteTexture.sampler);
     }
 
-    fprintf(stdout, "\033[35m[COOKER] JIT Compressing %s to BC3 (DXT5)...\033[0m\n", filename);
+    int32_t tIdx = (int32_t)(texture - texturePool);
 
-    uint32_t num_blocks_x = (w + 3) / 4;
-    uint32_t num_blocks_y = (h + 3) / 4;
-    uint32_t dxt_size = num_blocks_x * num_blocks_y * 16;
-    unsigned char* dxt_data = malloc(dxt_size);
+    strncpy(texturePoolPaths[tIdx], filename, 511);
+    texturePoolIsRoughness[tIdx] = false;
 
-    for (uint32_t by = 0; by < num_blocks_y; by++) {
-        for (uint32_t bx = 0; bx < num_blocks_x; bx++) {
-            unsigned char block[64];
-            for (uint32_t y = 0; y < 4; y++) {
-                for (uint32_t x = 0; x < 4; x++) {
-                    uint32_t px = (bx * 4) + x;
-                    uint32_t py = (by * 4) + y;
-                    // Clamp to edge for non-power-of-two textures
-                    uint32_t idx = ((py < h ? py : h - 1) * w + (px < w ? px : w - 1)) * 4;
-                    memcpy(&block[(y * 4 + x) * 4], &pixels[idx], 4);
-                }
-            }
-            // Compress the 4x4 block into 16 bytes using STB_DXT_NORMAL quality
-            stb_compress_dxt_block(&dxt_data[(by * num_blocks_x + bx) * 16], block, 1, STB_DXT_NORMAL);
-        }
+    pthread_mutex_lock(&cooker_mutex);
+    uint32_t next = (cooker_tail + 1) % MAX_COOKER_JOBS;
+    if (next != cooker_head) {
+        strncpy(cooker_queue[cooker_tail].filepath, filename, 511);
+        cooker_queue[cooker_tail].pool_index = tIdx;
+        cooker_queue[cooker_tail].is_roughness = false;
+        cooker_tail = next;
+        pthread_cond_signal(&cooker_cond);
     }
+    pthread_mutex_unlock(&cooker_mutex);
 
-    char out_dds_path[512];
-    strncpy(out_dds_path, filename, sizeof(out_dds_path) - 1);
-    char* out_ext = strrchr(out_dds_path, '.');
-    if (out_ext) strcpy(out_ext, ".dds");
-    const char* out_dds_cache = get_texture_cache_path(out_dds_path, false);
-
-    FILE* fdds = fopen(out_dds_cache, "wb");
-    if (fdds) {
-        uint32_t magic = DDS_MAGIC;
-        DDS_HEADER header = {0};
-        header.dwSize = 124;
-        header.dwFlags = 0x1007 | 0x80000; // CAPS | HEIGHT | WIDTH | PIXELFORMAT | LINEARSIZE
-        header.dwHeight = h;
-        header.dwWidth = w;
-        header.dwPitchOrLinearSize = dxt_size;
-        header.dwMipMapCount = 1;
-        header.ddspf.dwSize = 32;
-        header.ddspf.dwFlags = 0x4; // DDPF_FOURCC
-        header.ddspf.dwFourCC = 0x35545844; // "DXT5"
-        header.dwCaps = 0x1000; // DDSCAPS_TEXTURE
-
-        fwrite(&magic, 4, 1, fdds);
-        fwrite(&header, sizeof(DDS_HEADER), 1, fdds);
-        fwrite(dxt_data, 1, dxt_size, fdds);
-        fclose(fdds);
-    }
-
-    free(dxt_data);
-    stbi_image_free(pixels);
-
-    // Pipe the newly generated DDS right back into the engine's AAA loader
-    return load_texture_dds(ctx, out_dds_cache, texture);
+    return true;
 }
 
 bool load_texture(VulkanContext* ctx, const char* filename, Texture2D* texture) {

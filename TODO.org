@@ -88,7 +88,8 @@ missing
 - [ ] Parallax Occlusion Mapping - Togglable per material.
 - [ ] GPU IK
 
-* TODO Performance [2/7]
+* TODO Performance [2/8]
+- [ ] Mesh shaders
 - [ ] Serialize IBLs, Materials, GLTFs and Pipelines on quit so it restarts istantly
 - [ ] As I get closer to a texture the FPS drops drastically (Investigate mipmap generation, texture cache thrashing, or lack of anisotropic filtering limits).
 - [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they hit the rasterizer.

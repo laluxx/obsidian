@@ -353,7 +353,6 @@ static void keybinding_selected(void* data) {
 
 void vertico_show_keybindings() {
     vertico_clear_candidates();
-    printf("IT WORKED!\n");
 
     // Add all keybindings as candidates
     for (size_t i = 0; i < keymap.count; i++) {
