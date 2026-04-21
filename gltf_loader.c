@@ -9,7 +9,8 @@
 static int32_t gltf_texture_indices[MAX_TEXTURES];
 static size_t gltf_texture_count = 0;
 
-#define OMDL_MAGIC 0x4C444D4F // 'OMDL'
+// Bumped magic to force rebuild of OMDL files since OmdlNode now has a name field!
+#define OMDL_MAGIC 0x4C444D50 // 'OMDP'
 
 typedef struct {
     uint32_t magic;
@@ -24,58 +25,6 @@ typedef struct {
     uint32_t total_channels;
     uint32_t total_floats;
 } OmdlHeader;
-
-// AAA Data-Oriented Flat Node Hierarchy
-typedef struct {
-    int32_t parent;     // -1 if root
-    vec3 translation;
-    versor rotation;
-    vec3 scale;
-    mat4 base_matrix;   // Pre-computed fallback for static/matrix-only nodes
-    int32_t mesh_idx;   // Relative to instance->mesh_start_index
-    int32_t skin_idx;
-} OmdlNode;
-
-typedef struct {
-    uint32_t joints_count;
-    uint32_t joints_offset; // Index into a flat uint32_t array
-    uint32_t ibm_offset;    // Index into a flat mat4 array
-} OmdlSkin;
-
-typedef struct {
-    uint32_t target_node; // Index into OmdlNode array
-    uint32_t path_type;   // 0=T, 1=R, 2=S, 3=W
-    uint32_t keyframe_count;
-    uint32_t times_offset;
-    uint32_t values_offset;
-} OmdlChannel;
-
-typedef struct {
-    char name[64];
-    float duration;
-    uint32_t channel_count;
-    uint32_t channel_offset;
-} OmdlAnimation;
-
-// The monolithic runtime struct that replaces cgltf_data
-typedef struct {
-    uint32_t node_count;
-    OmdlNode* nodes;
-    mat4* world_transforms; // Pre-allocated scratchpad for fast hierarchy evaluation
-    mat4* local_transforms; // AAA FIX: Pre-allocated to avoid frame allocation overhead
-    bool* node_resolved;    // AAA FIX: Pre-allocated for topological sorting
-    uint32_t* traversal_stack; // AAA FIX: Iterative topological sort stack
-
-    uint32_t skin_count;
-    OmdlSkin* skins;
-    uint32_t* skin_joints;
-    mat4* skin_ibms;
-
-    uint32_t anim_count;
-    OmdlAnimation* anims;
-    OmdlChannel* channels;
-    float* anim_floats; // Massive flat array holding ALL keyframes and times
-} OmdlSceneGraph;
 
 typedef struct {
     char name[256];
@@ -1036,9 +985,11 @@ bool load_gltf(const char* filepath, Scene* scene) {
         osg->nodes = calloc(data->nodes_count, sizeof(OmdlNode));
         for (size_t i = 0; i < data->nodes_count; i++) {
             cgltf_node* n = &data->nodes[i];
+            strncpy(osg->nodes[i].name, n->name ? n->name : "Bone", 63);
             osg->nodes[i].parent = n->parent ? (int32_t)(n->parent - data->nodes) : -1;
             osg->nodes[i].mesh_idx = -1;
             osg->nodes[i].skin_idx = n->skin ? (int32_t)(n->skin - data->skins) : -1;
+            osg->nodes[i].expanded = true;
 
             // Extract valid base matrix for hierarchy resolution
             cgltf_node_transform_local(n, (float*)osg->nodes[i].base_matrix);

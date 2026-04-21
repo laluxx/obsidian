@@ -20,6 +20,60 @@ typedef struct {
     AnimationChannel* channels;
 } Animation;
 
+// AAA Data-Oriented Flat Node Hierarchy
+typedef struct {
+    char name[64];
+    int32_t parent;     // -1 if root
+    vec3 translation;
+    versor rotation;
+    vec3 scale;
+    mat4 base_matrix;   // Pre-computed fallback for static/matrix-only nodes
+    int32_t mesh_idx;   // Relative to instance->mesh_start_index
+    int32_t skin_idx;
+    bool expanded;      // UI State
+} OmdlNode;
+
+typedef struct {
+    uint32_t joints_count;
+    uint32_t joints_offset; // Index into a flat uint32_t array
+    uint32_t ibm_offset;    // Index into a flat mat4 array
+} OmdlSkin;
+
+typedef struct {
+    uint32_t target_node; // Index into OmdlNode array
+    uint32_t path_type;   // 0=T, 1=R, 2=S, 3=W
+    uint32_t keyframe_count;
+    uint32_t times_offset;
+    uint32_t values_offset;
+} OmdlChannel;
+
+typedef struct {
+    char name[64];
+    float duration;
+    uint32_t channel_count;
+    uint32_t channel_offset;
+} OmdlAnimation;
+
+// The monolithic runtime struct that replaces cgltf_data
+typedef struct {
+    uint32_t node_count;
+    OmdlNode* nodes;
+    mat4* world_transforms; // Pre-allocated scratchpad for fast hierarchy evaluation
+    mat4* local_transforms; // Pre-allocated to avoid frame allocation overhead
+    bool* node_resolved;    // Pre-allocated for topological sorting
+    uint32_t* traversal_stack; // Iterative topological sort stack
+
+    uint32_t skin_count;
+    OmdlSkin* skins;
+    uint32_t* skin_joints;
+    mat4* skin_ibms;
+
+    uint32_t anim_count;
+    OmdlAnimation* anims;
+    OmdlChannel* channels;
+    float* anim_floats; // Massive flat array holding ALL keyframes and times
+} OmdlSceneGraph;
+
 typedef struct {
     Animation* animations;
     size_t animation_count;

@@ -40,6 +40,9 @@ static int32_t s_icon_mesh = -1;
 static int32_t s_icon_world = -1;
 static int32_t s_icon_visible = -1;
 static int32_t s_icon_hidden = -1;
+static int32_t s_icon_bone = -1;
+
+static float s_ui_dt = 0.0f;
 
 static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
 
@@ -124,6 +127,7 @@ extern void set_active_text_input(void (*cb)(char));
 
 static TreeViewState s_fs_tree_state;
 static TreeViewState s_hier_tree_state;
+static TreeViewState s_bone_tree_state;
 
 #define CACHE_MAX_DIRS 16
 #define CACHE_MAX_FILES 2048
@@ -628,24 +632,93 @@ static void content_area(Panel* p, float px, float py, float pw, float ph,
 
 /// Inspector  (Right panel)
 
-static void draw_field_lock(float cx, float row, const char* label) {
-    if (s_icon_lock >= 0) {
+static void draw_field_icon(float cx, float row, const char* label, int32_t icon_id) {
+    if (icon_id >= 0) {
         float lw = measure_text_width(editor.font, label, 1.0f);
-        Texture2D* tex = texture_pool_get(s_icon_lock);
+        Texture2D* tex = texture_pool_get(icon_id);
         if (tex && tex->loaded) {
-            // Removed the - 6.0f to move the icon exactly 6 pixels UP
-            float icon_y = row - (editor.font->ascent - editor.font->descent) * 0.5f;
-            texture2D((vec2){cx + lw + 8.0f, icon_y}, (vec2){14, 14}, tex, CT.text_dim);
+            float icon_y = row - (editor.font->ascent - editor.font->descent) * 0.5f - 1.0f;
+            texture2D((vec2){cx + lw + 8.0f, icon_y}, (vec2){16, 16}, tex, CT.text_dim);
         }
     }
 }
+typedef struct {
+    void* id;
+    float t;
+    float vel;
+    float color_t;
+} ToggleAnimState;
+static ToggleAnimState s_toggles[128];
+
+static bool field_toggle(float cx, float row, float col2_x, float cw, const char* label, bool* val, int32_t icon_id) {
+    (void)cw;
+    bool changed = false;
+    text(editor.font, label, cx, row, CT.text_dim);
+    draw_field_icon(cx, row, label, icon_id);
+
+    float box_h = editor.font->ascent - editor.font->descent + 6.0f;
+    float box_y = row - editor.font->descent - 3.0f;
+
+    float track_w = 34.0f;
+    float track_h = box_h * 0.7f;
+    float track_y = box_y + (box_h - track_h) * 0.5f;
+    float track_x = col2_x + 8.0f;
+
+    bool hovered = (s_ui_mx >= track_x && s_ui_mx <= track_x + track_w &&
+                    s_ui_my >= track_y && s_ui_my <= track_y + track_h);
+
+    if (hovered && s_ui_mclicked) {
+        *val = !(*val);
+        changed = true;
+    }
+
+    ToggleAnimState* anim = NULL;
+    for (int i = 0; i < 128; i++) {
+        if (s_toggles[i].id == (void*)val) { anim = &s_toggles[i]; break; }
+        if (s_toggles[i].id == NULL) {
+            s_toggles[i].id = (void*)val;
+            s_toggles[i].t = *val ? 1.0f : 0.0f;
+            s_toggles[i].vel = 0.0f;
+            s_toggles[i].color_t = *val ? 1.0f : 0.0f;
+            anim = &s_toggles[i];
+            break;
+        }
+    }
+
+    if (anim) {
+        float target = *val ? 1.0f : 0.0f;
+
+        // Bouncy physics for the thumb
+        float tension = 600.0f;
+        float damp = 22.0f;
+        float accel = (target - anim->t) * tension - anim->vel * damp;
+        anim->vel += accel * s_ui_dt;
+        anim->t += anim->vel * s_ui_dt;
+
+        // Exponential smoothing for the color to prevent green flashes during bounce
+        anim->color_t += (target - anim->color_t) * 15.0f * s_ui_dt;
+
+        Color track_col = lerp_color(CT.bg_deep, CT.success, anim->color_t);
+        vec4 track_rad = {track_h*0.5f, track_h*0.5f, track_h*0.5f, track_h*0.5f};
+        exQuad2D((vec2){track_x, track_y}, (vec2){track_w, track_h}, track_rad, 0.0f, track_col, track_col);
+
+        float thumb_size = track_h - 4.0f;
+        float thumb_min_x = track_x + 2.0f;
+        float thumb_max_x = track_x + track_w - 2.0f - thumb_size;
+        float thumb_x = thumb_min_x + (thumb_max_x - thumb_min_x) * anim->t;
+
+        vec4 thumb_rad = {thumb_size*0.5f, thumb_size*0.5f, thumb_size*0.5f, thumb_size*0.5f};
+        exQuad2D((vec2){thumb_x, track_y + 2.0f}, (vec2){thumb_size, thumb_size}, thumb_rad, 0.0f, CT.text, CT.text);
+    }
+    return changed;
+}
 
 static bool field_vec3(float cx, float row, float col2_x, float cw,
-                       const char* label, float* v, const char* unit, float speed, bool locked) {
+                       const char* label, float* v, const char* unit, float speed, int32_t icon_id) {
     if (!editor.font) return false;
     bool changed = false;
     text(editor.font, label, cx, row, CT.text_dim);
-    if (locked) draw_field_lock(cx, row, label);
+    if (icon_id >= 0) draw_field_icon(cx, row, label, icon_id);
 
     float box_x = col2_x;
     float box_w = (cx + cw) - box_x;
@@ -664,12 +737,12 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
         bool hovered = (s_ui_mx >= hit_x && s_ui_mx <= hit_x + sec_w && s_ui_my >= box_y && s_ui_my <= box_y + box_h);
         void* id = (void*)&v[i];
 
-        if (!locked && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+        if (icon_id < 0 && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
             s_ui_active_id = id;
             s_ui_drag_start_x = (float)s_ui_mx;
         }
 
-        if (!locked && s_ui_active_id == id) {
+        if (icon_id < 0 && s_ui_active_id == id) {
             float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
             GLFWwindow* win = glfwGetCurrentContext();
             if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
@@ -680,7 +753,7 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
             changed = true;
         }
 
-        Color label_col = (!locked && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
+        Color label_col = ((icon_id < 0) && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
 
         float px = hit_x + 6.0f;
         text(editor.font, axis_labels[i], px, row, label_col);
@@ -699,11 +772,11 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
 }
 
 static bool field_vec4_color(float cx, float row, float col2_x, float cw,
-                             const char* label, float* c, bool locked) {
+                             const char* label, float* c, int32_t icon_id) {
     if (!editor.font) return false;
     bool changed = false;
     text(editor.font, label, cx, row, CT.text_dim);
-    if (locked) draw_field_lock(cx, row, label);
+    if (icon_id >= 0) draw_field_icon(cx, row, label, icon_id);
 
     float box_h = editor.font->ascent - editor.font->descent + 6.0f;
     float box_y = row - editor.font->descent - 3.0f;
@@ -716,7 +789,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
     bool swatch_hovered = (s_ui_mx >= swatch_x && s_ui_mx <= swatch_x + swatch_size &&
                            s_ui_my >= box_y + 2.0f && s_ui_my <= box_y + 2.0f + swatch_size);
 
-    if (!locked && swatch_hovered && s_ui_mclicked) {
+    if (icon_id < 0 && swatch_hovered && s_ui_mclicked) {
         float sh = (float)context.swapChainExtent.height;
         float anchor_x = swatch_x - 10.0f; // Open to the left of the swatch to keep it on-screen
         float anchor_y = sh - (box_y + 2.0f + swatch_size * 0.5f);
@@ -738,12 +811,12 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
         bool hovered = (s_ui_mx >= hit_x && s_ui_mx <= hit_x + sec_w && s_ui_my >= box_y && s_ui_my <= box_y + box_h);
         void* id = (void*)&c[i];
 
-        if (!locked && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+        if (icon_id < 0 && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
             s_ui_active_id = id;
             s_ui_drag_start_x = (float)s_ui_mx;
         }
 
-        if (!locked && s_ui_active_id == id) {
+        if (icon_id < 0 && s_ui_active_id == id) {
             float delta = ((float)s_ui_mx - s_ui_drag_start_x) * 0.005f;
             GLFWwindow* win = glfwGetCurrentContext();
             if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
@@ -754,7 +827,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
             changed = true;
         }
 
-        Color label_col = (!locked && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
+        Color label_col = ((icon_id < 0) && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
 
         float px = hit_x + 8.0f;
         text(editor.font, axis_labels[i], px, row, label_col);
@@ -768,7 +841,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
 
 static bool field_float(float cx, float row, float col2_x, float cw,
                         const char* label, float* val, float speed,
-                        bool clamp_val, float min_v, float max_v, bool locked) {
+                        bool clamp_val, float min_v, float max_v, int32_t icon_id) {
     if (!editor.font) return false;
     bool changed = false;
 
@@ -777,12 +850,12 @@ static bool field_float(float cx, float row, float col2_x, float cw,
                     s_ui_my <= row + editor.font->ascent + 3.0f);
     void* id = (void*)val;
 
-    if (!locked && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
+    if (icon_id < 0 && hovered && s_ui_mclicked && s_ui_active_id == NULL) {
         s_ui_active_id = id;
         s_ui_drag_start_x = (float)s_ui_mx;
     }
 
-    if (!locked && s_ui_active_id == id) {
+    if (icon_id < 0 && s_ui_active_id == id) {
         float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
         GLFWwindow* win = glfwGetCurrentContext();
         if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
@@ -796,9 +869,9 @@ static bool field_float(float cx, float row, float col2_x, float cw,
         changed = true;
     }
 
-    Color label_col = (!locked && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? CT.text : CT.text_dim;
+    Color label_col = ((icon_id < 0) && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? CT.text : CT.text_dim;
     text(editor.font, label, cx, row, label_col);
-    if (locked) draw_field_lock(cx, row, label);
+    if (icon_id >= 0) draw_field_icon(cx, row, label, icon_id);
 
     char num[32];
     snprintf(num, sizeof(num), "%.3f", *val);
@@ -815,15 +888,40 @@ static bool field_float(float cx, float row, float col2_x, float cw,
     return changed;
 }
 
+
 static void field_text(float cx, float row, float col2_x, float cw,
-                       const char* label, const char* value, bool locked) {
+                       const char* label, const char* value, int32_t icon_id) {
     (void)cw;
     if (!editor.font) return;
     text(editor.font, label, cx, row, CT.text_dim);
-    if (locked) draw_field_lock(cx, row, label);
+    if (icon_id >= 0) draw_field_icon(cx, row, label, icon_id);
 
     // Read-only text fields (like Geometry) no longer have heavy backgrounds!
     text(editor.font, value, col2_x + 8.0f, row, CT.text);
+}
+
+static bool begin_section(const char* label, bool* is_open, float cx, float* row, float cw, float lh) {
+    float hit_y = *row - editor.font->descent - 3.0f;
+    float header_h = lh;
+    bool hovered = (s_ui_mx >= cx - 4.0f && s_ui_mx <= cx + cw + 4.0f &&
+                    s_ui_my >= hit_y && s_ui_my <= hit_y + header_h);
+
+    if (hovered && s_ui_mclicked) {
+        *is_open = !(*is_open);
+    }
+
+    int32_t icon = *is_open ? editor.file_manager.icon_arrow_down : editor.file_manager.icon_arrow_right;
+    Texture2D* tex = texture_pool_get(icon);
+    if (tex && tex->loaded) {
+        float icon_y = *row - (editor.font->ascent - editor.font->descent) * 0.5f - 1.0f;
+        texture2D((vec2){cx, icon_y}, (vec2){16, 16}, tex, hovered ? CT.text : CT.accent);
+    }
+
+    Color text_col = hovered ? CT.text : CT.accent;
+    text(editor.font, label, cx + 20.0f, *row, text_col);
+
+    *row -= lh + 6.0f;
+    return *is_open;
 }
 
 static void render_image_inspector_content(float cx, float cy, float cw, float ch) {
@@ -838,72 +936,89 @@ static void render_image_inspector_content(float cx, float cy, float cw, float c
     float col2 = cx + strlen("Formatted Mem") * space_w + space_w * 2.0f;
     float row = cy + ch - PAD;
 
-#define SECTION(label) do { \
-    text(editor.font, label, cx, row, CT.accent); \
-    row -= lh + 6.0f; \
-} while(0)
+    static bool s_sec_file_info = true;
+    static bool s_sec_dimensions = true;
+    static bool s_sec_texture_data = true;
 
     // ── File Info ──────────────────────────────────────────────────────────
-    SECTION("File Info");
-    field_text(cx, row, col2, cw, "Name", iv->filename, false);
-    row -= lh + 6.0f;
+    if (begin_section("File Info", &s_sec_file_info, cx, &row, cw, lh)) {
+        field_text(cx, row, col2, cw, "Name", iv->filename, -1);
+        row -= lh + 6.0f;
 
-    const char* ext = strrchr(iv->filename, '.');
-    field_text(cx, row, col2, cw, "Type", ext ? ext : "Unknown", false);
-    row -= lh + 6.0f;
+        const char* ext = strrchr(iv->filename, '.');
+        field_text(cx, row, col2, cw, "Type", ext ? ext : "Unknown", -1);
+        row -= lh + 6.0f;
 
-    char size_str[64];
-    if (iv->file_size < 1024) snprintf(size_str, sizeof(size_str), "%zu Bytes", iv->file_size);
-    else if (iv->file_size < 1024 * 1024) snprintf(size_str, sizeof(size_str), "%.2f KB", iv->file_size / 1024.0f);
-    else snprintf(size_str, sizeof(size_str), "%.2f MB", iv->file_size / (1024.0f * 1024.0f));
-    field_text(cx, row, col2, cw, "Size on Disk", size_str, false);
-    row -= lh + 12.0f;
+        char size_str[64];
+        if (iv->file_size < 1024) snprintf(size_str, sizeof(size_str), "%zu Bytes", iv->file_size);
+        else if (iv->file_size < 1024 * 1024) snprintf(size_str, sizeof(size_str), "%.2f KB", iv->file_size / 1024.0f);
+        else snprintf(size_str, sizeof(size_str), "%.2f MB", iv->file_size / (1024.0f * 1024.0f));
+        field_text(cx, row, col2, cw, "Size on Disk", size_str, -1);
+        row -= lh + 6.0f;
+        row -= 6.0f;
+    }
 
     // ── Dimensions ─────────────────────────────────────────────────────────
-    SECTION("Dimensions");
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%d px", tex->width);
-    field_text(cx, row, col2, cw, "Width", buf, false);
-    row -= lh + 6.0f;
+    if (begin_section("Dimensions", &s_sec_dimensions, cx, &row, cw, lh)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d px", tex->width);
+        field_text(cx, row, col2, cw, "Width", buf, -1);
+        row -= lh + 6.0f;
 
-    snprintf(buf, sizeof(buf), "%d px", tex->height);
-    field_text(cx, row, col2, cw, "Height", buf, false);
-    row -= lh + 6.0f;
+        snprintf(buf, sizeof(buf), "%d px", tex->height);
+        field_text(cx, row, col2, cw, "Height", buf, -1);
+        row -= lh + 6.0f;
 
-    float aspect = (float)tex->width / (float)tex->height;
-    snprintf(buf, sizeof(buf), "%.3f", aspect);
-    field_text(cx, row, col2, cw, "Aspect Ratio", buf, false);
-    row -= lh + 12.0f;
+        float aspect = (float)tex->width / (float)tex->height;
+        snprintf(buf, sizeof(buf), "%.3f", aspect);
+        field_text(cx, row, col2, cw, "Aspect Ratio", buf, -1);
+        row -= lh + 6.0f;
+        row -= 6.0f;
+    }
 
     // ── Texture Data ───────────────────────────────────────────────────────
-    SECTION("Texture Data");
+    if (begin_section("Texture Data", &s_sec_texture_data, cx, &row, cw, lh)) {
+        char buf[64];
+        char size_str[64];
+        // Exact mathematical VRAM usage for an uncompressed RGBA8 texture
+        size_t mem_size = (size_t)tex->width * (size_t)tex->height * 4;
+        snprintf(buf, sizeof(buf), "%zu Bytes", mem_size);
+        field_text(cx, row, col2, cw, "Memory Size", buf, -1);
+        row -= lh + 6.0f;
 
-    // Exact mathematical VRAM usage for an uncompressed RGBA8 texture
-    size_t mem_size = (size_t)tex->width * (size_t)tex->height * 4;
-    snprintf(buf, sizeof(buf), "%zu Bytes", mem_size);
-    field_text(cx, row, col2, cw, "Memory Size", buf, false);
-    row -= lh + 6.0f;
+        if (mem_size < 1024) snprintf(size_str, sizeof(size_str), "%zu B", mem_size);
+        else if (mem_size < 1024 * 1024) snprintf(size_str, sizeof(size_str), "%.2f KB", mem_size / 1024.0f);
+        else snprintf(size_str, sizeof(size_str), "%.2f MB", mem_size / (1024.0f * 1024.0f));
 
-    if (mem_size < 1024) snprintf(size_str, sizeof(size_str), "%zu B", mem_size);
-    else if (mem_size < 1024 * 1024) snprintf(size_str, sizeof(size_str), "%.2f KB", mem_size / 1024.0f);
-    else snprintf(size_str, sizeof(size_str), "%.2f MB", mem_size / (1024.0f * 1024.0f));
+        field_text(cx, row, col2, cw, "Formatted Mem", size_str, -1);
+        row -= lh + 6.0f;
 
-    field_text(cx, row, col2, cw, "Formatted Mem", size_str, false);
-    row -= lh + 6.0f;
-
-    field_text(cx, row, col2, cw, "Internal Format", "RGBA8 Unorm", false);
-    row -= lh + 6.0f;
-    field_text(cx, row, col2, cw, "Color Space", "sRGB", false);
-    row -= lh + 6.0f;
-    field_text(cx, row, col2, cw, "Bit Depth", "8-bit", false);
-    row -= lh + 6.0f;
-    field_text(cx, row, col2, cw, "Has Alpha", "Yes", false);
-    row -= lh + 6.0f;
-    field_text(cx, row, col2, cw, "Alpha Mode", "Straight", false);
-    row -= lh + 12.0f;
-
-#undef SECTION
+        field_text(cx, row, col2, cw, "Internal Format", "RGBA8 Unorm", -1);
+        row -= lh + 6.0f;
+        field_text(cx, row, col2, cw, "Color Space", "sRGB", -1);
+        row -= lh + 6.0f;
+        field_text(cx, row, col2, cw, "Bit Depth", "8-bit", -1);
+        row -= lh + 6.0f;
+        field_text(cx, row, col2, cw, "Has Alpha", "Yes", -1);
+        row -= lh + 6.0f;
+        field_text(cx, row, col2, cw, "Alpha Mode", "Straight", -1);
+        row -= lh + 6.0f;
+        row -= 6.0f;
+    }
 }
+
+
+static void bone_on_select(int index, void* user_data) {
+    (void)user_data;
+    s_bone_tree_state.selected_index = index;
+}
+
+static void bone_on_toggle_expand(int index, void* user_data) {
+    (void)index;
+    OmdlNode* node = (OmdlNode*)user_data;
+    if (node) node->expanded = !node->expanded;
+}
+
 
 static void render_inspector_content(float cx, float cy, float cw, float ch) {
     // Smart Routing: If the Image Viewer is open AND not actively closing, it steals the focus!
@@ -933,139 +1048,323 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
 
     float row = cy + ch - PAD;
 
-#define SECTION(label) do { \
-    text(editor.font, label, cx, row, CT.accent); \
-    row -= lh + 6.0f; \
-} while(0)
+    static bool s_sec_transform = true;
+    static bool s_sec_material = true;
+    static bool s_sec_geometry = true;
+    static bool s_sec_bounds = true;
+    static bool s_sec_animation = true;
 
     // ── Transform ──────────────────────────────────────────────────────────
-    SECTION("Transform");
+    if (begin_section("Transform", &s_sec_transform, cx, &row, cw, lh)) {
+        vec3 pos = {m->model[3][0], m->model[3][1], m->model[3][2]};
+        vec3 euler;
+        glm_euler_angles(m->model, euler);
+        vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
+        vec3 scale = {
+            glm_vec3_norm((vec3){m->model[0][0], m->model[1][0], m->model[2][0]}),
+            glm_vec3_norm((vec3){m->model[0][1], m->model[1][1], m->model[2][1]}),
+            glm_vec3_norm((vec3){m->model[0][2], m->model[1][2], m->model[2][2]})
+        };
 
-    vec3 pos = {m->model[3][0], m->model[3][1], m->model[3][2]};
-    vec3 euler;
-    glm_euler_angles(m->model, euler);
-    vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
-    vec3 scale = {
-        glm_vec3_norm((vec3){m->model[0][0], m->model[1][0], m->model[2][0]}),
-        glm_vec3_norm((vec3){m->model[0][1], m->model[1][1], m->model[2][1]}),
-        glm_vec3_norm((vec3){m->model[0][2], m->model[1][2], m->model[2][2]})
-    };
+        bool transform_changed = false;
+        transform_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f, -1);
+        row -= lh + 6.0f;
+        transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f, -1);
+        row -= lh + 6.0f;
+        transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "m", 0.02f, -1);
+        row -= lh + 6.0f;
+        row -= 6.0f;
 
-    bool transform_changed = false;
-    transform_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f, false);
-    row -= lh + 6.0f;
-    transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f, false);
-    row -= lh + 6.0f;
-    transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "m", 0.02f, false);
-    row -= lh + 12.0f;
-
-    if (transform_changed) {
-        glm_mat4_identity(m->model);
-        glm_translate(m->model, pos);
-        // Reapply rotation: Z, Y, X to maintain standard euler composition
-        glm_rotate_z(m->model, glm_rad(rot_deg[2]), m->model);
-        glm_rotate_y(m->model, glm_rad(rot_deg[1]), m->model);
-        glm_rotate_x(m->model, glm_rad(rot_deg[0]), m->model);
-        glm_scale(m->model, scale);
-        markMeshesSSBODirty(&context);
+        if (transform_changed) {
+            glm_mat4_identity(m->model);
+            glm_translate(m->model, pos);
+            // Reapply rotation: Z, Y, X to maintain standard euler composition
+            glm_rotate_z(m->model, glm_rad(rot_deg[2]), m->model);
+            glm_rotate_y(m->model, glm_rad(rot_deg[1]), m->model);
+            glm_rotate_x(m->model, glm_rad(rot_deg[0]), m->model);
+            glm_scale(m->model, scale);
+            markMeshesSSBODirty(&context);
+        }
     }
 
     // ── Material ───────────────────────────────────────────────────────────
-    SECTION("Material");
+    if (begin_section("Material", &s_sec_material, cx, &row, cw, lh)) {
+        static vec4 s_proxy_emissive = {0};
+        static vec4 s_proxy_attenuation = {0};
+        static int s_proxy_mesh_idx = -1;
 
-    bool mat_changed = false;
-    mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor, false);
-    row -= lh + 6.0f;
+        if (s_proxy_mesh_idx != s->selected_mesh_index || (!s_color_picker.visible && s_ui_active_id == NULL)) {
+            s_proxy_mesh_idx = s->selected_mesh_index;
+            s_proxy_emissive[0] = m->emissiveFactor[0];
+            s_proxy_emissive[1] = m->emissiveFactor[1];
+            s_proxy_emissive[2] = m->emissiveFactor[2];
+            s_proxy_emissive[3] = 1.0f;
 
-    vec4 emissive = {m->emissiveFactor[0], m->emissiveFactor[1], m->emissiveFactor[2], 1.0f};
-    if (field_vec4_color(cx, row, col2, cw, "Emissive", emissive, false)) {
-        m->emissiveFactor[0] = emissive[0];
-        m->emissiveFactor[1] = emissive[1];
-        m->emissiveFactor[2] = emissive[2];
-        mat_changed = true;
-    }
-    row -= lh + 6.0f;
+            s_proxy_attenuation[0] = m->attenuationColor[0];
+            s_proxy_attenuation[1] = m->attenuationColor[1];
+            s_proxy_attenuation[2] = m->attenuationColor[2];
+            s_proxy_attenuation[3] = 1.0f;
+        }
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f, false);
-    row -= lh + 6.0f;
+        bool mat_changed = false;
+        mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor, -1);
+        row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f, false);
-    row -= lh + 6.0f;
+        mat_changed |= field_vec4_color(cx, row, col2, cw, "Emissive", s_proxy_emissive, -1);
+        if (m->emissiveFactor[0] != s_proxy_emissive[0] || m->emissiveFactor[1] != s_proxy_emissive[1] || m->emissiveFactor[2] != s_proxy_emissive[2]) {
+            m->emissiveFactor[0] = s_proxy_emissive[0];
+            m->emissiveFactor[1] = s_proxy_emissive[1];
+            m->emissiveFactor[2] = s_proxy_emissive[2];
+            mat_changed = true;
+        }
+        row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f, false);
-    row -= lh + 6.0f;
+        mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f, -1);
+        row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f, false);
-    row -= lh + 6.0f;
+        mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f, -1);
+        row -= lh + 6.0f;
 
-    mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f, false);
-    row -= lh + 12.0f;
+        mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f, -1);
+        row -= lh + 6.0f;
 
-    if (mat_changed) {
-        markMeshesSSBODirty(&context);
+        mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f, -1);
+        row -= lh + 6.0f;
+
+        mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f, -1);
+        row -= lh + 6.0f;
+
+        mat_changed |= field_float(cx, row, col2_mat, cw, "Thickness", &m->thicknessFactor, 0.01f, true, 0.0f, 100.0f, -1);
+        row -= lh + 6.0f;
+
+        mat_changed |= field_vec4_color(cx, row, col2_mat, cw, "Atten. Color", s_proxy_attenuation, -1);
+        if (m->attenuationColor[0] != s_proxy_attenuation[0] || m->attenuationColor[1] != s_proxy_attenuation[1] || m->attenuationColor[2] != s_proxy_attenuation[2]) {
+            m->attenuationColor[0] = s_proxy_attenuation[0];
+            m->attenuationColor[1] = s_proxy_attenuation[1];
+            m->attenuationColor[2] = s_proxy_attenuation[2];
+            mat_changed = true;
+        }
+        row -= lh + 6.0f;
+
+        mat_changed |= field_float(cx, row, col2_mat, cw, "Atten. Distance", &m->attenuationDistance, 0.1f, true, 0.0f, 1e6f, -1);
+        row -= lh + 6.0f;
+
+        mat_changed |= field_float(cx, row, col2_mat, cw, "Dispersion", &m->dispersion, 0.01f, true, 0.0f, 1.0f, -1);
+        row -= lh + 6.0f;
+        row -= 6.0f;
+
+        if (mat_changed) {
+            markMeshesSSBODirty(&context);
+        }
     }
 
     // ── Geometry ───────────────────────────────────────────────────────────
-    SECTION("Geometry");
-
-    char buf[64];
-    snprintf(buf, sizeof buf, "%u", m->vertexCount);
-    field_text(cx, row, col2_geo, cw, "Vertices", buf, false);
-    row -= lh + 6.0f;
-
-    snprintf(buf, sizeof buf, "%u", m->indexCount);
-    field_text(cx, row, col2_geo, cw, "Indices", buf, false);
-    row -= lh + 6.0f;
-
-    const char* amode = (m->alpha_mode == 0) ? "Opaque" : (m->alpha_mode == 1) ? "Mask" : "Blend";
-    field_text(cx, row, col2_geo, cw, "Alpha Mode", amode, false);
-    row -= lh + 6.0f;
-
-    field_text(cx, row, col2_geo, cw, "Unlit", m->is_unlit ? "Yes" : "No", false);
-    row -= lh + 6.0f;
-
-    if (m->name) {
-        field_text(cx, row, col2_geo, cw, "Name", m->name, false);
+    if (begin_section("Geometry", &s_sec_geometry, cx, &row, cw, lh)) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "%u", m->vertexCount);
+        field_text(cx, row, col2_geo, cw, "Vertices", buf, -1);
         row -= lh + 6.0f;
+
+        snprintf(buf, sizeof buf, "%u", m->indexCount);
+        field_text(cx, row, col2_geo, cw, "Indices", buf, -1);
+        row -= lh + 6.0f;
+
+        if (field_toggle(cx, row, col2_geo, cw, "Visible", &m->visible, -1)) {
+            if (m->node) {
+                scene.tree.nodes[(uint32_t)(uintptr_t)m->node].visible = m->visible;
+            }
+            markMeshesSSBODirty(&context);
+        }
+        row -= lh + 6.0f;
+
+        const char* amode = (m->alpha_mode == 0) ? "Opaque" : (m->alpha_mode == 1) ? "Mask" : "Blend";
+        field_text(cx, row, col2_geo, cw, "Alpha Mode", amode, -1);
+        row -= lh + 6.0f;
+
+        if (m->alpha_mode == 1) {
+            if (field_float(cx, row, col2_geo, cw, "Alpha Cutoff", &m->alpha_cutoff, 0.01f, true, 0.0f, 1.0f, -1)) {
+                markMeshesSSBODirty(&context);
+            }
+            row -= lh + 6.0f;
+        }
+
+        if (field_toggle(cx, row, col2_geo, cw, "Unlit", &m->is_unlit, -1)) {
+            markMeshesSSBODirty(&context);
+        }
+        row -= lh + 6.0f;
+
+        if (m->name) {
+            field_text(cx, row, col2_geo, cw, "Name", m->name, -1);
+            row -= lh + 6.0f;
+        }
+        row -= 6.0f;
     }
 
     // ── Bounds ─────────────────────────────────────────────────────────────
-    SECTION("Bounds");
-    vec3 bmin = {m->aabbMin[0], m->aabbMin[1], m->aabbMin[2]};
-    vec3 bmax = {m->aabbMax[0], m->aabbMax[1], m->aabbMax[2]};
-    field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m", 0.0f, true);
-    row -= lh + 6.0f;
-    field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m", 0.0f, true);
-    row -= lh + 12.0f;
+    if (begin_section("Bounds", &s_sec_bounds, cx, &row, cw, lh)) {
+        vec3 bmin = {m->aabbMin[0], m->aabbMin[1], m->aabbMin[2]};
+        vec3 bmax = {m->aabbMax[0], m->aabbMax[1], m->aabbMax[2]};
+        field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m", 0.0f, s_icon_lock);
+        row -= lh + 6.0f;
+        field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m", 0.0f, s_icon_lock);
+        row -= lh + 6.0f;
+        row -= 6.0f;
+    }
 
-    // ── Animation ──────────────────────────────────────────────────────────
+    // ── Skeleton ──────────────────────────────────────────────────────────
     if (m->jointCount > 0 || m->morphCount > 0) {
-        SECTION("Animation");
+        if (begin_section("Skeleton", &s_sec_animation, cx, &row, cw, lh)) {
 
-        if (m->jointCount > 0) {
-            snprintf(buf, sizeof buf, "%d (off %d)", m->jointCount, m->jointOffset);
-            field_text(cx, row, col2_anim, cw, "Joints", buf, true);
-            row -= lh + 6.0f;
-        }
-        if (m->morphCount > 0) {
-            snprintf(buf, sizeof buf, "%d", m->morphCount);
-            field_text(cx, row, col2_anim, cw, "Morphs", buf, true);
-            row -= lh + 6.0f;
-
-            if (m->morph_data) {
-                for (int i = 0; i < m->morphCount && i < 8; i++) {
-                    char wlbl[16];
-                    snprintf(wlbl, sizeof wlbl, "  [%d]", i);
-                    if (field_float(cx, row, col2_anim, cw, wlbl, &m->morph_data->weights[i], 0.01f, true, 0.0f, 1.0f, false)) {
-                        markMeshesSSBODirty(&context);
+            if (m->jointCount > 0) {
+                GLTFInstance* inst = NULL;
+                for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+                    if (s->selected_mesh_index >= (int)scene.gltf_instances[i].mesh_start_index &&
+                        s->selected_mesh_index < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                        inst = &scene.gltf_instances[i];
+                        break;
                     }
-                    row -= lh + 6.0f;
+                }
+
+                if (inst && inst->gltf_data && m->node) {
+                    OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+                    uint32_t node_idx = (uint32_t)(uintptr_t)m->node;
+                    int32_t skin_idx = osg->nodes[node_idx].skin_idx;
+
+                    if (skin_idx >= 0) {
+                        OmdlSkin* skin = &osg->skins[skin_idx];
+                        bool is_joint[4096] = {false};
+                        for (uint32_t j = 0; j < skin->joints_count; j++) {
+                            uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                            if (j_node < 4096) is_joint[j_node] = true;
+                        }
+
+                        static TreeViewItem bone_items[1024];
+                        int b_item_count = 0;
+
+                        typedef struct { int32_t idx; int32_t depth; } BStackEntry;
+                        static BStackEntry bstack[1024];
+                        int btop = 0;
+
+                        int32_t rev_roots[256];
+                        int rev_rcount = 0;
+                        for (uint32_t j = 0; j < skin->joints_count; j++) {
+                            uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                            int32_t p = osg->nodes[j_node].parent;
+                            if (p < 0 || !is_joint[p]) {
+                                rev_roots[rev_rcount++] = j_node;
+                            }
+                        }
+
+                        for (int i = rev_rcount - 1; i >= 0; i--) {
+                            bstack[btop++] = (BStackEntry){rev_roots[i], 0};
+                        }
+
+                        while (btop > 0 && b_item_count < 1024) {
+                            BStackEntry e = bstack[--btop];
+                            int32_t curr_idx = e.idx;
+                            int32_t d = e.depth;
+                            OmdlNode* curr_node = &osg->nodes[curr_idx];
+
+                            TreeViewItem* tv = &bone_items[b_item_count++];
+                            tv->name = curr_node->name;
+                            tv->type = TREE_ITEM_FILE;
+                            tv->depth = d;
+                            tv->expanded = curr_node->expanded;
+                            tv->selected = (s_bone_tree_state.selected_index == b_item_count - 1);
+                            tv->icon_expanded = editor.file_manager.icon_arrow_down;
+                            tv->icon_collapsed = editor.file_manager.icon_arrow_right;
+                            tv->icon_leaf = s_icon_bone;
+                            tv->icon_tint = (Color){1.0f, 1.0f, 1.0f, 1.0f};
+                            tv->show_dot = false;
+                            tv->has_visibility = false;
+                            tv->user_data = curr_node;
+
+                            int32_t rev_children[256];
+                            int rev_ccount = 0;
+                            for (uint32_t j = 0; j < skin->joints_count; j++) {
+                                uint32_t c_node = osg->skin_joints[skin->joints_offset + j];
+                                if (osg->nodes[c_node].parent == curr_idx) {
+                                    rev_children[rev_ccount++] = c_node;
+                                }
+                            }
+
+                            if (rev_ccount > 0) tv->type = TREE_ITEM_GROUP;
+
+                            if (curr_node->expanded) {
+                                for (int i = rev_ccount - 1; i >= 0; i--) {
+                                    if (btop < 1024) {
+                                        bstack[btop++] = (BStackEntry){rev_children[i], d + 1};
+                                    }
+                                }
+                            }
+                        }
+
+                        float tree_h = 320.0f;
+                        row -= tree_h;
+                        float tab_y = row + tree_h;
+
+                        exQuad2D((vec2){cx, row}, (vec2){cw, tree_h}, (vec4){4,4,4,4}, 0.0f, CT.bg_deepest, CT.bg_deepest);
+
+                        static const TreeViewCallbacks bone_cb = {
+                            .on_select = bone_on_select,
+                            .on_toggle_expand = bone_on_toggle_expand,
+                        };
+
+                        float tree_pad = 8.0f;
+                        tree_view_render(
+                            &s_bone_tree_state, bone_items, b_item_count,
+                            cx + tree_pad, row, cw - tree_pad * 2.0f, tree_h, tab_y + 6.0f, editor.font,
+                            s_ui_mx, s_ui_my, s_ui_mdown, s_ui_mclicked, NULL, &bone_cb
+                        );
+                        row -= 24.0f; // Added extra vertical padding before Transform fields
+
+                        if (s_bone_tree_state.selected_index >= 0 && s_bone_tree_state.selected_index < b_item_count) {
+                            OmdlNode* bnode = (OmdlNode*)bone_items[s_bone_tree_state.selected_index].user_data;
+
+                            vec3 pos; glm_vec3_copy(bnode->translation, pos);
+                            vec3 scale; glm_vec3_copy(bnode->scale, scale);
+
+                            vec3 euler;
+                            mat4 rmat; glm_quat_mat4(bnode->rotation, rmat);
+                            glm_euler_angles(rmat, euler);
+                            vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
+
+                            bool b_changed = false;
+                            b_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f, -1); row -= lh + 6.0f;
+                            b_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f, -1); row -= lh + 6.0f;
+                            b_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "x", 0.02f, -1); row -= lh + 6.0f;
+
+                            if (b_changed) {
+                                glm_vec3_copy(pos, bnode->translation);
+                                glm_vec3_copy(scale, bnode->scale);
+                                mat4 new_rmat; glm_mat4_identity(new_rmat);
+                                glm_rotate_z(new_rmat, glm_rad(rot_deg[2]), new_rmat);
+                                glm_rotate_y(new_rmat, glm_rad(rot_deg[1]), new_rmat);
+                                glm_rotate_x(new_rmat, glm_rad(rot_deg[0]), new_rmat);
+                                glm_mat4_quat(new_rmat, bnode->rotation);
+                            }
+                        }
+                        row -= 6.0f;
+                    }
+                }
+            }
+
+            if (m->morphCount > 0) {
+                text(editor.font, "Morph Targets", cx, row, CT.accent);
+                row -= lh + 6.0f;
+                if (m->morph_data) {
+                    for (int i = 0; i < m->morphCount && i < 8; i++) {
+                        char wlbl[32];
+                        snprintf(wlbl, sizeof wlbl, "  Target %d", i);
+                        if (field_float(cx, row, col2_anim, cw, wlbl, &m->morph_data->weights[i], 0.01f, true, 0.0f, 1.0f, -1)) {
+                            markMeshesSSBODirty(&context);
+                        }
+                        row -= lh + 6.0f;
+                    }
                 }
             }
         }
     }
-
-#undef SECTION
 }
 
 void file_manager_refresh(void);
@@ -2060,6 +2359,7 @@ void editor_init(void) {
     s_icon_world = texture_pool_add_svg(&context, "./assets/icons/WorldEnvironment.svg", 16, 16);
     s_icon_visible = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityVisible.svg", 16, 16);
     s_icon_hidden = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityHidden.svg", 16, 16);
+    s_icon_bone = texture_pool_add_svg(&context, "./assets/icons/Bone.svg", 16, 16);
 
     file_manager_navigate("./assets");
 
@@ -2092,6 +2392,7 @@ void editor_init(void) {
     image_viewer_init(&s_image_viewer);
     tree_view_state_init(&s_fs_tree_state);
     tree_view_state_init(&s_hier_tree_state);
+    tree_view_state_init(&s_bone_tree_state);
 
     editor.last_time   = glfwGetTime();
     editor.initialized = true;
@@ -2118,6 +2419,7 @@ void editor_update(void) {
     float  dt  = (float)(now - editor.last_time);
     editor.last_time = now;
     if (dt > EDITOR_MAX_DT) dt = EDITOR_MAX_DT;
+    s_ui_dt = dt;
 
     if (s_ui_active_id == &editor.panels[PANEL_BOTTOM].size) {
         float sh = (float)context.swapChainExtent.height;

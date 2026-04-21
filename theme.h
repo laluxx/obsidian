@@ -8,6 +8,7 @@ typedef struct {
     Color bg;
     Color bg_alt;
     Color bg_deep;
+    Color bg_deepest;
     Color text;
     Color text_dim;
     Color border;
@@ -21,6 +22,8 @@ typedef struct {
     Color x_dark;
     Color y_dark;
     Color z_dark;
+    Color bone;
+    Color bone_selected;
     Color fs_hovered;
     Color fs_selected;
     Color fs_tree;

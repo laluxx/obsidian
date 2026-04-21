@@ -71,7 +71,7 @@ void tree_view_render(
 
     for (int i = 0; i < count; i++) {
         const TreeViewItem* item = &items[i];
-        if (list_y < cy) break;
+        if (list_y - lh < cy) break;
 
         int   D      = item->depth;
         if (D < 64) current_ancestors[D] = i;

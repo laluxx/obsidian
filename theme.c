@@ -69,6 +69,7 @@ void initThemes() {
     themes[0] = (ColorScheme){
         .name                  = "obsidian",
         .bg                    = hexToColor("#131314"),
+        .bg_deepest            = hexToColor("#101010"),
         .bg_alt                = hexToColor("#1E1F20"),
         .bg_deep               = hexToColor("#282A2C"),
         .cursor                = hexToColor("#E3E3E3"),
@@ -88,6 +89,8 @@ void initThemes() {
         .x_dark                = hexToColor("#7D3E49"),
         .y_dark                = hexToColor("#6E8440"),
         .z_dark                = hexToColor("#436388"),
+        .bone                  = hexToColor("#FFE483"),
+        .bone_selected         = hexToColor("#E46000"),
         .fs_hovered            = hexToColor("#383838"),
         .fs_selected           = hexToColor("#494949"),
         .fs_tree               = hexToColor("#545454"),
