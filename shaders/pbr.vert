@@ -50,7 +50,7 @@ struct MeshData {
     float attenuationColorB;
     float attenuationDistance;
     float dispersion;
-    float _pad0;
+    int   isVisible;
     float _pad1;
 };
 
@@ -122,6 +122,12 @@ void main() {
     outMeshIndex = mIdx;
 
     MeshData m = pc.meshData.meshes[mIdx];
+
+    if (m.isVisible == 0) {
+        // Efficiently degenerate the triangle and push it off-screen for any un-culled immediate mode draws
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
 
     // ── PERFECT 128-BYTE (32 FLOAT) CGLM STRIDE ──
     uint base = gl_VertexIndex * 32;

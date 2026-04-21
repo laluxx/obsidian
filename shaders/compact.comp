@@ -19,7 +19,7 @@ struct MeshData {
     int   aoIndex;
     int   emissiveIndex;  // +80
     int   isUnlit;
-    int   alphaMode;      // +88  <-- we need this
+    int   alphaMode;      // +88
     float alphaCutoff;
     vec4  baseColorFactor;
     float metallicFactor;
@@ -34,8 +34,8 @@ struct MeshData {
     int   morphDeltaOffset;
     int   morphWeightOffset;
     int   morphCount;
-    float transmissionFactor; // <-- and this
-    // rest we don't need
+    float transmissionFactor;
+    // we don't need the rest
 };
 
 layout(set = 0, binding = 0) readonly buffer VisibilityBuffer   { uint visibility[]; };

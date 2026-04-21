@@ -76,8 +76,9 @@ typedef struct {
     Color diredfl_dir_name;
     Color diredfl_file_suffix;
 
-    Color button_fg;
-    Color button_bg;
+    Color button;
+    Color button_pressed;
+    Color shadow;
 
     Color window_divider;
 

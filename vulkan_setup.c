@@ -2966,6 +2966,7 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].attenuationColorB  = m->attenuationColor[2];
             dst[i].attenuationDistance = m->attenuationDistance;
             dst[i].dispersion         = m->dispersion;
+            dst[i].isVisible          = m->visible ? 1 : 0;
 
             #undef GET_BINDLESS
         }

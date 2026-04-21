@@ -894,6 +894,7 @@ int alloc_slot(mat4 model) {
     d->attenuationColorB  = currentMaterial.attenuationColor[2];
     d->attenuationDistance = currentMaterial.attenuationDistance;
     d->dispersion         = currentMaterial.dispersion;
+    d->isVisible          = 1; // Dynamic immediate-mode meshes/lines are always visible
     d->thicknessFactor    = currentMaterial.thicknessFactor;
     glm_vec3_copy((vec3){-1e5f, -1e5f, -1e5f}, d->aabbMin);
     glm_vec3_copy((vec3){ 1e5f,  1e5f,  1e5f}, d->aabbMax);

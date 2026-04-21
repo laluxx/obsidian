@@ -77,7 +77,7 @@ struct MeshData {
     float attenuationColorB;
     float attenuationDistance;
     float dispersion;
-    float _pad0;
+    int   isVisible;
     float _pad1;
 };
 
@@ -337,6 +337,10 @@ vec3 getTransmittedColor(
 
 void main() {
     MeshData m = pc.meshData.meshes[inMeshIndex];
+
+    if (m.isVisible == 0) {
+        discard;
+    }
 
     // ── Albedo ────────────────────────────────────────────────────────────────
     vec4 albedoSample = (m.albedoIndex >= 0)

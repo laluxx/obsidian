@@ -178,7 +178,7 @@ typedef struct {
     float attenuationColorB;
     float attenuationDistance;
     float dispersion;
-    float _pad0;
+    int   isVisible;
     float _pad1;
 } MeshGPUData;
 
@@ -218,6 +218,7 @@ typedef struct {
     int32_t  materialIndex;
     MorphData* morph_data;
     bool is_unlit;
+    bool visible;
     int  alpha_mode;
     float alpha_cutoff;
 

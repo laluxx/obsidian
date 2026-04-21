@@ -45,7 +45,7 @@ struct MeshData {
     float attenuationColorB;
     float attenuationDistance;
     float dispersion;
-    float _pad0;
+    int   isVisible;
     float _pad1;
 };
 
@@ -104,6 +104,12 @@ layout(push_constant) uniform PC {
 void main() {
     uint idx = (pc.meshIndex >= 0) ? uint(pc.meshIndex) : uint(gl_BaseInstanceARB);
     MeshData m = pc.meshData.meshes[idx];
+
+    if (m.isVisible == 0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+
     mat4 model = m.model;
     int jointOffset = m.jointOffset;
 

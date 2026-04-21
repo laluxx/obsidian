@@ -83,6 +83,7 @@ typedef struct {
     vec3 aabbMax;
     uint32_t vertexCount;
     uint32_t indexCount;
+    bool visible;
     uint32_t morphCount;
     uint32_t vertexOffset;
     uint32_t indexOffset;
@@ -293,6 +294,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         mesh.alpha_mode = meta.alpha_mode;
         mesh.alpha_cutoff = meta.alpha_cutoff;
         mesh.is_unlit = meta.is_unlit;
+        mesh.visible = meta.visible;
         mesh.transmissionFactor = meta.transmissionFactor;
         mesh.ior = meta.ior;
         mesh.thicknessFactor = meta.thicknessFactor;
@@ -431,6 +433,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     }
 
     mesh.is_unlit = is_unlit;
+    mesh.visible = true;
 
     /* PBR material defaults */
     glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mesh.baseColorFactor);
@@ -631,6 +634,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     meta.alpha_mode = mesh.alpha_mode;
     meta.alpha_cutoff = mesh.alpha_cutoff;
     meta.is_unlit = mesh.is_unlit;
+    meta.visible = mesh.visible;
     meta.transmissionFactor = mesh.transmissionFactor;
     meta.ior = mesh.ior;
     meta.thicknessFactor = mesh.thicknessFactor;
@@ -852,6 +856,53 @@ bool load_gltf_animations(cgltf_data* data, GLTFInstance* instance) {
     instance->animations = animations;
     instance->animation_count = data->animations_count;
     return true;
+}
+
+/// Scene Tree
+
+int32_t scene_tree_add_node(SceneTree* tree, const char* name, int32_t parent_idx, int32_t mesh_index) {
+    if (tree->count >= SCENE_TREE_MAX_NODES) return -1;
+
+    int32_t idx = tree->count++;
+    SceneNode* node = &tree->nodes[idx];
+    strncpy(node->name, name, sizeof(node->name) - 1);
+    node->name[sizeof(node->name) - 1] = '\0';
+    node->parent       = parent_idx;
+    node->first_child  = -1;
+    node->next_sibling = -1;
+    node->mesh_index   = mesh_index;
+    node->expanded     = true;
+    node->visible      = true;
+
+    // Wire into parent's child linked list (append to front for O(1))
+    if (parent_idx >= 0 && parent_idx < tree->count) {
+        node->next_sibling = tree->nodes[parent_idx].first_child;
+        tree->nodes[parent_idx].first_child = idx;
+    }
+
+    return idx;
+}
+
+void scene_tree_register_gltf(Scene* s, GLTFInstance* inst, const char* filepath) {
+    // Derive a clean display name from the filepath (e.g. "sponza" from "./assets/sponza/sponza.gltf")
+    const char* slash = strrchr(filepath, '/');
+    const char* base  = slash ? slash + 1 : filepath;
+    char display[128];
+    strncpy(display, base, sizeof(display) - 1);
+    display[sizeof(display) - 1] = '\0';
+    // Strip extension
+    char* dot = strrchr(display, '.');
+    if (dot) *dot = '\0';
+
+    // Create one group node parented to the virtual root (index 0)
+    int32_t group = scene_tree_add_node(&s->tree, display, 0, -1);
+
+    // Create one leaf per mesh
+    for (size_t i = 0; i < inst->mesh_count; i++) {
+        Mesh* m = &s->meshes.items[inst->mesh_start_index + i];
+        const char* mesh_name = m->name ? m->name : "(unnamed)";
+        scene_tree_add_node(&s->tree, mesh_name, group, (int32_t)(inst->mesh_start_index + i));
+    }
 }
 
 bool load_gltf(const char* filepath, Scene* scene) {
@@ -1194,6 +1245,9 @@ bool load_gltf(const char* filepath, Scene* scene) {
 
     scene_topology_dirty = true;
     markMeshesSSBODirty(&context);
+
+    // Register the loaded file into the scene hierarchy tree for UI display
+    scene_tree_register_gltf(scene, instance, filepath);
 
     // Completely destroy cgltf! The engine now relies strictly on the OMDL Binary memory.
     if (!is_omdl_cache_hit && data) cgltf_free(data);

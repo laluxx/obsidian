@@ -4,6 +4,10 @@
 Scene scene = {0};
 
 void scene_init(Scene *s) {
+    // Initialize the virtual root node at index 0
+    s->tree.count = 0;
+    s->tree.root  = 0;
+    scene_tree_add_node(&s->tree, "Scene", -1, -1);
     meshes_init(&s->meshes);
     s->gltf_instances = NULL;
     s->gltf_instance_count = 0;

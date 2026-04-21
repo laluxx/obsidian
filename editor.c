@@ -11,6 +11,7 @@
 #include "vulkan_setup.h"
 #include "vertico.h"
 #include "text_editor.h"
+#include "tree_view.h"
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
@@ -35,6 +36,10 @@ static float  s_ui_drag_start_val = 0.0f;
 
 static ColorPickerState s_color_picker;
 static int32_t s_icon_lock = -1;
+static int32_t s_icon_mesh = -1;
+static int32_t s_icon_world = -1;
+static int32_t s_icon_visible = -1;
+static int32_t s_icon_hidden = -1;
 
 static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
 
@@ -93,6 +98,8 @@ static float s_bottom_anim_t = 1.0f;
 static float s_bottom_start_size = 280.0f;
 static float s_bottom_target_size = 280.0f;
 
+static bool s_hier_needs_scroll = false;
+
 // --- Search & Incremental Caching State ---
 static bool  s_is_searching = false;
 static char  s_search_query[64] = "";
@@ -115,11 +122,8 @@ static float s_saved_scroll_target = 0.0f;
 static KeyChordMap editor_search_keymap;
 extern void set_active_text_input(void (*cb)(char));
 
-// Smooth Scrolling State
-static float s_fs_scroll_y = 0.0f;
-static float s_fs_scroll_target = 0.0f;
-static float s_fs_scroll_start = 0.0f;
-static float s_fs_scroll_t = 1.0f;
+static TreeViewState s_fs_tree_state;
+static TreeViewState s_hier_tree_state;
 
 #define CACHE_MAX_DIRS 16
 #define CACHE_MAX_FILES 2048
@@ -1099,271 +1103,138 @@ static void render_emacs_input_box(float box_x, float box_y, float box_w, float 
     }
 }
 
+static void fs_on_select(int index, void* user_data) {
+    FileManagerState* s = &editor.file_manager;
+    s->selected_index = index;
+    s_fs_tree_state.selected_index = index;
+
+    FileItem* item = (FileItem*)user_data;
+    double now = glfwGetTime();
+    if (s_last_clicked_item == index && (now - s_last_item_click_time) < 0.3) {
+        if (item->type == FILE_ITEM_FILE) {
+            const char* ext = strrchr(item->name, '.');
+            if (ext) {
+                if (strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0 ||
+                    strcasecmp(ext, ".jpeg") == 0 || strcasecmp(ext, ".bmp") == 0 ||
+                    strcasecmp(ext, ".tga") == 0 || strcasecmp(ext, ".hdr") == 0 ||
+                    strcasecmp(ext, ".exr") == 0) {
+                    float sh = (float)context.swapChainExtent.height;
+                    image_viewer_open(&s_image_viewer, item, s_ui_mx, sh - s_ui_my);
+                } else {
+                    if (!text_editor_open(item->full_path)) {
+                        message(MSG_ERROR, "Failed to open file in text editor");
+                    }
+                    editor_open_panel(PANEL_BOTTOM);
+                }
+            }
+        }
+        s_last_clicked_item = -1;
+    } else {
+        s_last_clicked_item = index;
+        s_last_item_click_time = now;
+    }
+}
+
+static void fs_on_toggle_expand(int index, void* user_data) {
+    FileManagerState* s = &editor.file_manager;
+    FileItem* item = (FileItem*)user_data;
+    s->selected_index = index;
+    s_fs_tree_state.selected_index = index;
+    if (item->expanded) {
+        for (int e = 0; e < s->expanded_count; e++) {
+            if (strcmp(s->expanded_paths[e], item->full_path) == 0) {
+                s->expanded_paths[e][0] = '\0';
+                strcpy(s->expanded_paths[e], s->expanded_paths[s->expanded_count - 1]);
+                s->expanded_count--;
+                break;
+            }
+        }
+    } else {
+        if (s->expanded_count < 64)
+            strcpy(s->expanded_paths[s->expanded_count++], item->full_path);
+    }
+    file_manager_refresh();
+}
+
 static void render_filesystem_content(float cx, float cy, float cw, float ch) {
     FileManagerState* s = &editor.file_manager;
 
-    // Solid background to hide the inspector underneath when dragged up
     exQuad2D((vec2){cx - PAD, cy}, (vec2){cw + PAD*2.0f, ch}, (vec4){0,0,0,0}, 0.0f, CT.bg, CT.bg);
 
     float tab_h = TITLE_H;
     float tab_y = cy + ch - tab_h;
 
-    // --- DRAW LIST FIRST (So the title bar perfectly overlaps scrolled items!) ---
     if (!editor.fs_collapsed || editor.fs_anim_t < 1.0f) {
-        // Apply smooth scrolling offset!
-        float list_y = tab_y - PAD + s_fs_scroll_y;
-        float lh = editor.font->ascent - editor.font->descent + LH_EXTRA + 6.0f;
-
-        // Track the target item at each depth for the selected path
-        int selected_ancestors[32];
-        for (int i = 0; i < 32; i++) selected_ancestors[i] = -1;
-
-        if (s->selected_index >= 0 && s->selected_index < s->item_count) {
-            int trace_idx = s->selected_index;
-            while (trace_idx >= 0) {
-                int d = s->items[trace_idx].depth;
-                if (d < 32) selected_ancestors[d] = trace_idx;
-
-                if (d == 0) break;
-                int parent = -1;
-                for (int p = trace_idx - 1; p >= 0; p--) {
-                    if (s->items[p].depth < d) { parent = p; break; }
-                }
-                trace_idx = parent;
-            }
-        }
-
-        // Track the ancestors of the current item being drawn
-        int current_ancestors[32];
-        for (int i = 0; i < 32; i++) current_ancestors[i] = -1;
-
+        static TreeViewItem tv_items[FILE_MANAGER_MAX_ITEMS];
         for (int i = 0; i < s->item_count; i++) {
-            FileItem* item = &s->items[i];
-            if (list_y < cy) break; // Hard clip at bottom
-
-            int D = item->depth;
-            if (D < 32) current_ancestors[D] = i;
-
-            float indent = D * 16.0f;
-            float row_x = cx + indent;
-
-            // Hover & Selection
-            bool hovered = (s_ui_mx >= cx && s_ui_mx <= cx + cw && s_ui_my >= list_y - lh && s_ui_my <= list_y);
-            bool selected = (s->selected_index == i);
-
-            float sel_x = cx + D * 16.0f + 14.0f;
-            float sel_w = cw - (sel_x - cx) + PAD;
-
-            bool is_visible = (list_y <= tab_y + 4.0f); // Prevents drawing above the title bar!
-
-            if (is_visible) {
-                if (selected) {
-                    exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_hovered, CT.fs_hovered);
-                } else if (hovered) {
-                    exQuad2D((vec2){sel_x, list_y - lh}, (vec2){sel_w, lh}, (vec4){4,4,4,4}, 0.0f, CT.fs_selected, CT.fs_selected);
-                }
-            }
-
-            // Input
-            if (hovered && s_ui_mclicked && is_visible) {
-                s->selected_index = i;
-                if (item->type == FILE_ITEM_DIR && s_ui_mx < row_x + 18.0f) {
-                    if (item->expanded) {
-                        for (int e = 0; e < s->expanded_count; e++) {
-                            if (strcmp(s->expanded_paths[e], item->full_path) == 0) {
-                                s->expanded_paths[e][0] = '\0';
-                                strcpy(s->expanded_paths[e], s->expanded_paths[s->expanded_count - 1]);
-                                s->expanded_count--;
-                                break;
-                            }
-                        }
-                    } else {
-                        if (s->expanded_count < 64) {
-                            strcpy(s->expanded_paths[s->expanded_count++], item->full_path);
-                        }
-                    }
-                    file_manager_refresh();
-                    return; // Tree rebuilt, stop rendering this frame
-                } else {
-                    double now = glfwGetTime();
-                    if (s_last_clicked_item == i && (now - s_last_item_click_time) < 0.3) {
-                        // It's a double click!
-                        if (item->type == FILE_ITEM_FILE) {
-                            const char* ext = strrchr(item->name, '.');
-                            if (ext) {
-                                if (strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0 ||
-                                    strcasecmp(ext, ".jpeg") == 0 || strcasecmp(ext, ".bmp") == 0 ||
-                                    strcasecmp(ext, ".tga") == 0 || strcasecmp(ext, ".hdr") == 0 ||
-                                    strcasecmp(ext, ".exr") == 0) {
-
-                                    float sh = (float)context.swapChainExtent.height;
-                                    image_viewer_open(&s_image_viewer, item, s_ui_mx, sh - s_ui_my);
-                                } else {
-                                    if (!text_editor_open(item->full_path)) {
-                                        message(MSG_ERROR, "Failed to open file in text editor");
-                                    }
-                                    // Pop the bottom panel open so the text editor is visible
-                                    editor_open_panel(PANEL_BOTTOM);
-                                }
-                            }
-                        }
-                        s_last_clicked_item = -1;
-                    } else {
-                        s_last_clicked_item = i;
-                        s_last_item_click_time = now;
-                    }
-                }
-            }
-
-            // Calculate Animating Target Bound for the continuous beam overlay
-            float anim_y = -9999.0f;
-            if (s_is_searching && s_search_match_count > 0 && s_search_current_idx >= 0) {
-                int active_match = s_search_matches[s_search_current_idx];
-                float current_beam_index = s_search_prev_match_idx + (active_match - s_search_prev_match_idx) * ease_cubic_out(clampf(s_search_anim_t, 0.0f, 1.0f));
-
-                // Shift down by exactly half a line height so the beam geometrically intersects the spur!
-                anim_y = tab_y - PAD + s_fs_scroll_y - (current_beam_index * lh) - (lh * 0.5f);
-            }
-
-            // Draw Godot-style Tree Lines
-            for (int d = 0; d < D; d++) {
-                float line_x = cx + d * 16.0f + 8.0f;
-
-                bool parent_continues = false;
-                for (int j = i + 1; j < s->item_count; j++) {
-                    if (s->items[j].depth <= d) break; // Parent closed
-                    if (s->items[j].depth == d + 1) { parent_continues = true; break; }
-                }
-
-                Color upper_col = CT.fs_tree_dimmed;
-                Color lower_col = CT.fs_tree_dimmed;
-                Color spur_col  = CT.fs_tree_dimmed;
-
-                bool in_selected_folder = (current_ancestors[d] == selected_ancestors[d]);
-                int target = selected_ancestors[d + 1];
-
-                if (in_selected_folder && target != -1 && !s_is_searching) {
-                    bool is_final_folder = (target == s->selected_index);
-
-                    if (i < target) {
-                        upper_col = CT.fs_tree;
-                        lower_col = CT.fs_tree;
-                        if (is_final_folder) spur_col = (Color){0, 0, 0, 0};
-                    } else if (i == target) {
-                        upper_col = CT.fs_tree;
-                        spur_col  = CT.fs_tree;
-                        if (is_final_folder) lower_col = (Color){0, 0, 0, 0};
-                    } else if (i > target) {
-                        if (is_final_folder) {
-                            upper_col = (Color){0, 0, 0, 0};
-                            lower_col = (Color){0, 0, 0, 0};
-                            spur_col  = (Color){0, 0, 0, 0};
-                        }
-                    }
-                }
-
-                if (is_visible) {
-                    if (d == D - 1) {
-                        if (spur_col.a > 0.0f)  quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){10.0f, 1.0f}, spur_col);
-                        if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col);
-                        if (parent_continues && lower_col.a > 0.0f) {
-                            quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col);
-                        }
-                    } else {
-                        if (parent_continues) {
-                            if (upper_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh * 0.5f}, (vec2){1.0f, lh * 0.5f}, upper_col);
-                            if (lower_col.a > 0.0f) quad2D((vec2){line_x, list_y - lh}, (vec2){1.0f, lh * 0.5f}, lower_col);
-                        }
-                    }
-
-                    // OVERLAY ACTIVE SEARCH BEAM
-                    if (s_is_searching && in_selected_folder && target != -1) {
-                        float y_top = list_y;
-                        float y_mid = list_y - lh * 0.5f;
-                        float y_bot = list_y - lh;
-
-                        if (d == D - 1) {
-                            if (i < target) {
-                                float cy_bot = fmaxf(y_mid, anim_y);
-                                if (y_top > cy_bot) quad2D((vec2){line_x, cy_bot}, (vec2){1.0f, y_top - cy_bot}, CT.accent);
-                                if (parent_continues) {
-                                    float c_bot = fmaxf(y_bot, anim_y);
-                                    if (y_mid > c_bot) quad2D((vec2){line_x, c_bot}, (vec2){1.0f, y_mid - c_bot}, CT.accent);
-                                }
-                            } else if (i == target) {
-                                float cy_bot = fmaxf(y_mid, anim_y);
-                                if (y_top > cy_bot) quad2D((vec2){line_x, cy_bot}, (vec2){1.0f, y_top - cy_bot}, CT.accent);
-                                if (y_mid >= anim_y) {
-                                    quad2D((vec2){line_x, y_mid}, (vec2){10.0f, 1.0f}, CT.accent);
-                                }
-                            }
-                        } else {
-                            if (parent_continues && i < target) {
-                                float cy_bot_u = fmaxf(y_mid, anim_y);
-                                if (y_top > cy_bot_u) quad2D((vec2){line_x, cy_bot_u}, (vec2){1.0f, y_top - cy_bot_u}, CT.accent);
-
-                                float cy_bot_l = fmaxf(y_bot, anim_y);
-                                if (y_mid > cy_bot_l) quad2D((vec2){line_x, cy_bot_l}, (vec2){1.0f, y_mid - cy_bot_l}, CT.accent);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (is_visible) {
-                // Draw Icons
-                float icon_y = list_y - lh * 0.5f - 8.0f;
-                float current_x = row_x;
-
-                if (item->type == FILE_ITEM_DIR) {
-                    Texture2D* arrow = texture_pool_get(item->expanded ? s->icon_arrow_down : s->icon_arrow_right);
-                    if (arrow) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, arrow, (Color){1.0f,1.0f,1.0f,1.0f});
-                    current_x += 18.0f;
-
-                    Texture2D* folder = texture_pool_get(s->icon_folder);
-                    if (folder) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, folder, CT.accent);
-                    current_x += 20.0f;
-                } else {
-                    current_x += 18.0f;
-                    Texture2D* file_icon = texture_pool_get(s->icon_file);
-                    if (file_icon) texture2D((vec2){current_x, icon_y}, (vec2){16, 16}, file_icon, (Color){1.0f,1.0f,1.0f,1.0f});
-                    current_x += 20.0f;
-                }
-
-                // Text
-                text(editor.font, item->name, current_x, list_y - lh * 0.5f - 2.0f, selected ? CT.text : CT.text_dim);
-            }
-
-            list_y -= lh;
+            FileItem* fi       = &s->items[i];
+            TreeViewItem* tv   = &tv_items[i];
+            tv->name           = fi->name;
+            tv->type           = (fi->type == FILE_ITEM_DIR) ? TREE_ITEM_DIR : TREE_ITEM_FILE;
+            tv->depth          = fi->depth;
+            tv->expanded       = fi->expanded;
+            tv->selected       = (s->selected_index == i);
+            tv->icon_expanded  = s->icon_arrow_down;
+            tv->icon_collapsed = s->icon_arrow_right;
+            tv->icon_leaf      = (fi->type == FILE_ITEM_DIR) ? s->icon_folder : s->icon_file;
+            tv->icon_tint      = (fi->type == FILE_ITEM_DIR) ? CT.accent : (Color){1.0f, 1.0f, 1.0f, 1.0f};
+            tv->show_dot       = false;
+            tv->dot_color      = (Color){0, 0, 0, 0};
+            tv->user_data      = fi;
         }
-    } // End of List Draw
 
-    // --- DRAW TITLE BAR ON TOP ---
-    exQuad2D((vec2){cx - PAD, tab_y}, (vec2){cw + PAD*2.0f, tab_h}, (vec4){8.0f, 8.0f, 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
+        s_fs_tree_state.selected_index = s->selected_index;
+
+        int beam_current = (s_is_searching && s_search_current_idx >= 0)
+            ? s_search_matches[s_search_current_idx] : -1;
+        TreeViewSearchOverlay search_overlay = {
+            .active              = s_is_searching,
+            .current_match_index = beam_current,
+            .prev_match_index    = s_search_prev_match_idx,
+            .anim_t              = s_search_anim_t,
+        };
+
+        static const TreeViewCallbacks fs_cb = {
+            .on_select        = fs_on_select,
+            .on_toggle_expand = fs_on_toggle_expand,
+        };
+
+        tree_view_render(
+            &s_fs_tree_state,
+            tv_items, s->item_count,
+            cx, cy, cw, ch,
+            tab_y,
+            editor.font,
+            s_ui_mx, s_ui_my,
+            s_ui_mdown,
+            s_ui_mclicked,
+            &search_overlay,
+            &fs_cb
+        );
+    }
+
+    exQuad2D((vec2){cx - PAD, tab_y}, (vec2){cw + PAD*2.0f, tab_h},
+             (vec4){8.0f, 8.0f, 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
     text(editor.font, "FileSystem", cx, tab_y + tab_h * 0.5f - 2.0f, CT.text);
 
     if (s_is_searching) {
         char counter_str[32] = "0/0";
-        if (s_search_match_count > 0) {
-            snprintf(counter_str, sizeof(counter_str), "%d/%d", s_search_current_idx + 1, s_search_match_count);
-        }
+        if (s_search_match_count > 0)
+            snprintf(counter_str, sizeof(counter_str), "%d/%d",
+                     s_search_current_idx + 1, s_search_match_count);
         float counter_text_w = measure_text_width(editor.font, counter_str, 1.0f);
-        float mc_w = counter_text_w + 16.0f;
-
-        float sb_x = cx + measure_text_width(editor.font, "FileSystem", 1.0f) + 20.0f;
-        float sb_w = cw - (sb_x - cx) - PAD - mc_w - 8.0f;
-
-        // Perfect Vertical Alignment of Input Box & Text
-        float sb_h = editor.font->ascent - editor.font->descent + 8.0f;
-        float sb_y = tab_y + (tab_h - sb_h) * 0.5f;
-
-        render_emacs_input_box(sb_x, sb_y, sb_w, sb_h, s_search_query, s_search_cursor, s_search_last_key_time);
-
-        // Draw the Match Counter Badge
+        float mc_w  = counter_text_w + 16.0f;
+        float sb_x  = cx + measure_text_width(editor.font, "FileSystem", 1.0f) + 20.0f;
+        float sb_w  = cw - (sb_x - cx) - PAD - mc_w - 8.0f;
+        float sb_h  = editor.font->ascent - editor.font->descent + 8.0f;
+        float sb_y  = tab_y + (tab_h - sb_h) * 0.5f;
+        render_emacs_input_box(sb_x, sb_y, sb_w, sb_h, s_search_query,
+                               s_search_cursor, s_search_last_key_time);
         float mc_h = tab_h - 8.0f;
         float mc_x = sb_x + sb_w + 8.0f;
         float mc_y = tab_y + 4.0f;
-        exQuad2D((vec2){mc_x, mc_y}, (vec2){mc_w, mc_h}, (vec4){6.0f, 6.0f, 6.0f, 6.0f}, 0.0f, CT.accent, CT.accent);
+        exQuad2D((vec2){mc_x, mc_y}, (vec2){mc_w, mc_h},
+                 (vec4){6.0f, 6.0f, 6.0f, 6.0f}, 0.0f, CT.accent, CT.accent);
         text(editor.font, counter_str, mc_x + 8.0f, mc_y + mc_h * 0.5f - 2.0f, CT.bg);
     }
 }
@@ -1567,47 +1438,197 @@ static void render_right_panel(Panel* panel, float px, float py, float pw, float
     }
 }
 
+static void hier_on_select(int index, void* user_data) {
+    (void)index;
+    SceneNode* node = (SceneNode*)user_data;
+    if (!node) return;
+    if (node->mesh_index >= 0)
+        inspector_select_mesh(node->mesh_index);
+}
+
+static void hier_on_toggle_expand(int index, void* user_data) {
+    (void)index;
+    SceneNode* node = (SceneNode*)user_data;
+    if (node) node->expanded = !node->expanded;
+}
+
+static void update_effective_visibility(int32_t node_idx, bool parent_visible) {
+    if (node_idx < 0 || node_idx >= scene.tree.count) return;
+    SceneNode* node = &scene.tree.nodes[node_idx];
+    bool effective = parent_visible && node->visible;
+
+    if (node->mesh_index >= 0 && node->mesh_index < (int)scene.meshes.count) {
+        scene.meshes.items[node->mesh_index].visible = effective;
+    }
+
+    int32_t child = node->first_child;
+    while (child >= 0) {
+        update_effective_visibility(child, effective);
+        child = scene.tree.nodes[child].next_sibling;
+    }
+}
+
+static void hier_on_toggle_visibility(int index, void* user_data) {
+    (void)index;
+    SceneNode* node = (SceneNode*)user_data;
+    if (node) {
+        node->visible = !node->visible;
+        update_effective_visibility(0, true);
+        markMeshesSSBODirty(&context);
+    }
+}
+
 static void render_hierarchy(Panel* panel, float px, float py, float pw, float ph) {
     if (!editor.font) return;
     float cx, cy, cw, ch;
     content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
 
-    HierarchyState* s = &editor.hierarchy;
-    int count = (int)scene.meshes.count;
-
-    if (count == 0) {
+    if (scene.tree.count <= 1) {
         text(editor.font, "Scene is empty", cx, cy + ch - PAD, CT.text_dim);
         return;
     }
 
-    float lh   = editor.font->ascent - editor.font->descent + LH_EXTRA;
-    float row  = cy + ch - PAD;
+    // ── Build flat display list via iterative DFS from root's children ───
+    // We store (node_index, depth) pairs on the stack. The root node (index 0)
+    // is virtual and never displayed — we start from its children.
+    static TreeViewItem hier_items[SCENE_TREE_MAX_NODES];
+    int item_count = 0;
 
-    for (int i = 0; i < count; i++) {
-        if (row < cy) break;
+    typedef struct { int32_t idx; int32_t depth; bool eff_vis; } StackEntry;
+    static StackEntry stack[SCENE_TREE_MAX_NODES];
+    int top = 0;
 
-        Mesh* m        = &scene.meshes.items[i];
-        bool selected  = (i == s->selected_index);
+    // Push root's children in reverse sibling order so first child renders first
+    {
+        // Collect siblings of root's first_child into a temp array
+        int32_t rev[256];
+        int rev_count = 0;
+        int32_t c = scene.tree.nodes[0].first_child;
+        while (c >= 0 && rev_count < 256) {
+            rev[rev_count++] = c;
+            c = scene.tree.nodes[c].next_sibling;
+        }
+        // Push in reverse so first child is popped first
+        for (int i = rev_count - 1; i >= 0; i--) {
+            if (top < SCENE_TREE_MAX_NODES) {
+                stack[top].idx   = rev[i];
+                stack[top].depth = 0;
+                stack[top].eff_vis = true;
+                top++;
+            }
+        }
+    }
 
-        if (selected) {
-            float bar_y = row - editor.font->descent - 2.0f;
-            exQuad2D((vec2){cx - 6.0f, bar_y}, (vec2){cw + 12.0f, lh + 2.0f}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
-            quad2D((vec2){cx - 6.0f, bar_y}, (vec2){3.0f, lh + 2.0f}, CT.accent);
+    while (top > 0 && item_count < SCENE_TREE_MAX_NODES) {
+        StackEntry e  = stack[--top];   // pop — read BEFORE any push
+        int32_t node_idx = e.idx;
+        int32_t d        = e.depth;
+        bool parent_eff_vis = e.eff_vis;
+        SceneNode* node  = &scene.tree.nodes[node_idx];
+        bool is_group    = (node->mesh_index < 0);
+        bool curr_eff_vis = parent_eff_vis && node->visible;
+
+        TreeViewItem* tv   = &hier_items[item_count++];
+        tv->name           = node->name;
+        tv->type           = is_group ? TREE_ITEM_GROUP : TREE_ITEM_FILE;
+        tv->depth          = d;
+        tv->expanded       = node->expanded;
+        tv->selected       = (!is_group &&
+                              node->mesh_index == editor.inspector.selected_mesh_index);
+        tv->icon_expanded  = editor.file_manager.icon_arrow_down;
+        tv->icon_collapsed = editor.file_manager.icon_arrow_right;
+
+        if (is_group) {
+            tv->icon_leaf = (node->parent == 0) ? s_icon_world : editor.file_manager.icon_folder;
+        } else {
+            tv->icon_leaf = s_icon_mesh;
         }
 
-        Color dot;
-        if      (m->alpha_mode == 0) dot = CT.success;
-        else if (m->alpha_mode == 1) dot = CT.error;
-        else                         dot = CT.warning;
+        tv->icon_tint      = is_group ? CT.accent : (Color){1.0f, 1.0f, 1.0f, 1.0f};
+        tv->show_dot       = false;
+        tv->has_visibility = true;
+        tv->is_visible     = node->visible;
+        tv->effective_visible = curr_eff_vis;
+        tv->icon_visible   = s_icon_visible;
+        tv->icon_hidden    = s_icon_hidden;
+        tv->user_data      = node;
 
-        float dot_y = row + (editor.font->ascent - editor.font->descent) * 0.5f - 3.0f;
-        quad2D((vec2){cx + 2.0f, dot_y}, (vec2){6.0f, 6.0f}, dot);
+        if (!is_group && node->mesh_index >= 0 &&
+            node->mesh_index < (int)scene.meshes.count) {
+            Mesh* m = &scene.meshes.items[node->mesh_index];
+            tv->dot_color = (m->alpha_mode == 0) ? CT.success
+                          : (m->alpha_mode == 1) ? CT.error
+                          :                        CT.warning;
+        } else {
+            tv->dot_color = CT.accent;
+        }
 
-        Color tc = selected ? CT.text : CT.text_dim;
-        const char* label = m->name ? m->name : "(unnamed)";
-        text(editor.font, label, cx + 14.0f, row, tc);
+        // Push children in reverse sibling order when this node is expanded
+        if (node->expanded && node->first_child >= 0) {
+            int32_t children[256];
+            int child_count = 0;
+            int32_t cc = node->first_child;
+            while (cc >= 0 && child_count < 256) {
+                children[child_count++] = cc;
+                cc = scene.tree.nodes[cc].next_sibling;
+            }
+            for (int i = child_count - 1; i >= 0; i--) {
+                if (top < SCENE_TREE_MAX_NODES) {
+                    stack[top].idx   = children[i];
+                    stack[top].depth = d + 1;
+                    stack[top].eff_vis = curr_eff_vis;
+                    top++;
+                }
+            }
+        }
+    }
 
-        row -= lh + 2.0f;
+    // Sync selected index into hier state
+    s_hier_tree_state.selected_index = -1;
+    for (int i = 0; i < item_count; i++) {
+        if (hier_items[i].selected) {
+            s_hier_tree_state.selected_index = i;
+            break;
+        }
+    }
+
+    static const TreeViewCallbacks hier_cb = {
+        .on_select        = hier_on_select,
+        .on_toggle_expand = hier_on_toggle_expand,
+        .on_toggle_visibility = hier_on_toggle_visibility,
+    };
+
+    tree_view_render(
+            &s_hier_tree_state,
+            hier_items, item_count,
+            cx, cy, cw, ch,
+            cy + ch,
+            editor.font,
+            s_ui_mx, s_ui_my,
+            s_ui_mdown,
+            s_ui_mclicked,
+            NULL,
+            &hier_cb
+    );
+
+    if (s_hier_needs_scroll) {
+        s_hier_needs_scroll = false;
+        for (int i = 0; i < item_count; i++) {
+            if (hier_items[i].selected) {
+                float lh = editor.font->ascent - editor.font->descent + 11.0f;
+                float target_y_pos = i * lh;
+                float view_h = ch;
+                float scroll_y = s_hier_tree_state.scroll_target;
+
+                if (target_y_pos < scroll_y || target_y_pos > scroll_y + view_h - lh) {
+                    s_hier_tree_state.scroll_start  = s_hier_tree_state.scroll_y;
+                    s_hier_tree_state.scroll_target = target_y_pos - (view_h * 0.5f);
+                    if (s_hier_tree_state.scroll_target < 0.0f) s_hier_tree_state.scroll_target = 0.0f;
+                    s_hier_tree_state.scroll_t = 0.0f;
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -1735,16 +1756,15 @@ static void update_search_scroll(void) {
     if (s_search_match_count > 0 && s_search_current_idx >= 0) {
         s_search_prev_match_idx = s->selected_index > 0 ? s->selected_index : 0;
         s->selected_index = s_search_matches[s_search_current_idx];
+        s_fs_tree_state.selected_index = s->selected_index;
         float lh = editor.font->ascent - editor.font->descent + LH_EXTRA + 6.0f;
         float target_y_pos = s->selected_index * lh;
-        float ch = editor.panels[PANEL_BOTTOM].size - 32.0f - 28.0f;
-
-        s_fs_scroll_start = s_fs_scroll_y;
-        s_fs_scroll_target = target_y_pos - (ch * 0.5f);
-        if (s_fs_scroll_target < 0.0f) s_fs_scroll_target = 0.0f;
-        s_fs_scroll_t = 0.0f; // Trigger ease!
-
-        s_search_anim_t = 0.0f; // Restart trace animation
+        float ch = editor.panels[PANEL_RIGHT].size * editor.inspector_fs_split - TITLE_H - PAD;
+        s_fs_tree_state.scroll_start  = s_fs_tree_state.scroll_y;
+        s_fs_tree_state.scroll_target = target_y_pos - (ch * 0.5f);
+        if (s_fs_tree_state.scroll_target < 0.0f) s_fs_tree_state.scroll_target = 0.0f;
+        s_fs_tree_state.scroll_t = 0.0f;
+        s_search_anim_t = 0.0f;
     }
 }
 
@@ -1898,10 +1918,10 @@ static void search_start(void) {
     s_saved_expanded_count = s->expanded_count;
     for(int i=0; i<s->expanded_count; i++) strcpy(s_saved_expanded_paths[i], s->expanded_paths[i]);
     s_saved_selected_index = s->selected_index;
-    s_saved_scroll_y = s_fs_scroll_y;
-    s_saved_scroll_target = s_fs_scroll_target;
-    s_fs_scroll_start = s_fs_scroll_y;
-    s_fs_scroll_t = 1.0f;
+    s_saved_scroll_y      = s_fs_tree_state.scroll_y;
+    s_saved_scroll_target = s_fs_tree_state.scroll_target;
+    s_fs_tree_state.scroll_start = s_fs_tree_state.scroll_y;
+    s_fs_tree_state.scroll_t     = 1.0f;
 
     extern KeyChordMap keymap;
     KeyChordMap temp = keymap;
@@ -1920,10 +1940,10 @@ void search_cancel(void) {
     s_search_match_count = 0;
     s_search_current_idx = -1;
 
-    s_fs_scroll_y = s_saved_scroll_y;
-    s_fs_scroll_target = s_saved_scroll_target;
-    s_fs_scroll_start = s_saved_scroll_y;
-    s_fs_scroll_t = 1.0f; // Instant revert! No easing!
+    s_fs_tree_state.scroll_y      = s_saved_scroll_y;
+    s_fs_tree_state.scroll_target = s_saved_scroll_target;
+    s_fs_tree_state.scroll_start  = s_saved_scroll_y;
+    s_fs_tree_state.scroll_t      = 1.0f;
 
     file_manager_refresh();
 
@@ -2010,8 +2030,8 @@ void editor_init(void) {
         .open           = false,
         .t              = 0.0f,
         .target_t       = 0.0f,
-        .size           = 260.0f,
-        .min_size       = 160.0f,
+        .size           = 320.0f,
+        .min_size       = 200.0f,
         .max_size       = 500.0f,
         .ease_fn        = ease_quart_out,
         .title          = "Hierarchy",
@@ -2036,6 +2056,10 @@ void editor_init(void) {
     editor.file_manager.icon_arrow_right = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowRight.svg", 16, 16);
     editor.file_manager.icon_arrow_down  = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowDown.svg", 16, 16);
     s_icon_lock = texture_pool_add_svg(&context, "./assets/icons/Lock.svg", 16, 16);
+    s_icon_mesh = texture_pool_add_svg(&context, "./assets/icons/MeshItem.svg", 16, 16);
+    s_icon_world = texture_pool_add_svg(&context, "./assets/icons/WorldEnvironment.svg", 16, 16);
+    s_icon_visible = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityVisible.svg", 16, 16);
+    s_icon_hidden = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityHidden.svg", 16, 16);
 
     file_manager_navigate("./assets");
 
@@ -2065,9 +2089,9 @@ void editor_init(void) {
     keychord_bind(&editor_search_keymap, "C-k", editor_search_kill_line, "Kill line", PRESS);
 
     colorpicker_init(&s_color_picker);
-
-    colorpicker_init(&s_color_picker);
     image_viewer_init(&s_image_viewer);
+    tree_view_state_init(&s_fs_tree_state);
+    tree_view_state_init(&s_hier_tree_state);
 
     editor.last_time   = glfwGetTime();
     editor.initialized = true;
@@ -2129,16 +2153,8 @@ void editor_update(void) {
         }
     }
 
-    // High-End UI Easing: 333ms Cubic Out for a highly tactile scroll
-    if (s_fs_scroll_t < 1.0f) {
-        s_fs_scroll_t += 3.0f * dt;
-        if (s_fs_scroll_t >= 1.0f) {
-            s_fs_scroll_t = 1.0f;
-            s_fs_scroll_y = s_fs_scroll_target;
-        } else {
-            s_fs_scroll_y = s_fs_scroll_start + (s_fs_scroll_target - s_fs_scroll_start) * ease_cubic_out(s_fs_scroll_t);
-        }
-    }
+    tree_view_update_scroll(&s_fs_tree_state, dt);
+    tree_view_update_scroll(&s_hier_tree_state, dt);
 
     float msg_h = editor.font ? (editor.font->ascent - editor.font->descent + 32.0f) : 50.0f;
 
@@ -2322,6 +2338,18 @@ void inspector_select_mesh(int index) {
     editor.inspector.selected_mesh_index = index;
     editor.hierarchy.selected_index      = index;
     gizmo.active = true;
+
+    for (int i = 0; i < scene.tree.count; i++) {
+        if (scene.tree.nodes[i].mesh_index == index) {
+            int p = scene.tree.nodes[i].parent;
+            while (p >= 0) {
+                scene.tree.nodes[p].expanded = true;
+                p = scene.tree.nodes[p].parent;
+            }
+            break;
+        }
+    }
+    s_hier_needs_scroll = true;
 }
 
 void inspector_deselect(void) {
@@ -2337,6 +2365,18 @@ void hierarchy_select(int index) {
     if (index >= 0 && index < (int)scene.meshes.count) {
         editor.inspector.selected_mesh_index = index;
         gizmo.active = true;
+
+        for (int i = 0; i < scene.tree.count; i++) {
+            if (scene.tree.nodes[i].mesh_index == index) {
+                int p = scene.tree.nodes[i].parent;
+                while (p >= 0) {
+                    scene.tree.nodes[p].expanded = true;
+                    p = scene.tree.nodes[p].parent;
+                }
+                break;
+            }
+        }
+        s_hier_needs_scroll = true;
     } else {
         editor.inspector.selected_mesh_index = -1;
         gizmo.active = false;
