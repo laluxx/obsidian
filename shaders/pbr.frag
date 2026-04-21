@@ -78,7 +78,7 @@ struct MeshData {
     float attenuationDistance;
     float dispersion;
     int   isVisible;
-    float _pad1;
+    int   isWireframe;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
@@ -378,8 +378,9 @@ void main() {
     if (m.aoIndex >= 0 && pc.ambientOcclusionEnabled != 0)
         ao = texture(textures[nonuniformEXT(m.aoIndex)], inTexCoord).r;
 
-    // ── Unlit early-out ───────────────────────────────────────────────────────
-    if (m.isUnlit != 0) {
+    // ── Unlit / Wireframe early-out ───────────────────────────────────────────
+    if (m.isUnlit != 0 || m.isWireframe != 0) {
+        // Render wireframes completely unlit so they pop out against the geometry
         outColor = vec4(baseColor.rgb, baseColor.a);
         return;
     }

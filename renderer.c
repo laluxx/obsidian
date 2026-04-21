@@ -501,6 +501,7 @@ void reset_material(void) {
         .attenuationColor   = {1.0f, 1.0f, 1.0f},
         .attenuationDistance = 100000.0f,
         .dispersion         = 0.0f,
+        .isWireframe        = 0,
     };
 }
 
@@ -895,6 +896,7 @@ int alloc_slot(mat4 model) {
     d->attenuationDistance = currentMaterial.attenuationDistance;
     d->dispersion         = currentMaterial.dispersion;
     d->isVisible          = 1; // Dynamic immediate-mode meshes/lines are always visible
+    d->isWireframe        = currentMaterial.isWireframe;
     d->thicknessFactor    = currentMaterial.thicknessFactor;
     glm_vec3_copy((vec3){-1e5f, -1e5f, -1e5f}, d->aabbMin);
     glm_vec3_copy((vec3){ 1e5f,  1e5f,  1e5f}, d->aabbMax);
@@ -1174,7 +1176,50 @@ void cube(vec3 origin, float size, Color color) {
     emit_draw(first, 36, identity);
 }
 
-// High-performance Sphere with UVs, Tangents, and pre-calculated trig
+static void triangle_batched(vec3 a, vec3 b, vec3 c, Color color) {
+    vec3 edge1, edge2, normal;
+    glm_vec3_sub(b, a, edge1);
+    glm_vec3_sub(c, a, edge2);
+    glm_vec3_cross(edge1, edge2, normal);
+    glm_vec3_normalize(normal);
+    vertex_with_normal(a, color, normal);
+    vertex_with_normal(b, color, normal);
+    vertex_with_normal(c, color, normal);
+}
+
+void bone(vec3 start, vec3 end, Color color) {
+    vec3 dir; glm_vec3_sub(end, start, dir);
+    float len = glm_vec3_norm(dir);
+    if (len < 0.0001f) return;
+    glm_vec3_scale(dir, 1.0f/len, dir);
+
+    vec3 up = {0.0f, 1.0f, 0.0f};
+    if (fabsf(dir[1]) > 0.99f) { up[0] = 1.0f; up[1] = 0.0f; }
+    vec3 right, fwd;
+    glm_vec3_cross(dir, up, right); glm_vec3_normalize(right);
+    glm_vec3_cross(right, dir, fwd); glm_vec3_normalize(fwd);
+
+    float base_dist = len * 0.2f;
+    float radius = len * 0.1f;
+
+    vec3 base_center;
+    glm_vec3_scale(dir, base_dist, base_center); // Safely initialize from zero!
+    glm_vec3_add(start, base_center, base_center);
+
+    vec3 p[4];
+    for(int i=0; i<4; i++) {
+        float ang = (float)i * GLM_PI * 0.5f;
+        for(int k=0; k<3; k++) p[i][k] = base_center[k] + right[k]*cosf(ang)*radius + fwd[k]*sinf(ang)*radius;
+    }
+
+    for(int i=0; i<4; i++) {
+        int next = (i+1)%4;
+        line(start, p[i], color);      // Top pyramid
+        line(p[i], p[next], color);    // Base square
+        line(p[i], end, color);        // Bottom pyramid
+    }
+}
+
 void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
     uint32_t first = vertex_count;
 

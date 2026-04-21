@@ -1341,7 +1341,30 @@ void animate_scene(Scene* scene, float time) {
                 if (p >= 0) {
                     glm_mat4_mul(osg->world_transforms[p], osg->local_transforms[curr], osg->world_transforms[curr]);
                 } else {
-                    glm_mat4_copy(osg->local_transforms[curr], osg->world_transforms[curr]);
+                    // Root node: inherit the overall mesh base transform so we can move animated objects!
+                    Mesh* root_mesh = &scene->meshes.items[instance->mesh_start_index];
+                    glm_mat4_mul(root_mesh->local_transform, osg->local_transforms[curr], osg->world_transforms[curr]);
+                }
+
+                // Additive Bone Overrides integration
+                size_t mesh_end = instance->mesh_start_index + instance->mesh_count;
+                for (size_t m = instance->mesh_start_index; m < mesh_end; m++) {
+                    Mesh* mesh = &scene->meshes.items[m];
+                    if (mesh->node && mesh->jointCount > 0) {
+                        uint32_t mesh_node_idx = (uint32_t)(uintptr_t)mesh->node;
+                        int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+                        if (skin_idx >= 0) {
+                            OmdlSkin* skin = &osg->skins[skin_idx];
+                            for (uint32_t j = 0; j < skin->joints_count; j++) {
+                                if (osg->skin_joints[skin->joints_offset + j] == curr) {
+                                    if (mesh->bone_overrides[j].active) {
+                                        glm_mat4_mul(mesh->bone_overrides[j].world_offset, osg->world_transforms[curr], osg->world_transforms[curr]);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 osg->node_resolved[curr] = true;
             }

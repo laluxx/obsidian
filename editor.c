@@ -23,6 +23,8 @@
 ///  Globals
 
 Editor editor = {0};
+bool editor_show_bones = false;
+void* editor_selected_bone = NULL;
 
 // UI Input State
 static double s_ui_mx = 0.0;
@@ -1009,8 +1011,8 @@ static void render_image_inspector_content(float cx, float cy, float cw, float c
 
 
 static void bone_on_select(int index, void* user_data) {
-    (void)user_data;
     s_bone_tree_state.selected_index = index;
+    editor_selected_bone = user_data;
 }
 
 static void bone_on_toggle_expand(int index, void* user_data) {
@@ -1056,14 +1058,14 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
 
     // ── Transform ──────────────────────────────────────────────────────────
     if (begin_section("Transform", &s_sec_transform, cx, &row, cw, lh)) {
-        vec3 pos = {m->model[3][0], m->model[3][1], m->model[3][2]};
+        vec3 pos = {m->local_transform[3][0], m->local_transform[3][1], m->local_transform[3][2]};
         vec3 euler;
-        glm_euler_angles(m->model, euler);
+        glm_euler_angles(m->local_transform, euler);
         vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
         vec3 scale = {
-            glm_vec3_norm((vec3){m->model[0][0], m->model[1][0], m->model[2][0]}),
-            glm_vec3_norm((vec3){m->model[0][1], m->model[1][1], m->model[2][1]}),
-            glm_vec3_norm((vec3){m->model[0][2], m->model[1][2], m->model[2][2]})
+            glm_vec3_norm((vec3){m->local_transform[0][0], m->local_transform[1][0], m->local_transform[2][0]}),
+            glm_vec3_norm((vec3){m->local_transform[0][1], m->local_transform[1][1], m->local_transform[2][1]}),
+            glm_vec3_norm((vec3){m->local_transform[0][2], m->local_transform[1][2], m->local_transform[2][2]})
         };
 
         bool transform_changed = false;
@@ -1071,18 +1073,20 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
         row -= lh + 6.0f;
         transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f, -1);
         row -= lh + 6.0f;
-        transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "m", 0.02f, -1);
+        transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "x", 0.02f, -1);
         row -= lh + 6.0f;
         row -= 6.0f;
 
         if (transform_changed) {
-            glm_mat4_identity(m->model);
-            glm_translate(m->model, pos);
-            // Reapply rotation: Z, Y, X to maintain standard euler composition
-            glm_rotate_z(m->model, glm_rad(rot_deg[2]), m->model);
-            glm_rotate_y(m->model, glm_rad(rot_deg[1]), m->model);
-            glm_rotate_x(m->model, glm_rad(rot_deg[0]), m->model);
-            glm_scale(m->model, scale);
+            glm_mat4_identity(m->local_transform);
+            glm_translate(m->local_transform, pos);
+            glm_rotate_z(m->local_transform, glm_rad(rot_deg[2]), m->local_transform);
+            glm_rotate_y(m->local_transform, glm_rad(rot_deg[1]), m->local_transform);
+            glm_rotate_x(m->local_transform, glm_rad(rot_deg[0]), m->local_transform);
+            glm_scale(m->local_transform, scale);
+
+            // Sync to model matrix for immediate rendering
+            glm_mat4_copy(m->local_transform, m->model);
             markMeshesSSBODirty(&context);
         }
     }
@@ -1193,6 +1197,11 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
         }
         row -= lh + 6.0f;
 
+        if (field_toggle(cx, row, col2_geo, cw, "Wireframe", &m->wireframe, -1)) {
+            markMeshesSSBODirty(&context);
+        }
+        row -= lh + 6.0f;
+
         if (m->name) {
             field_text(cx, row, col2_geo, cw, "Name", m->name, -1);
             row -= lh + 6.0f;
@@ -1214,6 +1223,9 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     // ── Skeleton ──────────────────────────────────────────────────────────
     if (m->jointCount > 0 || m->morphCount > 0) {
         if (begin_section("Skeleton", &s_sec_animation, cx, &row, cw, lh)) {
+
+            field_toggle(cx, row, col2_anim, cw, "Show Bones", &editor_show_bones, -1);
+            row -= lh + 6.0f;
 
             if (m->jointCount > 0) {
                 GLTFInstance* inst = NULL;
@@ -1335,12 +1347,57 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
                             b_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "x", 0.02f, -1); row -= lh + 6.0f;
 
                             if (b_changed) {
-                                glm_vec3_copy(pos, bnode->translation);
-                                glm_vec3_copy(scale, bnode->scale);
+                                // Calculate a delta matrix for the world offset
+                                mat4 new_local; glm_mat4_identity(new_local);
+                                glm_translate(new_local, pos);
                                 mat4 new_rmat; glm_mat4_identity(new_rmat);
                                 glm_rotate_z(new_rmat, glm_rad(rot_deg[2]), new_rmat);
                                 glm_rotate_y(new_rmat, glm_rad(rot_deg[1]), new_rmat);
                                 glm_rotate_x(new_rmat, glm_rad(rot_deg[0]), new_rmat);
+                                glm_mat4_mul(new_local, new_rmat, new_local);
+                                glm_scale(new_local, scale);
+
+                                mat4 old_local; glm_mat4_identity(old_local);
+                                glm_translate(old_local, bnode->translation);
+                                mat4 old_r; glm_quat_mat4(bnode->rotation, old_r);
+                                glm_mat4_mul(old_local, old_r, old_local);
+                                glm_scale(old_local, bnode->scale);
+
+                                int32_t bnode_idx = (int32_t)(bnode - osg->nodes);
+                                int32_t p_idx = bnode->parent;
+                                mat4 p_world; glm_mat4_identity(p_world);
+                                if (p_idx >= 0) glm_mat4_copy(osg->world_transforms[p_idx], p_world);
+
+                                mat4 old_world; glm_mat4_mul(p_world, old_local, old_world);
+                                mat4 new_world; glm_mat4_mul(p_world, new_local, new_world);
+
+                                mat4 inv_old_world; glm_mat4_inv(old_world, inv_old_world);
+                                mat4 world_delta; glm_mat4_mul(new_world, inv_old_world, world_delta);
+
+                                // Find this bone's override index (j)
+                                int local_j = -1;
+                                uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
+                                int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+                                if (skin_idx >= 0) {
+                                    OmdlSkin* skin = &osg->skins[skin_idx];
+                                    for (uint32_t j = 0; j < skin->joints_count; j++) {
+                                        if (osg->skin_joints[skin->joints_offset + j] == (uint32_t)bnode_idx) {
+                                            local_j = j; break;
+                                        }
+                                    }
+                                }
+
+                                if (local_j >= 0) {
+                                    if (!m->bone_overrides[local_j].active) {
+                                        glm_mat4_identity(m->bone_overrides[local_j].world_offset);
+                                        m->bone_overrides[local_j].active = true;
+                                    }
+                                    glm_mat4_mul(world_delta, m->bone_overrides[local_j].world_offset, m->bone_overrides[local_j].world_offset);
+                                }
+
+                                // Also sync to local transform for un-animated bones so inspector displays it right
+                                glm_vec3_copy(pos, bnode->translation);
+                                glm_vec3_copy(scale, bnode->scale);
                                 glm_mat4_quat(new_rmat, bnode->rotation);
                             }
                         }
@@ -2640,6 +2697,8 @@ void inspector_select_mesh(int index) {
     editor.inspector.selected_mesh_index = index;
     editor.hierarchy.selected_index      = index;
     gizmo.active = true;
+    editor_selected_bone = NULL;
+    s_bone_tree_state.selected_index = -1;
 
     for (int i = 0; i < scene.tree.count; i++) {
         if (scene.tree.nodes[i].mesh_index == index) {
@@ -2658,6 +2717,8 @@ void inspector_deselect(void) {
     editor.inspector.selected_mesh_index = -1;
     editor.hierarchy.selected_index      = -1;
     gizmo.active = false;
+    editor_selected_bone = NULL;
+    s_bone_tree_state.selected_index = -1;
 }
 
 /// Hierarchy API

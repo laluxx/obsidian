@@ -78,6 +78,7 @@ static VkPipelineCache pipelineCache = VK_NULL_HANDLE;
 
 VkPipeline pipelineIndirectSolid    = VK_NULL_HANDLE;
 VkPipeline pipelineIndirectTextured = VK_NULL_HANDLE;
+VkPipeline graphicsPipelineWireframe = VK_NULL_HANDLE;
 
 /// Helpers
 
@@ -377,7 +378,8 @@ void createLogicalDevice(VulkanContext* ctx)
     VkPhysicalDeviceFeatures features = {
         .wideLines = VK_TRUE,
         .multiDrawIndirect = VK_TRUE,
-        .samplerAnisotropy = VK_TRUE
+        .samplerAnisotropy = VK_TRUE,
+        .fillModeNonSolid = VK_TRUE
     };
 
     VkPhysicalDeviceVulkan11Features features11 = {
@@ -725,6 +727,9 @@ void createGraphicsPipelines(VulkanContext* ctx)
 
     VkPipelineRasterizationStateCreateInfo rast1  = makeRasterizer(1.0f);
     VkPipelineRasterizationStateCreateInfo rastLW = makeRasterizer(2.0f);
+
+    VkPipelineRasterizationStateCreateInfo rastWireframe = makeRasterizer(1.0f);
+    rastWireframe.polygonMode = VK_POLYGON_MODE_LINE;
     VkPipelineColorBlendStateCreateInfo    blend  = makeColorBlend(&kBlendAlpha);
     VkPipelineDepthStencilStateCreateInfo  depth3D = makeDepth(true,  true);
     VkPipelineDepthStencilStateCreateInfo  depth2D = makeDepth(false, false);
@@ -796,7 +801,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
        2      2D color
        3      2D textured
     */
-    VkGraphicsPipelineCreateInfo pci[5] = {
+    VkGraphicsPipelineCreateInfo pci[6] = {
         /* 0: 3D PBR triangles */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -817,7 +822,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pVertexInputState   = &viEmpty, .pInputAssemblyState = &iaLine,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastLW, .pMultisampleState = &kMultisampling,
-            .pColorBlendState    = &blend,  .pDepthStencilState= &depth3D,
+            .pColorBlendState    = &blend,  .pDepthStencilState= &depth2D,
             .pDynamicState       = &kDynamicStateLine,
             .layout              = ctx->pipelineLayout,
         },
@@ -850,18 +855,30 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &shadowRenderingCI,
-            .stageCount          = 1, .pStages               = ssShadow,
+            .stageCount          = 1, .pStages                = ssShadow,
             .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastShadow, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = NULL, .pDepthStencilState = &depth3D,
             .pDynamicState       = &kDynamicState,
             .layout              = ctx->pipelineLayout,
+        },
+        /* 5: 3D PBR Wireframe */
+        {
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = &pipelineRenderingCI,
+            .stageCount          = 2, .pStages                = ssPBR,
+            .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
+            .pViewportState      = &kViewportState,
+            .pRasterizationState = &rastWireframe, .pMultisampleState  = &kMultisampling,
+            .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
+            .pDynamicState       = &kDynamicStateLine, // Allows dynamic line width!
+            .layout              = ctx->pipelineLayout,
         }
     };
 
-    VkPipeline pipelines[5];
-    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 5, pci, NULL, pipelines) != VK_SUCCESS) {
+    VkPipeline pipelines[6];
+    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 6, pci, NULL, pipelines) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipelines\n");
         exit(EXIT_FAILURE);
     }
@@ -879,6 +896,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
     ctx->graphicsPipelineTextured2D = pipelines[2];
     skyboxPipeline                  = pipelines[3];
     shadowPipeline                  = pipelines[4];
+    graphicsPipelineWireframe       = pipelines[5];
 
     vkDestroyShaderModule(ctx->device, vsShadow, NULL);
     vkDestroyShaderModule(ctx->device, vsPBR, NULL);
@@ -1075,7 +1093,7 @@ static void execute_mega_cull_pass(VkCommandBuffer cmd, void* user_data)
     uint32_t frustumCount = shadowsEnabled ? 5u : 1u;
 
     /* ── 1. Clear drawCountBuffer to 0 for all frustums ─────────────── */
-    vkCmdFillBuffer(cmd, ctx->drawCountBuffer, 0, 15 * sizeof(uint32_t), 0);
+    vkCmdFillBuffer(cmd, ctx->drawCountBuffer, 0, 20 * sizeof(uint32_t), 0);
 
     VkBufferMemoryBarrier countClear = {
         .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -1239,13 +1257,14 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
         pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
         vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
-        // Because count buffer is now 2 elements per frustum (Opaque, Transparent), countOff is (Frustum * 2 + 0) * 4 bytes.
-        uint32_t shadowStride = 20480u / 3u; // 6826 — matches compact.comp
+        // count buffer is now 4 elements per frustum (Opaque, Transmission, Transparent, Wireframe)
+        uint32_t shadowStride = 20480u / 4u; // 5120 — matches compact.comp
         uint32_t frustumIdx = (uint32_t)(i + 1); // shadow frustums are 1..4
 
+        // We only cast shadows for streams 0, 1, and 2. Wireframes (stream 3) skip shadow casting!
         for (uint32_t stream = 0; stream < 3; stream++) {
             VkDeviceSize offset   = (VkDeviceSize)(frustumIdx * 20480u + stream * shadowStride) * sizeof(VkDrawIndexedIndirectCommand);
-            VkDeviceSize countOff = (VkDeviceSize)(frustumIdx * 3u + stream) * sizeof(uint32_t);
+            VkDeviceSize countOff = (VkDeviceSize)(frustumIdx * 4u + stream) * sizeof(uint32_t);
             vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, offset, ctx->drawCountBuffer, countOff, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
         }
 
@@ -1300,16 +1319,26 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
                                       sizeof(VkDrawIndexedIndirectCommand));
     }
 
-    if (lineVertexCount > 0) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
-        line_renderer_draw(cmd);
-    }
-
     if (skyboxEnabled && iblSkyboxView != VK_NULL_HANDLE) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
         VkDescriptorSet skyboxSets[2] = { ctx->descriptorSets[ctx->currentFrame], ctx->lightingSets[ctx->currentFrame] };
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 2, skyboxSets, 0, NULL);
         vkCmdDraw(cmd, 36, 1, 0, 0);
+    }
+
+    if (lineVertexCount > 0) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineLine);
+
+        // RE-BIND descriptor sets because the skybox pipeline disrupted them!
+        VkDescriptorSet gltfSets[4] = {
+            ctx->descriptorSets[ctx->currentFrame],
+            ctx->bindlessSet,
+            ctx->bindlessSet,   /* set=2 placeholder — no shader reads this slot */
+            ctx->lightingSets[ctx->currentFrame],
+        };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
+
+        line_renderer_draw(cmd);
     }
 }
 
@@ -1638,7 +1667,7 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     // stream 1 even if indirectDrawCount == opaqueMeshCount from the CPU side.
     // The copy is cheap (single blit) and the draw calls are guarded by indirect counts.
     {
-        const uint32_t sStride = 20480u / 3u; // 6826 — must match compact.comp streamStride
+        const uint32_t sStride = 20480u / 4u; // 5120 — must match compact.comp streamStride
 
         // --- Screen copy: swapchain opaque result -> transmissionImage ---
         VkImageMemoryBarrier copyBarriers[2] = {0};
@@ -1748,6 +1777,13 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
             vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, (VkDeviceSize)(stream * sStride) * sizeof(VkDrawIndexedIndirectCommand),
                                           ctx->drawCountBuffer, stream * 4, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
         }
+
+        // --- Stream 3: Wireframe Pass ---
+        // Draws directly over everything else in line-mode with standard depth testing
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineWireframe);
+        vkCmdSetLineWidth(cmd, 1.0f); // REQUIRED: state was invalidated by previous pipeline binds!
+        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, (VkDeviceSize)(3 * sStride) * sizeof(VkDrawIndexedIndirectCommand),
+                                      ctx->drawCountBuffer, 3 * 4, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
 
         vkCmdEndRendering(cmd);
     }
@@ -2023,6 +2059,8 @@ void cleanup(VulkanContext* ctx)
     DESTROY_PIPELINE(graphicsPipeline)       /* pipelines[0] */
     DESTROY_PIPELINE(graphicsPipelineLine)   /* pipelines[1] */
     DESTROY_PIPELINE(graphicsPipeline2D)     /* pipelines[2] */
+
+    if (graphicsPipelineWireframe) { vkDestroyPipeline(ctx->device, graphicsPipelineWireframe, NULL); graphicsPipelineWireframe = VK_NULL_HANDLE; }
 
     /* These all alias other layouts — null before destroy to prevent double-free */
     ctx->pipelineLayoutLine       = VK_NULL_HANDLE;
@@ -2750,8 +2788,8 @@ void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
     maxMeshes = 16384 + 4096;
     VkDeviceSize drawSize  = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize visSize   = maxMeshes * 5 * sizeof(uint32_t);
-    // 3 streams (Opaque, Transmission, Transparent) per frustum x 5 frustums = 15 slots
-    VkDeviceSize countSize = 15 * sizeof(uint32_t);
+    // 4 streams (Opaque, Transmission, Transparent, Wireframe) per frustum x 5 frustums = 20 slots
+    VkDeviceSize countSize = 20 * sizeof(uint32_t);
 
     /* Source: CPU writes per-mesh draw commands, compact.comp reads.
        CRITICAL: Multiplied by MAX_FRAMES_IN_FLIGHT to prevent CPU/GPU tearing! */
@@ -2967,6 +3005,7 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].attenuationDistance = m->attenuationDistance;
             dst[i].dispersion         = m->dispersion;
             dst[i].isVisible          = m->visible ? 1 : 0;
+            dst[i].isWireframe        = m->wireframe ? 1 : 0;
 
             #undef GET_BINDLESS
         }

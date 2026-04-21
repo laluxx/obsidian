@@ -46,7 +46,7 @@ struct MeshData {
     float attenuationDistance;
     float dispersion;
     int   isVisible;
-    float _pad1;
+    int   isWireframe;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
@@ -105,7 +105,8 @@ void main() {
     uint idx = (pc.meshIndex >= 0) ? uint(pc.meshIndex) : uint(gl_BaseInstanceARB);
     MeshData m = pc.meshData.meshes[idx];
 
-    if (m.isVisible == 0) {
+    if (m.isVisible == 0 || m.isWireframe != 0) {
+        // Wireframes should not cast shadows
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }

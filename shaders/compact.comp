@@ -35,7 +35,17 @@ struct MeshData {
     int   morphWeightOffset;
     int   morphCount;
     float transmissionFactor;
-    // we don't need the rest
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    int   isVisible;
+    int   isWireframe;
 };
 
 layout(set = 0, binding = 0) readonly buffer VisibilityBuffer   { uint visibility[]; };
@@ -57,16 +67,14 @@ void main() {
     uint frustumIdx = gl_GlobalInvocationID.x;
     uint writeOffset = frustumIdx * pc.maxMeshes;
 
-    uint opqCount  = 0; // Stream 0: opaque + transmission (drawn before screen copy)
-    uint xmtCount  = 0; // Stream 1: transmission (drawn after screen copy, before alpha blend)
-    uint trnCount  = 0; // Stream 2: alpha blend transparent
+    uint opqCount  = 0; // Stream 0: opaque + transmission
+    uint xmtCount  = 0; // Stream 1: transmission
+    uint trnCount  = 0; // Stream 2: alpha blend
+    uint wireCount = 0; // Stream 3: wireframe
 
     // Slot stride per stream within indirectBuffer:
-    // Stream 0 opaque:       writeOffset + [0       .. 6826)
-    // Stream 1 transmission: writeOffset + [6826    .. 13652)
-    // Stream 2 transparent:  writeOffset + [13652   .. 20480)
-    // Using equal thirds of maxMeshes=20480 => 6826 each (safe, meshes << 6826)
-    uint streamStride = pc.maxMeshes / 3u;
+    // Using equal fourths of maxMeshes=20480 => 5120 each (safe)
+    uint streamStride = pc.maxMeshes / 4u;
 
     for (uint i = 0; i < pc.meshCount; i++) {
         if (visibility[frustumIdx * pc.meshCount + i] == 0u) continue;
@@ -84,7 +92,10 @@ void main() {
         int alphaMode = m.alphaMode;
         float transmission = m.transmissionFactor;
 
-        if (transmission > 0.0) {
+        if (m.isWireframe != 0) {
+            // Wireframe: drawn in dedicated pass with VK_POLYGON_MODE_LINE
+            dstDraws[writeOffset + 3u * streamStride + wireCount++] = cmd;
+        } else if (transmission > 0.0) {
             // Transmission: needs screen copy — drawn in dedicated pass after copy
             dstDraws[writeOffset + streamStride + xmtCount++] = cmd;
         } else if (alphaMode == 2) {
@@ -96,10 +107,10 @@ void main() {
         }
     }
 
-    // drawCounts layout per frustum: [opaque, transmission, transparent]
-    // Total 3 uints per frustum, 5 frustums = 15 uints needed.
-    // Current drawCountBuffer is 10 uints (2 per frustum). We need to expand to 3.
-    drawCounts[frustumIdx * 3u + 0u] = opqCount;
-    drawCounts[frustumIdx * 3u + 1u] = xmtCount;
-    drawCounts[frustumIdx * 3u + 2u] = trnCount;
+    // drawCounts layout per frustum: [opaque, transmission, transparent, wireframe]
+    // Total 4 uints per frustum, 5 frustums = 20 uints needed.
+    drawCounts[frustumIdx * 4u + 0u] = opqCount;
+    drawCounts[frustumIdx * 4u + 1u] = xmtCount;
+    drawCounts[frustumIdx * 4u + 2u] = trnCount;
+    drawCounts[frustumIdx * 4u + 3u] = wireCount;
 }

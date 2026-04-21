@@ -138,7 +138,33 @@ static double s_last_angle_2d;
 static float  s_rot_sign;
 static double s_curr_mx;
 static double s_curr_my;
-static vec3   s_rot_v_prev; // The missing declaration!
+static vec3   s_rot_v_prev;
+static mat4   s_drag_start_local;
+static mat4   s_drag_start_bone_override;
+
+extern bool editor_show_bones;
+extern void* editor_selected_bone;
+
+static mat4* get_bone_world_matrix(int mesh_index, OmdlSceneGraph** out_osg, int32_t* out_bnode_idx) {
+    if (!editor_show_bones || !editor_selected_bone) return NULL;
+    for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+        if (mesh_index >= (int)scene.gltf_instances[i].mesh_start_index &&
+            mesh_index < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+            GLTFInstance* inst = &scene.gltf_instances[i];
+            if (inst->gltf_data) {
+                OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+                OmdlNode* bnode = (OmdlNode*)editor_selected_bone;
+                int32_t bnode_idx = (int32_t)(bnode - osg->nodes);
+                if (bnode_idx >= 0 && bnode_idx < (int32_t)osg->node_count) {
+                    if (out_osg) *out_osg = osg;
+                    if (out_bnode_idx) *out_bnode_idx = bnode_idx;
+                    return &osg->world_transforms[bnode_idx];
+                }
+            }
+        }
+    }
+    return NULL;
+}
 
 static void draw_full_ring(vec3 origin, vec3 normal, float scale, Color col) {
     vec3 u, v;
@@ -460,19 +486,23 @@ static void gizmo_update_hover(vec3 origin, float scale, double mx, double my) {
     gizmo.hovered = best;
 }
 
-//  Apply drag delta to the selected mesh transform
+// Apply drag delta to the selected mesh transform
 static void apply_drag(int mesh_index, double mx, double my) {
     if (mesh_index < 0 || mesh_index >= (int)scene.meshes.count) return;
     Mesh* m = &scene.meshes.items[mesh_index];
 
-    // Delta in screen pixels
+    OmdlSceneGraph* osg = NULL;
+    int32_t bnode_idx = -1;
+    mat4* bone_mat = get_bone_world_matrix(mesh_index, &osg, &bnode_idx);
+
+    mat4 new_world;
+    glm_mat4_copy(gizmo.drag_start_model, new_world);
+    mat4 new_local;
+    glm_mat4_copy(s_drag_start_local, new_local);
+
     float dx_px = (float)(mx - gizmo.drag_start_x);
     float dy_px = (float)(my - gizmo.drag_start_y);
-
     GizmoPart part = gizmo.dragging;
-
-    // Restore mesh to its state at drag start, then apply accumulated delta
-    glm_mat4_copy(gizmo.drag_start_model, m->model);
 
     if (gizmo.mode == GIZMO_MODE_TRANSLATE) {
         vec3 delta = {0,0,0};
@@ -483,7 +513,6 @@ static void apply_drag(int mesh_index, double mx, double my) {
             if (part == GIZMO_PART_Y) axis_dir[1] = 1.0f;
             if (part == GIZMO_PART_Z) axis_dir[2] = 1.0f;
 
-            // Create a virtual plane containing the axis and facing the camera
             vec3 perp, plane_n;
             glm_vec3_cross(camera.front, axis_dir, perp);
             glm_vec3_cross(perp, axis_dir, plane_n);
@@ -513,7 +542,6 @@ static void apply_drag(int mesh_index, double mx, double my) {
 
                 glm_vec3_sub(hit_curr, hit_start, hit_diff);
 
-                // Project the 3D difference strictly onto the axis line
                 float proj = glm_vec3_dot(hit_diff, axis_dir);
                 glm_vec3_scale(axis_dir, proj, delta);
             }
@@ -549,13 +577,14 @@ static void apply_drag(int mesh_index, double mx, double my) {
             }
         }
 
-        // Add delta directly to the world-space translation column
-        // Bypasses local scale/rotation which glm_translate would multiply against
-        m->model[3][0] += delta[0];
-        m->model[3][1] += delta[1];
-        m->model[3][2] += delta[2];
-    }
+        new_world[3][0] += delta[0];
+        new_world[3][1] += delta[1];
+        new_world[3][2] += delta[2];
 
+        mat4 T; glm_mat4_identity(T);
+        glm_translate(T, delta);
+        glm_mat4_mul(T, s_drag_start_local, new_local);
+    }
     else if (gizmo.mode == GIZMO_MODE_ROTATE) {
         vec3 n = {0,0,0};
         if      (part == GIZMO_PART_RX) n[0] = 1.0f;
@@ -568,11 +597,9 @@ static void apply_drag(int mesh_index, double mx, double my) {
 
         vec2 sc;
         if (world_to_screen(gizmo.drag_start_pivot, sc)) {
-            // Track purely in 2D Screen Space for continuous wrapping rotation
             double curr_angle_2d = atan2(my - sc[1], mx - sc[0]);
             double d_ang = curr_angle_2d - s_last_angle_2d;
 
-            // Unwrap rotation diff
             while (d_ang >  GLM_PI) d_ang -= 2.0 * GLM_PI;
             while (d_ang < -GLM_PI) d_ang += 2.0 * GLM_PI;
 
@@ -583,7 +610,6 @@ static void apply_drag(int mesh_index, double mx, double my) {
             }
             s_last_angle_2d = curr_angle_2d;
 
-            // Constrain visual pie to ±360 limits so it resets correctly
             if (s_rot_angle >  GLM_PI * 2.0f) s_rot_angle -= GLM_PI * 2.0f;
             if (s_rot_angle < -GLM_PI * 2.0f) s_rot_angle += GLM_PI * 2.0f;
         }
@@ -596,16 +622,14 @@ static void apply_drag(int mesh_index, double mx, double my) {
         glm_translate(Tinv, neg_pivot);
         glm_mat4_identity(R);
 
-        // Invert the mesh rotation angle specifically for the screen-space ring
-        // so the physical mesh rotates in sync with our visual pie slice!
         float mesh_angle = (part == GIZMO_PART_RS) ? -s_rot_angle : s_rot_angle;
         glm_rotate(R, mesh_angle, n);
 
         glm_mat4_mul(T, R, result);
         glm_mat4_mul(result, Tinv, result);
-        glm_mat4_mul(result, gizmo.drag_start_model, m->model);
+        glm_mat4_mul(result, gizmo.drag_start_model, new_world);
+        glm_mat4_mul(result, s_drag_start_local, new_local);
     }
-
     else if (gizmo.mode == GIZMO_MODE_SCALE) {
         vec3 delta = {0,0,0};
 
@@ -678,7 +702,6 @@ static void apply_drag(int mesh_index, double mx, double my) {
             }
         }
 
-        // Scale proportionally to the visual size of the gizmo on screen!
         float gizmo_scale = gizmo_world_scale(gizmo.drag_start_pivot);
         vec3 scale_v = {
             1.0f + (delta[0] / gizmo_scale),
@@ -704,7 +727,70 @@ static void apply_drag(int mesh_index, double mx, double my) {
 
         glm_mat4_mul(T, S, result);
         glm_mat4_mul(result, Tinv, result);
-        glm_mat4_mul(result, gizmo.drag_start_model, m->model);
+        glm_mat4_mul(result, gizmo.drag_start_model, new_world);
+        glm_mat4_mul(result, s_drag_start_local, new_local);
+    }
+
+    if (bone_mat) {
+        int local_j = -1;
+        uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
+        int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+        if (skin_idx >= 0) {
+            OmdlSkin* skin = &osg->skins[skin_idx];
+            for (uint32_t j = 0; j < skin->joints_count; j++) {
+                if (osg->skin_joints[skin->joints_offset + j] == (uint32_t)bnode_idx) {
+                    local_j = j; break;
+                }
+            }
+        }
+
+        if (local_j >= 0) {
+            mat4 T;
+            mat4 inv_start;
+            glm_mat4_inv(gizmo.drag_start_model, inv_start);
+            glm_mat4_mul(new_world, inv_start, T);
+
+            if (!m->bone_overrides[local_j].active) {
+                glm_mat4_identity(m->bone_overrides[local_j].world_offset);
+                m->bone_overrides[local_j].active = true;
+            }
+            // Apply the absolute delta T to the INITIAL bone override for perfect 1:1 mouse tracking!
+            glm_mat4_mul(T, s_drag_start_bone_override, m->bone_overrides[local_j].world_offset);
+
+            // Visual update for zero-latency feedback without recursive accumulation
+            glm_mat4_copy(new_world, osg->world_transforms[bnode_idx]);
+        }
+    } else {
+        // If moving a mesh that is part of a glTF instance, apply the transform to the ROOT mesh of that instance so the whole character moves!
+        int target_idx = mesh_index;
+        bool is_gltf = false;
+        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+            if (mesh_index >= (int)scene.gltf_instances[i].mesh_start_index &&
+                mesh_index < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                target_idx = (int)scene.gltf_instances[i].mesh_start_index;
+                is_gltf = true;
+                break;
+            }
+        }
+
+        if (is_gltf) {
+            Mesh* root_m = &scene.meshes.items[target_idx];
+
+            vec3 delta_pos;
+            delta_pos[0] = new_world[3][0] - m->model[3][0];
+            delta_pos[1] = new_world[3][1] - m->model[3][1];
+            delta_pos[2] = new_world[3][2] - m->model[3][2];
+
+            root_m->local_transform[3][0] += delta_pos[0];
+            root_m->local_transform[3][1] += delta_pos[1];
+            root_m->local_transform[3][2] += delta_pos[2];
+
+            glm_mat4_copy(new_world, m->model);
+            glm_mat4_copy(new_local, m->local_transform);
+        } else {
+            glm_mat4_copy(new_world, m->model);
+            glm_mat4_copy(new_local, m->local_transform);
+        }
     }
 
     markMeshesSSBODirty(&context);
@@ -833,8 +919,109 @@ void gizmo_render(int mesh_index) {
 
     Mesh* m = &scene.meshes.items[mesh_index];
 
-    // Gizmo origin = mesh translation (column 3 of model matrix)
-    vec3 origin = {m->model[3][0], m->model[3][1], m->model[3][2]};
+    if (editor_show_bones && m->jointCount > 0) {
+        GLTFInstance* inst = NULL;
+        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+            if (mesh_index >= (int)scene.gltf_instances[i].mesh_start_index &&
+                mesh_index < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                inst = &scene.gltf_instances[i];
+                break;
+            }
+        }
+
+        if (inst && inst->gltf_data && m->node) {
+            OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+            uint32_t node_idx = (uint32_t)(uintptr_t)m->node;
+            int32_t skin_idx = osg->nodes[node_idx].skin_idx;
+
+            if (skin_idx >= 0) {
+                OmdlSkin* skin = &osg->skins[skin_idx];
+
+                Material boneMat;
+                memset(&boneMat, 0, sizeof(Material));
+                boneMat.baseColorFactor[0] = 1.0f; boneMat.baseColorFactor[1] = 1.0f; boneMat.baseColorFactor[2] = 1.0f; boneMat.baseColorFactor[3] = 1.0f;
+                boneMat.isUnlit = 1;
+                boneMat.isWireframe = 1;
+                boneMat.alphaMode = 0;
+                boneMat.albedoIndex = -1;
+                boneMat.normalMapIndex = -1;
+                boneMat.metallicRoughIndex = -1;
+                boneMat.aoIndex = -1;
+                boneMat.emissiveIndex = -1;
+                boneMat.transmissionIndex = -1;
+                boneMat.thicknessIndex = -1;
+                set_material(&boneMat);
+
+                bool is_joint[4096] = {false};
+                for (uint32_t j = 0; j < skin->joints_count; j++) {
+                    uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                    if (j_node < 4096) is_joint[j_node] = true;
+                }
+
+                for (uint32_t j = 0; j < skin->joints_count; j++) {
+                    uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                    OmdlNode* node = &osg->nodes[j_node];
+
+                    Color c = (node == editor_selected_bone) ? CT.bone_selected : CT.bone;
+                    vec3 start_pos;
+                    glm_vec3_copy(osg->world_transforms[j_node][3], start_pos);
+
+                    bool has_child_joint = false;
+                    for (uint32_t c_idx = 0; c_idx < osg->node_count; c_idx++) {
+                        if (osg->nodes[c_idx].parent == (int32_t)j_node && is_joint[c_idx]) {
+                            vec3 end_pos;
+                            glm_vec3_copy(osg->world_transforms[c_idx][3], end_pos);
+                            bone(start_pos, end_pos, c);
+                            has_child_joint = true;
+                        }
+                    }
+
+                    // If no child joint, draw a small nub
+                    if (!has_child_joint) {
+                        vec3 end_pos;
+                        int32_t p_idx = osg->nodes[j_node].parent;
+                        if (p_idx >= 0 && p_idx < 4096 && is_joint[p_idx]) {
+                            vec3 p_pos;
+                            glm_vec3_copy(osg->world_transforms[p_idx][3], p_pos);
+                            vec3 dir;
+                            glm_vec3_sub(start_pos, p_pos, dir);
+                            if (glm_vec3_norm2(dir) > 0.00001f) {
+                                glm_vec3_scale(dir, 0.5f, dir);
+                                glm_vec3_add(start_pos, dir, end_pos);
+                            } else {
+                                goto fallback_nub;
+                            }
+                        } else {
+                        fallback_nub:;
+                            vec3 local_up = {0.0f, 0.1f, 0.0f}; // 10cm default length
+                            mat3 rot;
+                            glm_mat4_pick3(osg->world_transforms[j_node], rot);
+                            glm_mat3_mulv(rot, local_up, local_up);
+                            glm_vec3_add(start_pos, local_up, end_pos);
+                        }
+                        bone(start_pos, end_pos, c);
+                    }
+                }
+
+                reset_material();
+            }
+        }
+    }
+
+    OmdlSceneGraph* osg = NULL;
+    int32_t bnode_idx = -1;
+    mat4* bone_mat = get_bone_world_matrix(mesh_index, &osg, &bnode_idx);
+
+    vec3 origin;
+    if (bone_mat) {
+        origin[0] = (*bone_mat)[3][0];
+        origin[1] = (*bone_mat)[3][1];
+        origin[2] = (*bone_mat)[3][2];
+    } else {
+        origin[0] = m->model[3][0];
+        origin[1] = m->model[3][1];
+        origin[2] = m->model[3][2];
+    }
 
     float true_scale = gizmo_world_scale(origin);
 
@@ -1033,7 +1220,20 @@ void gizmo_mouse_move(double xpos, double ypos) {
     if (mi < 0 || mi >= (int)scene.meshes.count) return;
 
     Mesh* m = &scene.meshes.items[mi];
-    vec3 origin = {m->model[3][0], m->model[3][1], m->model[3][2]};
+    OmdlSceneGraph* osg = NULL;
+    int32_t bnode_idx = -1;
+    mat4* bone_mat = get_bone_world_matrix(mi, &osg, &bnode_idx);
+
+    vec3 origin;
+    if (bone_mat) {
+        origin[0] = (*bone_mat)[3][0];
+        origin[1] = (*bone_mat)[3][1];
+        origin[2] = (*bone_mat)[3][2];
+    } else {
+        origin[0] = m->model[3][0];
+        origin[1] = m->model[3][1];
+        origin[2] = m->model[3][2];
+    }
     float scale = gizmo_world_scale(origin);
 
     gizmo_update_hover(origin, scale, xpos, my);
@@ -1066,10 +1266,52 @@ void gizmo_mouse_button(int button, int action, int mods, double xpos, double yp
             int mi = editor.inspector.selected_mesh_index;
             if (mi >= 0 && mi < (int)scene.meshes.count) {
                 Mesh* m = &scene.meshes.items[mi];
-                glm_mat4_copy(m->model, gizmo.drag_start_model);
-                gizmo.drag_start_pivot[0] = m->model[3][0];
-                gizmo.drag_start_pivot[1] = m->model[3][1];
-                gizmo.drag_start_pivot[2] = m->model[3][2];
+
+                OmdlSceneGraph* osg = NULL;
+                int32_t bnode_idx = -1;
+                mat4* bone_mat = get_bone_world_matrix(mi, &osg, &bnode_idx);
+
+                if (bone_mat) {
+                    glm_mat4_copy(*bone_mat, gizmo.drag_start_model);
+                    // For bones, we store the local transform directly from the node
+                    mat4 local; glm_mat4_identity(local);
+                    glm_translate(local, osg->nodes[bnode_idx].translation);
+                    mat4 rot; glm_quat_mat4(osg->nodes[bnode_idx].rotation, rot);
+                    glm_mat4_mul(local, rot, local);
+                    glm_scale(local, osg->nodes[bnode_idx].scale);
+                    glm_mat4_copy(local, s_drag_start_local);
+
+                    gizmo.drag_start_pivot[0] = (*bone_mat)[3][0];
+                    gizmo.drag_start_pivot[1] = (*bone_mat)[3][1];
+                    gizmo.drag_start_pivot[2] = (*bone_mat)[3][2];
+
+                    int local_j = -1;
+                    uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
+                    int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+                    if (skin_idx >= 0) {
+                        OmdlSkin* skin = &osg->skins[skin_idx];
+                        for (uint32_t j = 0; j < skin->joints_count; j++) {
+                            if (osg->skin_joints[skin->joints_offset + j] == (uint32_t)bnode_idx) {
+                                local_j = j; break;
+                            }
+                        }
+                    }
+                    if (local_j >= 0) {
+                        if (!m->bone_overrides[local_j].active) {
+                            glm_mat4_identity(m->bone_overrides[local_j].world_offset);
+                            m->bone_overrides[local_j].active = true;
+                        }
+                        glm_mat4_copy(m->bone_overrides[local_j].world_offset, s_drag_start_bone_override);
+                    } else {
+                        glm_mat4_identity(s_drag_start_bone_override);
+                    }
+                } else {
+                    glm_mat4_copy(m->model, gizmo.drag_start_model);
+                    glm_mat4_copy(m->local_transform, s_drag_start_local);
+                    gizmo.drag_start_pivot[0] = m->model[3][0];
+                    gizmo.drag_start_pivot[1] = m->model[3][1];
+                    gizmo.drag_start_pivot[2] = m->model[3][2];
+                }
 
                 if (gizmo.mode == GIZMO_MODE_ROTATE) {
                     s_rot_angle = 0.0f;

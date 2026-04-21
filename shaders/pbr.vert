@@ -51,7 +51,7 @@ struct MeshData {
     float attenuationDistance;
     float dispersion;
     int   isVisible;
-    float _pad1;
+    int   isWireframe;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {

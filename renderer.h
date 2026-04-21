@@ -104,6 +104,8 @@ extern Vertex2D vertices2D[MAX_VERTICES];
 extern uint32_t vertexCount2D;
 extern uint64_t dynamicVertexBufferAddr;
 
+extern VkPipeline graphicsPipelineWireframe;
+
 // Texture management
 bool load_texture_from_rgba_with_format(VulkanContext* context, unsigned char* rgba_data, uint32_t width, uint32_t height, Texture2D* texture, VkFormat format);
 bool load_texture_from_rgba(VulkanContext* context, unsigned char* rgba_data, uint32_t width, uint32_t height, Texture2D* texture);
@@ -179,7 +181,7 @@ typedef struct {
     float attenuationDistance;
     float dispersion;
     int   isVisible;
-    float _pad1;
+    int   isWireframe;
 } MeshGPUData;
 
 extern PushConstants pushConstants;
@@ -219,6 +221,7 @@ typedef struct {
     MorphData* morph_data;
     bool is_unlit;
     bool visible;
+    bool wireframe;
     int  alpha_mode;
     float alpha_cutoff;
 
@@ -228,6 +231,11 @@ typedef struct {
     int  morphDeltaOffset;  // Base offset in megaMorphBuffer
     int  morphWeightOffset; // Base offset in morphWeightBuffer
     int  morphCount;        // Number of morph targets
+
+    struct {
+        mat4 world_offset;
+        bool active;
+    } bone_overrides[256];
 
     /* PBR material texture slots (bindless indices, -1 = not present) */
     int32_t  normalMapIndex;      // tangent-space normal map
@@ -295,6 +303,7 @@ typedef struct {
     vec3  attenuationColor;
     float attenuationDistance;
     float dispersion;
+    int   isWireframe;
 } Material;
 
 void set_material(const Material* mat);
@@ -313,6 +322,7 @@ void triangle(vec3 a, vec3 b, vec3 c, Color color);
 void plane(vec3 origin, vec2 size, Color color);
 void cube(vec3 origin, float size, Color color);
 void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color);
+void bone(vec3 start, vec3 end, Color color);
 
 
 void sort_meshes_by_alpha(Meshes *meshes, vec3 cameraPos);
