@@ -821,7 +821,7 @@ int32_t scene_tree_add_node(SceneTree* tree, const char* name, int32_t parent_id
     node->first_child  = -1;
     node->next_sibling = -1;
     node->mesh_index   = mesh_index;
-    node->expanded     = true;
+    node->expanded     = false;
     node->visible      = true;
 
     // Wire into parent's child linked list (append to front for O(1))
@@ -990,7 +990,7 @@ bool load_gltf(const char* filepath, Scene* scene) {
             osg->nodes[i].parent = n->parent ? (int32_t)(n->parent - data->nodes) : -1;
             osg->nodes[i].mesh_idx = -1;
             osg->nodes[i].skin_idx = n->skin ? (int32_t)(n->skin - data->skins) : -1;
-            osg->nodes[i].expanded = true;
+            osg->nodes[i].expanded = false;
 
             // Extract valid base matrix for hierarchy resolution
             cgltf_node_transform_local(n, (float*)osg->nodes[i].base_matrix);

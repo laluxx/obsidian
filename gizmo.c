@@ -804,6 +804,14 @@ static void cb_mode_rotate(void)    { gizmo.mode = GIZMO_MODE_ROTATE;    }
 static void cb_mode_scale(void)     { gizmo.mode = GIZMO_MODE_SCALE;     }
 static void cb_mode_select(void)    { inspector_deselect();              }
 
+static void cb_mode_translate_scale_toggle(void) {
+    if (gizmo.mode == GIZMO_MODE_TRANSLATE) {
+        gizmo.mode = GIZMO_MODE_SCALE;
+    } else {
+        gizmo.mode = GIZMO_MODE_TRANSLATE;
+    }
+}
+
 void gizmo_init(void) {
     memset(&gizmo, 0, sizeof(GizmoState));
     gizmo.mode     = GIZMO_MODE_TRANSLATE;
@@ -811,10 +819,8 @@ void gizmo_init(void) {
     gizmo.dragging = GIZMO_PART_NONE;
     gizmo.active   = false;
 
-    keychord_bind(&keymap, "q", cb_mode_select,    "Gizmo: Select",   PRESS);
-    keychord_bind(&keymap, "w", cb_mode_translate, "Gizmo: Translate",PRESS);
-    keychord_bind(&keymap, "e", cb_mode_scale,     "Gizmo: Scale",    PRESS);
-    keychord_bind(&keymap, "r", cb_mode_rotate,    "Gizmo: Rotate",   PRESS);
+    keychord_bind(&keymap, "q", cb_mode_rotate,                 "Gizmo: Rotate",          PRESS);
+    keychord_bind(&keymap, "w", cb_mode_translate_scale_toggle, "Gizmo: Translate/Scale", PRESS);
 }
 
 void gizmo_cycle_mode(void) {

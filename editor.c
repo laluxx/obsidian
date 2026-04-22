@@ -44,8 +44,30 @@ static int32_t s_icon_world = -1;
 static int32_t s_icon_visible = -1;
 static int32_t s_icon_hidden = -1;
 static int32_t s_icon_bone = -1;
+static int32_t s_icon_skeleton = -1;
+static bool s_inspector_show_skeleton_only = false;
 
 static float s_ui_dt = 0.0f;
+
+// --- Grab Workflow State ---
+static bool s_grab_active = false;
+static bool s_grab_just_finished = false;
+static int s_transform_mode = 0; // 0=Translate, 1=Rotate
+static double s_rot_start_angle = 0.0;
+static int s_grab_axis = 0; // 0=View, 1=X, 2=Y, 3=Z
+static float s_grab_start_mx = 0.0f;
+static float s_grab_start_my = 0.0f;
+static vec3 s_grab_pivot;
+static mat4 s_grab_initial_local;
+static mat4 s_grab_initial_model;
+static mat4 s_grab_initial_bone_override;
+static mat4 s_grab_initial_root_local;
+static bool s_grab_is_bone = false;
+static OmdlSceneGraph* s_grab_osg = NULL;
+static int32_t s_grab_bnode_idx = -1;
+static int s_grab_local_j = -1;
+static KeyChordMap s_grab_keymap;
+static KeyChordMap s_saved_keymap;
 
 static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
 
@@ -331,6 +353,8 @@ static void on_color_picked(float r, float g, float b, float a, void* user) {
 }
 
 bool editor_wants_mouse(void) {
+    if (s_grab_active || s_grab_just_finished) return true;
+
     float sh = (float)context.swapChainExtent.height;
     double raw_y = sh - s_ui_my;
     if (s_image_viewer.visible && ui_window_wants_mouse(&s_image_viewer.window, s_ui_mx, raw_y)) return true;
@@ -360,10 +384,18 @@ bool editor_wants_mouse(void) {
     return false;
 }
 
+extern void apply_grab_update(void);
+
 void editor_mouse_move(double xpos, double ypos) {
     float sh = (float)context.swapChainExtent.height;
     s_ui_mx = xpos;
     s_ui_my = sh - ypos; // Align with panel Y-up coordinates
+
+    // Modal Grab Mouse Interception
+    if (s_grab_active) {
+        return;
+    }
+
     if (s_image_viewer.visible) {
         ui_window_mouse_move(&s_image_viewer.window, xpos, ypos);
     }
@@ -372,9 +404,22 @@ void editor_mouse_move(double xpos, double ypos) {
     }
 }
 
+extern void grab_confirm(void);
+extern void grab_cancel(void);
+
 void editor_mouse_button(int button, int action) {
     float sh = (float)context.swapChainExtent.height;
     double raw_y = sh - s_ui_my;
+
+    // Modal Grab Input Interception
+    if (s_grab_active) {
+        if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+            grab_confirm();
+        } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+            grab_cancel();
+        }
+        return; // Consume all mouse clicks while grabbing
+    }
 
     // Highest Z-order popup gets first priority
     if (s_image_viewer.visible) {
@@ -1041,18 +1086,16 @@ static void render_image_inspector_content(float cx, float cy, float cw, float c
     }
 }
 
-
-static void bone_on_select(int index, void* user_data) {
+static void bone_on_select(int index, const TreeViewItem* item) {
     s_bone_tree_state.selected_index = index;
-    editor_selected_bone = user_data;
+    editor_selected_bone = item->user_data;
 }
 
-static void bone_on_toggle_expand(int index, void* user_data) {
+static void bone_on_toggle_expand(int index, const TreeViewItem* item) {
     (void)index;
-    OmdlNode* node = (OmdlNode*)user_data;
+    OmdlNode* node = (OmdlNode*)item->user_data;
     if (node) node->expanded = !node->expanded;
 }
-
 
 static void render_inspector_content(float cx, float cy, float cw, float ch) {
     // Smart Routing: If the Image Viewer is open AND not actively closing, it steals the focus!
@@ -1078,7 +1121,7 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     // Calculate dynamic alignments based on the longest label per section + exactly 1 space of padding!
     float col2_mat  = cx + strlen("Emissive Strength") * space_w + space_w;
     float col2_geo  = cx + strlen("Alpha Mode") * space_w + space_w;
-    float col2_anim = cx + strlen("Joints") * space_w + space_w;
+    float col2_anim = cx + strlen("Show Bones") * space_w + space_w;
 
     float row = cy + ch - PAD;
 
@@ -1089,7 +1132,8 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     static bool s_sec_animation = true;
 
     // ── Transform ──────────────────────────────────────────────────────────
-    if (begin_section("Transform", &s_sec_transform, cx, &row, cw, lh)) {
+    if (!s_inspector_show_skeleton_only) {
+        if (begin_section("Transform", &s_sec_transform, cx, &row, cw, lh)) {
         vec3 pos = {m->local_transform[3][0], m->local_transform[3][1], m->local_transform[3][2]};
         vec3 euler;
         glm_euler_angles(m->local_transform, euler);
@@ -1251,13 +1295,14 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
         row -= lh + 6.0f;
         row -= 6.0f;
     }
+    }
 
     // ── Skeleton ──────────────────────────────────────────────────────────
     if (m->jointCount > 0 || m->morphCount > 0) {
         if (begin_section("Skeleton", &s_sec_animation, cx, &row, cw, lh)) {
 
             field_toggle(cx, row, col2_anim, cw, "Show Bones", &editor_show_bones, -1);
-            row -= lh + 6.0f;
+            row -= lh - 2.0f; // Pull the bones tree significantly closer to the toggle line
 
             if (m->jointCount > 0) {
                 GLTFInstance* inst = NULL;
@@ -1312,6 +1357,7 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
                             TreeViewItem* tv   = &bone_items[b_item_count++];
                             tv->name           = curr_node->name;
                             tv->type           = TREE_ITEM_FILE;
+                            tv->tag            = 0;
                             tv->depth          = d;
                             tv->expanded       = curr_node->expanded;
 
@@ -1496,12 +1542,12 @@ static void render_emacs_input_box(float box_x, float box_y, float box_w, float 
     }
 }
 
-static void fs_on_select(int index, void* user_data) {
+static void fs_on_select(int index, const TreeViewItem* tree_item) {
     FileManagerState* s = &editor.file_manager;
     s->selected_index = index;
     s_fs_tree_state.selected_index = index;
 
-    FileItem* item = (FileItem*)user_data;
+    FileItem* item = (FileItem*)tree_item->user_data;
     double now = glfwGetTime();
     if (s_last_clicked_item == index && (now - s_last_item_click_time) < 0.3) {
         if (item->type == FILE_ITEM_FILE) {
@@ -1528,9 +1574,9 @@ static void fs_on_select(int index, void* user_data) {
     }
 }
 
-static void fs_on_toggle_expand(int index, void* user_data) {
+static void fs_on_toggle_expand(int index, const TreeViewItem* tree_item) {
     FileManagerState* s = &editor.file_manager;
-    FileItem* item = (FileItem*)user_data;
+    FileItem* item = (FileItem*)tree_item->user_data;
     s->selected_index = index;
     s_fs_tree_state.selected_index = index;
     if (item->expanded) {
@@ -1564,6 +1610,7 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
             TreeViewItem* tv   = &tv_items[i];
             tv->name           = fi->name;
             tv->type           = (fi->type == FILE_ITEM_DIR) ? TREE_ITEM_DIR : TREE_ITEM_FILE;
+            tv->tag            = 0;
             tv->depth          = fi->depth;
             tv->expanded       = fi->expanded;
             tv->selected       = (s->selected_index == i);
@@ -1831,17 +1878,24 @@ static void render_right_panel(Panel* panel, float px, float py, float pw, float
     }
 }
 
-static void hier_on_select(int index, void* user_data) {
+static void hier_on_select(int index, const TreeViewItem* item) {
     (void)index;
-    SceneNode* node = (SceneNode*)user_data;
-    if (!node) return;
-    if (node->mesh_index >= 0)
+    int32_t node_idx = (int32_t)(uintptr_t)item->user_data;
+    if (node_idx < 0 || node_idx >= scene.tree.count) return;
+
+    SceneNode* node = &scene.tree.nodes[node_idx];
+    if (node->mesh_index >= 0) {
         inspector_select_mesh(node->mesh_index);
+        s_inspector_show_skeleton_only = (item->tag == 1); // 1 = Skeleton Node
+    }
 }
 
-static void hier_on_toggle_expand(int index, void* user_data) {
+static void hier_on_toggle_expand(int index, const TreeViewItem* item) {
     (void)index;
-    SceneNode* node = (SceneNode*)user_data;
+    if (item->tag == 1) return; // Skeletons don't expand
+    int32_t node_idx = (int32_t)(uintptr_t)item->user_data;
+    if (node_idx < 0 || node_idx >= scene.tree.count) return;
+    SceneNode* node = &scene.tree.nodes[node_idx];
     if (node) node->expanded = !node->expanded;
 }
 
@@ -1861,9 +1915,15 @@ static void update_effective_visibility(int32_t node_idx, bool parent_visible) {
     }
 }
 
-static void hier_on_toggle_visibility(int index, void* user_data) {
+static void hier_on_toggle_visibility(int index, const TreeViewItem* item) {
     (void)index;
-    SceneNode* node = (SceneNode*)user_data;
+    if (item->tag == 1) {
+        editor_show_bones = !editor_show_bones;
+        return;
+    }
+    int32_t node_idx = (int32_t)(uintptr_t)item->user_data;
+    if (node_idx < 0 || node_idx >= scene.tree.count) return;
+    SceneNode* node = &scene.tree.nodes[node_idx];
     if (node) {
         node->visible = !node->visible;
         update_effective_visibility(0, true);
@@ -1887,7 +1947,7 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
     static TreeViewItem hier_items[SCENE_TREE_MAX_NODES];
     int item_count = 0;
 
-    typedef struct { int32_t idx; int32_t depth; bool eff_vis; } StackEntry;
+    typedef struct { int32_t idx; int32_t depth; bool eff_vis; bool is_skel; } StackEntry;
     static StackEntry stack[SCENE_TREE_MAX_NODES];
     int top = 0;
 
@@ -1904,9 +1964,10 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
         // Push in reverse so first child is popped first
         for (int i = rev_count - 1; i >= 0; i--) {
             if (top < SCENE_TREE_MAX_NODES) {
-                stack[top].idx   = rev[i];
-                stack[top].depth = 0;
+                stack[top].idx     = rev[i];
+                stack[top].depth   = 0;
                 stack[top].eff_vis = true;
+                stack[top].is_skel = false;
                 top++;
             }
         }
@@ -1917,47 +1978,77 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
         int32_t node_idx = e.idx;
         int32_t d        = e.depth;
         bool parent_eff_vis = e.eff_vis;
+        bool is_skel_node = e.is_skel;
+
         SceneNode* node  = &scene.tree.nodes[node_idx];
         bool is_group    = (node->mesh_index < 0);
+        bool has_skel    = false;
+
+        if (!is_group && node->mesh_index >= 0 && node->mesh_index < (int)scene.meshes.count) {
+            Mesh* m = &scene.meshes.items[node->mesh_index];
+            if (m->jointCount > 0 || m->morphCount > 0) has_skel = true;
+        }
+
         bool curr_eff_vis = parent_eff_vis && node->visible;
 
         TreeViewItem* tv   = &hier_items[item_count++];
-        tv->name           = node->name;
-        tv->type           = is_group ? TREE_ITEM_GROUP : TREE_ITEM_FILE;
-        tv->depth          = d;
-        tv->expanded       = node->expanded;
-        tv->selected       = (!is_group &&
-                              node->mesh_index == editor.inspector.selected_mesh_index);
-        tv->icon_expanded  = editor.file_manager.icon_arrow_down;
-        tv->icon_collapsed = editor.file_manager.icon_arrow_right;
 
-        if (is_group) {
-            tv->icon_leaf = (node->parent == 0) ? s_icon_world : editor.file_manager.icon_folder;
+        if (is_skel_node) {
+            tv->name           = "Skeleton";
+            tv->type           = TREE_ITEM_FILE;
+            tv->tag            = 1; // 1 = Skeleton
+            tv->depth          = d;
+            tv->expanded       = false;
+            tv->selected       = (node->mesh_index == editor.inspector.selected_mesh_index && s_inspector_show_skeleton_only);
+            tv->icon_expanded  = editor.file_manager.icon_arrow_down;
+            tv->icon_collapsed = editor.file_manager.icon_arrow_right;
+            tv->icon_leaf      = s_icon_skeleton;
+            tv->icon_tint      = CT.accent;
+            tv->show_dot       = false;
+            tv->has_visibility = true;
+            tv->is_visible     = editor_show_bones;
+            tv->effective_visible = curr_eff_vis && editor_show_bones;
+            tv->icon_visible   = s_icon_visible;
+            tv->icon_hidden    = s_icon_hidden;
+            tv->user_data      = (void*)(uintptr_t)node_idx;
         } else {
-            tv->icon_leaf = s_icon_mesh;
-        }
+            tv->name           = node->name;
+            tv->type           = (is_group || has_skel) ? TREE_ITEM_GROUP : TREE_ITEM_FILE;
+            tv->tag            = 0; // 0 = Standard Node
+            tv->depth          = d;
+            tv->expanded       = node->expanded;
+            tv->selected       = (!is_group && node->mesh_index == editor.inspector.selected_mesh_index && !s_inspector_show_skeleton_only);
+            tv->icon_expanded  = editor.file_manager.icon_arrow_down;
+            tv->icon_collapsed = editor.file_manager.icon_arrow_right;
 
-        tv->icon_tint      = is_group ? CT.accent : (Color){1.0f, 1.0f, 1.0f, 1.0f};
-        tv->show_dot       = false;
-        tv->has_visibility = true;
-        tv->is_visible     = node->visible;
-        tv->effective_visible = curr_eff_vis;
-        tv->icon_visible   = s_icon_visible;
-        tv->icon_hidden    = s_icon_hidden;
-        tv->user_data      = node;
+            if (is_group) {
+                tv->icon_leaf = (node->parent == 0) ? s_icon_world : editor.file_manager.icon_folder;
+            } else {
+                tv->icon_leaf = s_icon_mesh;
+            }
 
-        if (!is_group && node->mesh_index >= 0 &&
-            node->mesh_index < (int)scene.meshes.count) {
-            Mesh* m = &scene.meshes.items[node->mesh_index];
-            tv->dot_color = (m->alpha_mode == 0) ? CT.success
-                          : (m->alpha_mode == 1) ? CT.error
-                          :                        CT.warning;
-        } else {
-            tv->dot_color = CT.accent;
+            tv->icon_tint      = is_group ? CT.accent : (Color){1.0f, 1.0f, 1.0f, 1.0f};
+            tv->show_dot       = false;
+            tv->has_visibility = true;
+            tv->is_visible     = node->visible;
+            tv->effective_visible = curr_eff_vis;
+            tv->icon_visible   = s_icon_visible;
+            tv->icon_hidden    = s_icon_hidden;
+            tv->user_data      = (void*)(uintptr_t)node_idx;
+
+            if (!is_group && node->mesh_index >= 0 &&
+                node->mesh_index < (int)scene.meshes.count) {
+                Mesh* m = &scene.meshes.items[node->mesh_index];
+                tv->dot_color = (m->alpha_mode == 0) ? CT.success
+                              : (m->alpha_mode == 1) ? CT.error
+                              :                        CT.warning;
+            } else {
+                tv->dot_color = CT.accent;
+            }
         }
 
         // Push children in reverse sibling order when this node is expanded
-        if (node->expanded && node->first_child >= 0) {
+        if (!is_skel_node && node->expanded) {
             int32_t children[256];
             int child_count = 0;
             int32_t cc = node->first_child;
@@ -1970,7 +2061,22 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
                     stack[top].idx   = children[i];
                     stack[top].depth = d + 1;
                     stack[top].eff_vis = curr_eff_vis;
+                    stack[top].is_skel = false;
                     top++;
+                }
+            }
+
+            // Push synthetic skeleton node if the mesh has one
+            if (!is_group && node->mesh_index >= 0 && node->mesh_index < (int)scene.meshes.count) {
+                Mesh* m = &scene.meshes.items[node->mesh_index];
+                if (m->jointCount > 0 || m->morphCount > 0) {
+                    if (top < SCENE_TREE_MAX_NODES) {
+                        stack[top].idx = node_idx;
+                        stack[top].depth = d + 1;
+                        stack[top].eff_vis = curr_eff_vis;
+                        stack[top].is_skel = true;
+                        top++;
+                    }
                 }
             }
         }
@@ -2116,6 +2222,307 @@ void file_manager_refresh(void) {
 }
 
 /// Keybinding callbacks
+
+static bool world_to_screen(vec3 world, vec2 out_screen) {
+    float sw = (float)context.swapChainExtent.width;
+    float sh = (float)context.swapChainExtent.height;
+    mat4 vp;
+    glm_mat4_mul(camera.projection_matrix, camera.view_matrix, vp);
+    vec4 clip;
+    vec4 w4 = {world[0], world[1], world[2], 1.0f};
+    glm_mat4_mulv(vp, w4, clip);
+    if (clip[3] <= 0.0f) return false;
+    float ndcX = clip[0] / clip[3];
+    float ndcY = clip[1] / clip[3];
+    out_screen[0] = (ndcX * 0.5f + 0.5f) * sw;
+    out_screen[1] = (0.5f - ndcY * 0.5f) * sh;
+    return true;
+}
+
+void apply_grab_update(void) {
+    if (!s_grab_active) return;
+
+    mat4 T; glm_mat4_identity(T);
+
+    if (s_transform_mode == 0) { // Translate
+        vec3 diff;
+        glm_vec3_sub(s_grab_pivot, camera.position, diff);
+        float dist = glm_vec3_norm(diff);
+        float inv_tan = camera.projection_matrix[1][1];
+
+        float px_to_world = (2.0f * dist) / ((float)context.swapChainExtent.height * inv_tan);
+
+        float dx = ((float)s_ui_mx - s_grab_start_mx) * px_to_world;
+        float dy = ((float)s_ui_my - s_grab_start_my) * px_to_world;
+
+        dx = -dx;
+        dy = -dy;
+
+        vec3 delta = {0.0f, 0.0f, 0.0f};
+        if (s_grab_axis == 0) {
+            vec3 right, up;
+            glm_vec3_cross(camera.front, camera.up, right);
+            glm_vec3_normalize(right);
+            glm_vec3_copy(camera.up, up);
+
+            glm_vec3_scale(right, dx, right);
+            glm_vec3_scale(up, dy, up);
+            glm_vec3_add(right, up, delta);
+        } else if (s_grab_axis == 1) {
+            delta[0] = dx;
+        } else if (s_grab_axis == 2) {
+            delta[1] = dy;
+        } else if (s_grab_axis == 3) {
+            delta[2] = dx;
+        }
+        glm_translate(T, delta);
+    } else if (s_transform_mode == 1) { // Rotate
+        vec2 pivot_screen;
+        float angle = 0.0f;
+        if (world_to_screen(s_grab_pivot, pivot_screen)) {
+            double curr_angle = atan2(s_ui_my - pivot_screen[1], s_ui_mx - pivot_screen[0]);
+            angle = (float)(curr_angle - s_rot_start_angle);
+        } else {
+            angle = ((float)s_grab_start_mx - (float)s_ui_mx) * 0.01f;
+        }
+
+        vec3 axis = {0.0f, 0.0f, 0.0f};
+        if (s_grab_axis == 0) {
+            glm_vec3_sub(camera.position, s_grab_pivot, axis);
+            glm_vec3_normalize(axis);
+        } else if (s_grab_axis == 1) {
+            axis[0] = -1.0f; // Inverted only for X axis rotation!
+        } else if (s_grab_axis == 2) {
+            axis[1] = 1.0f;
+        } else if (s_grab_axis == 3) {
+            axis[2] = 1.0f;
+        }
+
+        mat4 R; glm_mat4_identity(R);
+        glm_rotate(R, angle, axis);
+
+        // Revolve the matrix around the pivot point in world space
+        mat4 T1, T2;
+        glm_mat4_identity(T1); glm_translate(T1, s_grab_pivot);
+        glm_mat4_identity(T2);
+        vec3 neg_p = {-s_grab_pivot[0], -s_grab_pivot[1], -s_grab_pivot[2]};
+        glm_translate(T2, neg_p);
+
+        glm_mat4_mul(T1, R, T);
+        glm_mat4_mul(T, T2, T);
+    }
+
+    int mi = editor.inspector.selected_mesh_index;
+    if (mi >= 0 && mi < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[mi];
+
+        if (s_grab_is_bone) {
+            glm_mat4_mul(T, s_grab_initial_bone_override, m->bone_overrides[s_grab_local_j].world_offset);
+            mat4 new_world;
+            glm_mat4_mul(T, s_grab_initial_model, new_world);
+            glm_mat4_copy(new_world, s_grab_osg->world_transforms[s_grab_bnode_idx]);
+        } else {
+            int target_idx = mi;
+            bool is_gltf = false;
+            for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+                if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
+                    mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                    target_idx = (int)scene.gltf_instances[i].mesh_start_index;
+                    is_gltf = true;
+                    break;
+                }
+            }
+
+            if (is_gltf) {
+                Mesh* root_m = &scene.meshes.items[target_idx];
+                mat4 result, inv_start, new_world;
+                glm_mat4_mul(T, s_grab_initial_model, new_world);
+                glm_mat4_inv(s_grab_initial_model, inv_start);
+                glm_mat4_mul(new_world, inv_start, result);
+                glm_mat4_mul(result, s_grab_initial_root_local, root_m->local_transform);
+                glm_mat4_copy(new_world, m->model);
+            } else {
+                mat4 new_world; glm_mat4_mul(T, s_grab_initial_model, new_world);
+                glm_mat4_copy(new_world, m->model);
+                glm_mat4_mul(T, s_grab_initial_local, m->local_transform);
+            }
+        }
+        markMeshesSSBODirty(&context);
+    }
+
+    // Draw Axis Guide Lines
+    if (s_grab_axis != 0) {
+        float inf = 10000.0f;
+        vec3 p1, p2;
+        glm_vec3_copy(s_grab_pivot, p1);
+        glm_vec3_copy(s_grab_pivot, p2);
+
+        Color col;
+        if (s_grab_axis == 1) { p1[0] -= inf; p2[0] += inf; col = CT.x_bright; }
+        if (s_grab_axis == 2) { p1[1] -= inf; p2[1] += inf; col = CT.y_bright; }
+        if (s_grab_axis == 3) { p1[2] -= inf; p2[2] += inf; col = CT.z_bright; }
+
+        line_set_width(2.0f);
+        line(p1, p2, col);
+    }
+}
+
+void grab_cancel(void) {
+    if (!s_grab_active) return;
+    s_grab_active = false;
+    s_grab_just_finished = true;
+    keymap = s_saved_keymap;
+
+    int mi = editor.inspector.selected_mesh_index;
+    if (mi >= 0 && mi < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[mi];
+        if (s_grab_is_bone) {
+            glm_mat4_copy(s_grab_initial_bone_override, m->bone_overrides[s_grab_local_j].world_offset);
+            glm_mat4_copy(s_grab_initial_model, s_grab_osg->world_transforms[s_grab_bnode_idx]);
+        } else {
+            glm_mat4_copy(s_grab_initial_model, m->model);
+            glm_mat4_copy(s_grab_initial_local, m->local_transform);
+            if (s_grab_initial_root_local[3][3] != 0.0f) {
+                int target_idx = mi;
+                for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+                    if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
+                        mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                        target_idx = (int)scene.gltf_instances[i].mesh_start_index;
+                        break;
+                    }
+                }
+                glm_mat4_copy(s_grab_initial_root_local, scene.meshes.items[target_idx].local_transform);
+            }
+        }
+        markMeshesSSBODirty(&context);
+    }
+}
+
+void grab_confirm(void) {
+    if (!s_grab_active) return;
+    s_grab_active = false;
+    s_grab_just_finished = true;
+    keymap = s_saved_keymap;
+}
+
+void grab_switch_to_translate(void) {
+    if (s_transform_mode == 0) return;
+    s_transform_mode = 0;
+    s_grab_axis = 0;
+    s_grab_start_mx = (float)s_ui_mx;
+    s_grab_start_my = (float)s_ui_my;
+    apply_grab_update();
+}
+
+void grab_switch_to_rotate(void) {
+    if (s_transform_mode == 1) return;
+    s_transform_mode = 1;
+    s_grab_axis = 0;
+    s_grab_start_mx = (float)s_ui_mx;
+    s_grab_start_my = (float)s_ui_my;
+    vec2 sc;
+    if (world_to_screen(s_grab_pivot, sc)) {
+        s_rot_start_angle = atan2(s_ui_my - sc[1], (float)s_ui_mx - sc[0]);
+    } else {
+        s_rot_start_angle = 0.0;
+    }
+    apply_grab_update();
+}
+
+void grab_lock_x(void) { s_grab_axis = 1; }
+void grab_lock_y(void) { s_grab_axis = 2; }
+void grab_lock_z(void) { s_grab_axis = 3; }
+
+void editor_start_transform(int mode) {
+    int mi = editor.inspector.selected_mesh_index;
+    if (mi < 0 || mi >= (int)scene.meshes.count) return;
+
+    s_grab_active = true;
+    s_transform_mode = mode;
+    s_grab_axis = 0; // Free transform mode
+    s_grab_start_mx = (float)s_ui_mx;
+    s_grab_start_my = (float)s_ui_my;
+    s_grab_is_bone = false;
+    s_grab_osg = NULL;
+    s_grab_local_j = -1;
+    memset(s_grab_initial_root_local, 0, sizeof(mat4));
+
+    Mesh* m = &scene.meshes.items[mi];
+    glm_mat4_copy(m->model, s_grab_initial_model);
+    glm_mat4_copy(m->local_transform, s_grab_initial_local);
+    glm_vec3_copy(m->model[3], s_grab_pivot);
+
+    if (editor_show_bones && editor_selected_bone && m->jointCount > 0) {
+        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+            if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
+                mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                GLTFInstance* inst = &scene.gltf_instances[i];
+                if (inst->gltf_data) {
+                    OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+                    OmdlNode* bnode = (OmdlNode*)editor_selected_bone;
+                    int32_t bnode_idx = (int32_t)(bnode - osg->nodes);
+                    if (bnode_idx >= 0 && bnode_idx < (int32_t)osg->node_count) {
+                        s_grab_is_bone = true;
+                        s_grab_osg = osg;
+                        s_grab_bnode_idx = bnode_idx;
+
+                        uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
+                        int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+                        if (skin_idx >= 0) {
+                            OmdlSkin* skin = &osg->skins[skin_idx];
+                            for (uint32_t j = 0; j < skin->joints_count; j++) {
+                                if (osg->skin_joints[skin->joints_offset + j] == (uint32_t)bnode_idx) {
+                                    s_grab_local_j = j; break;
+                                }
+                            }
+                        }
+
+                        if (s_grab_local_j >= 0) {
+                            if (!m->bone_overrides[s_grab_local_j].active) {
+                                glm_mat4_identity(m->bone_overrides[s_grab_local_j].world_offset);
+                                m->bone_overrides[s_grab_local_j].active = true;
+                            }
+                            glm_mat4_copy(m->bone_overrides[s_grab_local_j].world_offset, s_grab_initial_bone_override);
+                        } else {
+                            glm_mat4_identity(s_grab_initial_bone_override);
+                        }
+
+                        glm_mat4_copy(osg->world_transforms[bnode_idx], s_grab_initial_model);
+                        glm_vec3_copy(s_grab_initial_model[3], s_grab_pivot);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!s_grab_is_bone) {
+        int target_idx = mi;
+        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+            if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
+                mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                target_idx = (int)scene.gltf_instances[i].mesh_start_index;
+                break;
+            }
+        }
+        glm_mat4_copy(scene.meshes.items[target_idx].local_transform, s_grab_initial_root_local);
+    }
+
+    if (mode == 1) {
+        vec2 sc;
+        if (world_to_screen(s_grab_pivot, sc)) {
+            s_rot_start_angle = atan2(s_ui_my - sc[1], (float)s_ui_mx - sc[0]);
+        } else {
+            s_rot_start_angle = 0.0;
+        }
+    }
+
+    s_saved_keymap = keymap;
+    keymap = s_grab_keymap;
+}
+
+void editor_start_grab(void) { editor_start_transform(0); }
+void editor_start_rotate(void) { editor_start_transform(1); }
 
 static void toggle_bottom(void) { editor_toggle_panel(PANEL_BOTTOM); }
 
@@ -2323,7 +2730,6 @@ static void search_start(void) {
     s_fs_tree_state.scroll_start = s_fs_tree_state.scroll_y;
     s_fs_tree_state.scroll_t     = 1.0f;
 
-    extern KeyChordMap keymap;
     KeyChordMap temp = keymap;
     keymap = editor_search_keymap;
     editor_search_keymap = temp;
@@ -2451,16 +2857,17 @@ void editor_init(void) {
     editor.last_tab_click_time           = 0.0;
 
     // Cache SVGs instantly via our zero-copy binary pipeline
-    editor.file_manager.icon_folder      = texture_pool_add_svg(&context, "./assets/icons/Folder.svg", 16, 16);
-    editor.file_manager.icon_file        = texture_pool_add_svg(&context, "./assets/icons/File.svg", 16, 16);
+    editor.file_manager.icon_folder      = texture_pool_add_svg(&context, "./assets/icons/Folder.svg",            16, 16);
+    editor.file_manager.icon_file        = texture_pool_add_svg(&context, "./assets/icons/File.svg",              16, 16);
     editor.file_manager.icon_arrow_right = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowRight.svg", 16, 16);
-    editor.file_manager.icon_arrow_down  = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowDown.svg", 16, 16);
-    s_icon_lock = texture_pool_add_svg(&context, "./assets/icons/Lock.svg", 16, 16);
-    s_icon_mesh = texture_pool_add_svg(&context, "./assets/icons/MeshItem.svg", 16, 16);
-    s_icon_world = texture_pool_add_svg(&context, "./assets/icons/WorldEnvironment.svg", 16, 16);
-    s_icon_visible = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityVisible.svg", 16, 16);
-    s_icon_hidden = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityHidden.svg", 16, 16);
-    s_icon_bone = texture_pool_add_svg(&context, "./assets/icons/Bone.svg", 16, 16);
+    editor.file_manager.icon_arrow_down  = texture_pool_add_svg(&context, "./assets/icons/GuiTreeArrowDown.svg",  16, 16);
+    s_icon_lock     = texture_pool_add_svg(&context, "./assets/icons/Lock.svg",                 16, 16);
+    s_icon_mesh     = texture_pool_add_svg(&context, "./assets/icons/MeshItem.svg",             16, 16);
+    s_icon_world    = texture_pool_add_svg(&context, "./assets/icons/WorldEnvironment.svg",     16, 16);
+    s_icon_visible  = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityVisible.svg", 16, 16);
+    s_icon_hidden   = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityHidden.svg",  16, 16);
+    s_icon_bone     = texture_pool_add_svg(&context, "./assets/icons/Bone.svg",                 16, 16);
+    s_icon_skeleton = texture_pool_add_svg(&context, "./assets/icons/SkeletonModifier.svg",     16, 16);
 
     file_manager_navigate("./assets");
 
@@ -2468,27 +2875,36 @@ void editor_init(void) {
     editor.font = load_font("./assets/fonts/MapleMono-NF-Regular.ttf", 18);
 
     // ── Keybindings ───────────────────────────────────────────────────────
-    /* keychord_bind(&keymap, "M-j", toggle_bottom,        "Toggle file manager",   PRESS); */
-    /* keychord_bind(&keymap, "M-k", toggle_top,            "Toggle Vertico",        PRESS); */
     keychord_bind(&keymap, "M-l", toggle_right,          "Toggle Inspector",      PRESS);
     keychord_bind(&keymap, "M-h", toggle_left,           "Toggle Hierarchy",      PRESS);
     keychord_bind(&keymap, "C-s", search_start,          "Start search",          PRESS);
     keychord_bind(&keymap, "a",   open_animation_editor, "Open Animation Editor", PRESS);
     keychord_bind(&keymap, "c",   cb_open_color_picker,  "Pick Mesh Color",       PRESS);
+    keychord_bind(&keymap, "g",   editor_start_grab,     "Grab (Translate)",      PRESS);
+    keychord_bind(&keymap, "r",   editor_start_rotate,   "Rotate",                PRESS);
+
+    keymap_init(&s_grab_keymap);
+    keychord_bind(&s_grab_keymap, "ESC", grab_cancel,              "Cancel Grab",         PRESS);
+    keychord_bind(&s_grab_keymap, "C-g", grab_cancel,              "Cancel Grab",         PRESS);
+    keychord_bind(&s_grab_keymap, "RET", grab_confirm,             "Confirm Grab",        PRESS);
+    keychord_bind(&s_grab_keymap, "x",   grab_lock_x,              "Lock X Axis",         PRESS);
+    keychord_bind(&s_grab_keymap, "y",   grab_lock_y,              "Lock Y Axis",         PRESS);
+    keychord_bind(&s_grab_keymap, "z",   grab_lock_z,              "Lock Z Axis",         PRESS);
+    keychord_bind(&s_grab_keymap, "g",   grab_switch_to_translate, "Switch to Translate", PRESS);
+    keychord_bind(&s_grab_keymap, "r",   grab_switch_to_rotate,    "Switch to Rotate",    PRESS);
 
     keymap_init(&editor_search_keymap);
-    keychord_bind(&editor_search_keymap, "C-g", search_cancel, "Cancel search", PRESS);
-    keychord_bind(&editor_search_keymap, "RET", search_commit, "Commit search", PRESS);
-    keychord_bind(&editor_search_keymap, "C-n", search_next, "Next search match", PRESS | REPEAT);
-    keychord_bind(&editor_search_keymap, "C-p", search_prev, "Prev search match", PRESS | REPEAT);
-    keychord_bind(&editor_search_keymap, "DEL", editor_search_backspace, "Search backspace", PRESS | REPEAT);
-
-    keychord_bind(&editor_search_keymap, "C-b", editor_search_cursor_left, "Cursor left", PRESS | REPEAT);
-    keychord_bind(&editor_search_keymap, "C-f", editor_search_cursor_right, "Cursor right", PRESS | REPEAT);
-    keychord_bind(&editor_search_keymap, "C-a", editor_search_cursor_start, "Cursor start", PRESS);
-    keychord_bind(&editor_search_keymap, "C-e", editor_search_cursor_end, "Cursor end", PRESS);
-    keychord_bind(&editor_search_keymap, "C-d", editor_search_delete_char, "Delete char", PRESS | REPEAT);
-    keychord_bind(&editor_search_keymap, "C-k", editor_search_kill_line, "Kill line", PRESS);
+    keychord_bind(&editor_search_keymap, "C-g", search_cancel,              "Cancel search",     PRESS);
+    keychord_bind(&editor_search_keymap, "RET", search_commit,              "Commit search",     PRESS);
+    keychord_bind(&editor_search_keymap, "C-n", search_next,                "Next search match", PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-p", search_prev,                "Prev search match", PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "DEL", editor_search_backspace,    "Search backspace",  PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-b", editor_search_cursor_left,  "Cursor left",       PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-f", editor_search_cursor_right, "Cursor right",      PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-a", editor_search_cursor_start, "Cursor start",      PRESS);
+    keychord_bind(&editor_search_keymap, "C-e", editor_search_cursor_end,   "Cursor end",        PRESS);
+    keychord_bind(&editor_search_keymap, "C-d", editor_search_delete_char,  "Delete char",       PRESS | REPEAT);
+    keychord_bind(&editor_search_keymap, "C-k", editor_search_kill_line,    "Kill line",         PRESS);
 
     colorpicker_init(&s_color_picker);
     image_viewer_init(&s_image_viewer);
@@ -2501,8 +2917,6 @@ void editor_init(void) {
 
     text_editor_init();
     anim_editor_init();
-
-    fprintf(stdout, "[Editor] Initialized — easeOutExpo panels, MapleMono 18px\n");
 }
 
 void editor_cleanup(void) {
@@ -2524,6 +2938,10 @@ void editor_update(void) {
     editor.last_time = now;
     if (dt > EDITOR_MAX_DT) dt = EDITOR_MAX_DT;
     s_ui_dt = dt;
+
+    if (s_grab_active) {
+        apply_grab_update();
+    }
 
     if (s_ui_active_id == &editor.panels[PANEL_BOTTOM].size) {
         float sh = (float)context.swapChainExtent.height;
@@ -2715,6 +3133,7 @@ void editor_render(void) {
     }
 
     s_ui_mclicked = false; // Reset one-frame click flag
+    s_grab_just_finished = false; // Clear the click-blocker
 }
 
 /// Panel Control
@@ -2746,6 +3165,7 @@ bool editor_panel_is_open(PanelSide side) {
 void inspector_select_mesh(int index) {
     editor.inspector.selected_mesh_index = index;
     editor.hierarchy.selected_index      = index;
+    s_inspector_show_skeleton_only       = false;
     gizmo.active = true;
     editor_selected_bone = NULL;
     s_bone_tree_state.selected_index = -1;
@@ -2766,6 +3186,7 @@ void inspector_select_mesh(int index) {
 void inspector_deselect(void) {
     editor.inspector.selected_mesh_index = -1;
     editor.hierarchy.selected_index      = -1;
+    s_inspector_show_skeleton_only       = false;
     gizmo.active = false;
     editor_selected_bone = NULL;
     s_bone_tree_state.selected_index = -1;
@@ -2775,6 +3196,7 @@ void inspector_deselect(void) {
 
 void hierarchy_select(int index) {
     editor.hierarchy.selected_index = index;
+    s_inspector_show_skeleton_only  = false;
     if (index >= 0 && index < (int)scene.meshes.count) {
         editor.inspector.selected_mesh_index = index;
         gizmo.active = true;

@@ -110,14 +110,14 @@ void tree_view_render(
             float vis_x = cx + cw - vis_size;
             if (item->has_visibility && mx >= vis_x && mx <= vis_x + vis_size) {
                 if (cb->on_toggle_visibility)
-                    cb->on_toggle_visibility(i, item->user_data);
+                    cb->on_toggle_visibility(i, item);
             } else if ((item->type == TREE_ITEM_DIR || item->type == TREE_ITEM_GROUP) &&
                 mx < row_x + 18.0f) {
                 if (cb->on_toggle_expand)
-                    cb->on_toggle_expand(i, item->user_data);
+                    cb->on_toggle_expand(i, item);
             } else {
                 if (cb->on_select)
-                    cb->on_select(i, item->user_data);
+                    cb->on_select(i, item);
             }
         }
 

@@ -14,6 +14,7 @@ typedef enum {
 typedef struct {
     const char* name;
     TreeItemType type;
+    int          tag;  // Generic integer tag for custom classification
     int          depth;
     bool         expanded;
     bool         selected;
@@ -32,9 +33,9 @@ typedef struct {
 } TreeViewItem;
 
 typedef struct {
-    void (*on_select)(int item_index, void* user_data);
-    void (*on_toggle_expand)(int item_index, void* user_data);
-    void (*on_toggle_visibility)(int item_index, void* user_data);
+    void (*on_select)(int item_index, const TreeViewItem* item);
+    void (*on_toggle_expand)(int item_index, const TreeViewItem* item);
+    void (*on_toggle_visibility)(int item_index, const TreeViewItem* item);
 } TreeViewCallbacks;
 
 typedef struct {
