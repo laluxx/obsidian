@@ -144,6 +144,7 @@ static mat4   s_drag_start_bone_override;
 
 extern bool editor_show_bones;
 extern void* editor_selected_bone;
+extern void inspector_select_bone(void* bone);
 void* editor_hovered_bone = NULL;
 
 static mat4* get_bone_world_matrix(int mesh_index, OmdlSceneGraph** out_osg, int32_t* out_bnode_idx) {
@@ -578,6 +579,13 @@ static void apply_drag(int mesh_index, double mx, double my) {
             }
         }
 
+        if (glfwGetKey(context.window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+            glfwGetKey(context.window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) {
+            delta[0] = roundf(delta[0]);
+            delta[1] = roundf(delta[1]);
+            delta[2] = roundf(delta[2]);
+        }
+
         new_world[3][0] += delta[0];
         new_world[3][1] += delta[1];
         new_world[3][2] += delta[2];
@@ -624,6 +632,13 @@ static void apply_drag(int mesh_index, double mx, double my) {
         glm_mat4_identity(R);
 
         float mesh_angle = (part == GIZMO_PART_RS) ? -s_rot_angle : s_rot_angle;
+
+        if (glfwGetKey(context.window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+            glfwGetKey(context.window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) {
+            float snap_step = GLM_PI / 12.0f; // 15 degrees snap
+            mesh_angle = roundf(mesh_angle / snap_step) * snap_step;
+        }
+
         glm_rotate(R, mesh_angle, n);
 
         glm_mat4_mul(T, R, result);
@@ -709,6 +724,14 @@ static void apply_drag(int mesh_index, double mx, double my) {
             1.0f - (delta[1] / gizmo_scale),
             1.0f + (delta[2] / gizmo_scale)
         };
+
+        if (glfwGetKey(context.window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+            glfwGetKey(context.window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) {
+            // Godot scale snap defaults to 0.1 increments
+            scale_v[0] = roundf(scale_v[0] * 10.0f) / 10.0f;
+            scale_v[1] = roundf(scale_v[1] * 10.0f) / 10.0f;
+            scale_v[2] = roundf(scale_v[2] * 10.0f) / 10.0f;
+        }
 
         if (part == GIZMO_PART_X) { scale_v[1] = 1.0f; scale_v[2] = 1.0f; }
         else if (part == GIZMO_PART_Y) { scale_v[0] = 1.0f; scale_v[2] = 1.0f; }
@@ -1107,9 +1130,60 @@ void gizmo_render(int mesh_index) {
             }
             line(prs1, prs2, CT.gizmo_outer_circle_bright);
         }
+
+        // Draw Translation Snap Ticks
+        if (gizmo.mode == GIZMO_MODE_TRANSLATE &&
+            (glfwGetKey(context.window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+             glfwGetKey(context.window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS)) {
+
+            // Calculate scale from the fixed pivot, so ticks don't grow as the object moves away
+            float tick_size = gizmo_world_scale(gizmo.drag_start_pivot) * 0.15f;
+            line_set_width(2.0f);
+
+            // Draw enough ticks to appear completely infinite along the main guide line
+            int tick_count = 1000;
+
+            if (draw_x) {
+                vec3 perp = {0.0f, -1.0f, 0.0f}; // Inverted UP
+                int base_offset = (int)roundf(origin[0] - gizmo.drag_start_pivot[0]);
+                for (int i = -tick_count; i <= tick_count; i++) {
+                    vec3 start; glm_vec3_copy(origin, start);
+                    start[0] = gizmo.drag_start_pivot[0] + (float)(base_offset + i);
+                    vec3 end;
+                    for(int k=0;k<3;k++) end[k] = start[k] + perp[k] * tick_size;
+                    Color c = {CT.x_bright.r, CT.x_bright.g, CT.x_bright.b, 0.7f};
+                    line(start, end, c);
+                }
+            }
+            if (draw_y) {
+                vec3 perp = {-1.0f, 0.0f, 0.0f}; // Inverted RIGHT
+                int base_offset = (int)roundf(origin[1] - gizmo.drag_start_pivot[1]);
+                for (int i = -tick_count; i <= tick_count; i++) {
+                    vec3 start; glm_vec3_copy(origin, start);
+                    start[1] = gizmo.drag_start_pivot[1] + (float)(base_offset + i);
+                    vec3 end;
+                    for(int k=0;k<3;k++) end[k] = start[k] + perp[k] * tick_size;
+                    Color c = {CT.y_bright.r, CT.y_bright.g, CT.y_bright.b, 0.7f};
+                    line(start, end, c);
+                }
+            }
+            if (draw_z) {
+                vec3 perp = {0.0f, -1.0f, 0.0f}; // Inverted UP
+                int base_offset = (int)roundf(origin[2] - gizmo.drag_start_pivot[2]);
+                for (int i = -tick_count; i <= tick_count; i++) {
+                    vec3 start; glm_vec3_copy(origin, start);
+                    start[2] = gizmo.drag_start_pivot[2] + (float)(base_offset + i);
+                    vec3 end;
+                    for(int k=0;k<3;k++) end[k] = start[k] + perp[k] * tick_size;
+                    Color c = {CT.z_bright.r, CT.z_bright.g, CT.z_bright.b, 0.7f};
+                    line(start, end, c);
+                }
+            }
+        }
     }
 
     float scale = true_scale * (render_dist / true_dist);
+
     glm_vec3_copy(render_origin, origin); // Override origin for the drawing functions
 
     // --- Helper: choose colour (highlight if hovered/dragging) ---
@@ -1151,16 +1225,46 @@ void gizmo_render(int mesh_index) {
             // 1. Draw full closed background ring
             draw_full_ring(origin, n, active_scale, base_c);
 
+            float display_angle = s_rot_angle;
+            bool is_snapping = (glfwGetKey(context.window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                                glfwGetKey(context.window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
+
+            if (is_snapping) {
+                float snap_step = GLM_PI / 12.0f;
+                display_angle = roundf(display_angle / snap_step) * snap_step;
+            }
+
             // 2. Fill rotated slice (starts exactly at the drag origin, sweeps to current angle)
             Color pie_c = {base_c.r, base_c.g, base_c.b, GIZMO_PIE_ALPHA};
-            draw_pie(origin, n, s_rot_v_start, s_rot_angle, active_scale, pie_c);
+            draw_pie(origin, n, s_rot_v_start, display_angle, active_scale, pie_c);
+
+            if (is_snapping) {
+                float snap_step = GLM_PI / 12.0f;
+                line_set_width(2.0f);
+                Color tick_c = {base_c.r, base_c.g, base_c.b, 0.7f};
+                for (int i = 0; i < 24; i++) {
+                    float ang = i * snap_step;
+                    vec3 tick_pt, tick_inner;
+                    mat4 rot; glm_mat4_identity(rot);
+                    glm_rotate(rot, ang, n);
+                    vec4 v_start4 = {s_rot_v_start[0], s_rot_v_start[1], s_rot_v_start[2], 0.0f};
+                    vec4 v_curr4;
+                    glm_mat4_mulv(rot, v_start4, v_curr4);
+
+                    for(int k=0;k<3;k++) {
+                        tick_pt[k] = origin[k] + v_curr4[k] * active_scale;
+                        tick_inner[k] = origin[k] + v_curr4[k] * (active_scale * 0.90f);
+                    }
+                    line(tick_pt, tick_inner, tick_c);
+                }
+            }
 
             // 3. Draw lines at the two edges of the pie slice (extended slightly)
             Color line_c = (gizmo.dragging == GIZMO_PART_RS) ? CT.gizmo_outer_circle_bright : base_c;
 
             vec3 pt_start, pt_curr;
             mat4 rot; glm_mat4_identity(rot);
-            glm_rotate(rot, s_rot_angle, n);
+            glm_rotate(rot, display_angle, n);
             vec4 v_start4 = {s_rot_v_start[0], s_rot_v_start[1], s_rot_v_start[2], 0.0f};
             vec4 v_curr4;
             glm_mat4_mulv(rot, v_start4, v_curr4);
@@ -1496,7 +1600,7 @@ void gizmo_mouse_button(int button, int action, int mods, double xpos, double yp
                 }
             }
         } else if (editor_hovered_bone != NULL) {
-            editor_selected_bone = editor_hovered_bone;
+            inspector_select_bone(editor_hovered_bone);
         } else {
             // Not over gizmo → pick mesh
             gizmo_pick_mesh(xpos, ypos); // ypos in screen-top coords (pick handles flip)

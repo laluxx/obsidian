@@ -13,6 +13,8 @@ typedef struct {
     Color text_dim;
     Color border;
     Color accent;
+    Color red;
+    Color blue;
     Color x;
     Color y;
     Color z;

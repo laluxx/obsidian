@@ -80,6 +80,8 @@ void initThemes() {
         .fringe_fg             = hexToColor("#E3E3E3"),
         .fringe_bg             = hexToColor("#131314"),
         .minibuffer            = hexToColor("#131314"),
+        .red                   = hexToColor("#FC7F7F"),
+        .blue                  = hexToColor("#8DA5F3"),
         .x                     = hexToColor("#EF4F6B"),
         .y                     = hexToColor("#87D602"),
         .z                     = hexToColor("#298CF5"),

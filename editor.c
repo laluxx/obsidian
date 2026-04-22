@@ -45,7 +45,9 @@ static int32_t s_icon_visible = -1;
 static int32_t s_icon_hidden = -1;
 static int32_t s_icon_bone = -1;
 static int32_t s_icon_skeleton = -1;
+static int32_t s_icon_material = -1;
 static bool s_inspector_show_skeleton_only = false;
+static bool s_inspector_show_material_only = false;
 
 static float s_ui_dt = 0.0f;
 
@@ -127,6 +129,7 @@ static float s_bottom_start_size = 280.0f;
 static float s_bottom_target_size = 280.0f;
 
 static bool s_hier_needs_scroll = false;
+static bool s_bone_needs_scroll = false;
 
 // --- Search & Incremental Caching State ---
 static bool  s_is_searching = false;
@@ -1089,6 +1092,23 @@ static void render_image_inspector_content(float cx, float cy, float cw, float c
 static void bone_on_select(int index, const TreeViewItem* item) {
     s_bone_tree_state.selected_index = index;
     editor_selected_bone = item->user_data;
+    s_inspector_show_skeleton_only = true;
+    s_inspector_show_material_only = false;
+
+    int mesh_idx = editor.inspector.selected_mesh_index;
+    if (mesh_idx >= 0) {
+        for (int i = 0; i < scene.tree.count; i++) {
+            if (scene.tree.nodes[i].mesh_index == mesh_idx) {
+                int p = i;
+                while (p >= 0) {
+                    scene.tree.nodes[p].expanded = true;
+                    p = scene.tree.nodes[p].parent;
+                }
+                break;
+            }
+        }
+    }
+    s_hier_needs_scroll = true;
 }
 
 static void bone_on_toggle_expand(int index, const TreeViewItem* item) {
@@ -1132,173 +1152,179 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     static bool s_sec_animation = true;
 
     // ── Transform ──────────────────────────────────────────────────────────
-    if (!s_inspector_show_skeleton_only) {
+    if (!s_inspector_show_skeleton_only && !s_inspector_show_material_only) {
         if (begin_section("Transform", &s_sec_transform, cx, &row, cw, lh)) {
-        vec3 pos = {m->local_transform[3][0], m->local_transform[3][1], m->local_transform[3][2]};
-        vec3 euler;
-        glm_euler_angles(m->local_transform, euler);
-        vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
-        vec3 scale = {
-            glm_vec3_norm((vec3){m->local_transform[0][0], m->local_transform[1][0], m->local_transform[2][0]}),
-            glm_vec3_norm((vec3){m->local_transform[0][1], m->local_transform[1][1], m->local_transform[2][1]}),
-            glm_vec3_norm((vec3){m->local_transform[0][2], m->local_transform[1][2], m->local_transform[2][2]})
-        };
+            vec3 pos = {m->local_transform[3][0], m->local_transform[3][1], m->local_transform[3][2]};
+            vec3 euler;
+            glm_euler_angles(m->local_transform, euler);
+            vec3 rot_deg = {glm_deg(euler[0]), glm_deg(euler[1]), glm_deg(euler[2])};
+            vec3 scale = {
+                glm_vec3_norm((vec3){m->local_transform[0][0], m->local_transform[1][0], m->local_transform[2][0]}),
+                glm_vec3_norm((vec3){m->local_transform[0][1], m->local_transform[1][1], m->local_transform[2][1]}),
+                glm_vec3_norm((vec3){m->local_transform[0][2], m->local_transform[1][2], m->local_transform[2][2]})
+            };
 
-        bool transform_changed = false;
-        transform_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f, -1);
-        row -= lh + 6.0f;
-        transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f, -1);
-        row -= lh + 6.0f;
-        transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "x", 0.02f, -1);
-        row -= lh + 6.0f;
-        row -= 6.0f;
+            bool transform_changed = false;
+            transform_changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f, -1);
+            row -= lh + 6.0f;
+            transform_changed |= field_vec3(cx, row, col2, cw, "Rotation", rot_deg, "°", 0.5f, -1);
+            row -= lh + 6.0f;
+            transform_changed |= field_vec3(cx, row, col2, cw, "Scale", scale, "x", 0.02f, -1);
+            row -= lh + 6.0f;
+            row -= 6.0f;
 
-        if (transform_changed) {
-            glm_mat4_identity(m->local_transform);
-            glm_translate(m->local_transform, pos);
-            glm_rotate_z(m->local_transform, glm_rad(rot_deg[2]), m->local_transform);
-            glm_rotate_y(m->local_transform, glm_rad(rot_deg[1]), m->local_transform);
-            glm_rotate_x(m->local_transform, glm_rad(rot_deg[0]), m->local_transform);
-            glm_scale(m->local_transform, scale);
+            if (transform_changed) {
+                glm_mat4_identity(m->local_transform);
+                glm_translate(m->local_transform, pos);
+                glm_rotate_z(m->local_transform, glm_rad(rot_deg[2]), m->local_transform);
+                glm_rotate_y(m->local_transform, glm_rad(rot_deg[1]), m->local_transform);
+                glm_rotate_x(m->local_transform, glm_rad(rot_deg[0]), m->local_transform);
+                glm_scale(m->local_transform, scale);
 
-            // Sync to model matrix for immediate rendering
-            glm_mat4_copy(m->local_transform, m->model);
-            markMeshesSSBODirty(&context);
+                // Sync to model matrix for immediate rendering
+                glm_mat4_copy(m->local_transform, m->model);
+                markMeshesSSBODirty(&context);
+            }
         }
     }
 
     // ── Material ───────────────────────────────────────────────────────────
-    if (begin_section("Material", &s_sec_material, cx, &row, cw, lh)) {
-        static vec4 s_proxy_emissive = {0};
-        static vec4 s_proxy_attenuation = {0};
-        static int s_proxy_mesh_idx = -1;
+    if (!s_inspector_show_skeleton_only) {
+        if (begin_section("Material", &s_sec_material, cx, &row, cw, lh)) {
+            static vec4 s_proxy_emissive = {0};
+            static vec4 s_proxy_attenuation = {0};
+            static int s_proxy_mesh_idx = -1;
 
-        if (s_proxy_mesh_idx != s->selected_mesh_index || (!s_color_picker.visible && s_ui_active_id == NULL)) {
-            s_proxy_mesh_idx = s->selected_mesh_index;
-            s_proxy_emissive[0] = m->emissiveFactor[0];
-            s_proxy_emissive[1] = m->emissiveFactor[1];
-            s_proxy_emissive[2] = m->emissiveFactor[2];
-            s_proxy_emissive[3] = 1.0f;
+            if (s_proxy_mesh_idx != s->selected_mesh_index || (!s_color_picker.visible && s_ui_active_id == NULL)) {
+                s_proxy_mesh_idx = s->selected_mesh_index;
+                s_proxy_emissive[0] = m->emissiveFactor[0];
+                s_proxy_emissive[1] = m->emissiveFactor[1];
+                s_proxy_emissive[2] = m->emissiveFactor[2];
+                s_proxy_emissive[3] = 1.0f;
 
-            s_proxy_attenuation[0] = m->attenuationColor[0];
-            s_proxy_attenuation[1] = m->attenuationColor[1];
-            s_proxy_attenuation[2] = m->attenuationColor[2];
-            s_proxy_attenuation[3] = 1.0f;
-        }
+                s_proxy_attenuation[0] = m->attenuationColor[0];
+                s_proxy_attenuation[1] = m->attenuationColor[1];
+                s_proxy_attenuation[2] = m->attenuationColor[2];
+                s_proxy_attenuation[3] = 1.0f;
+            }
 
-        bool mat_changed = false;
-        mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor, -1);
-        row -= lh + 6.0f;
+            bool mat_changed = false;
+            mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_vec4_color(cx, row, col2, cw, "Emissive", s_proxy_emissive, -1);
-        if (m->emissiveFactor[0] != s_proxy_emissive[0] || m->emissiveFactor[1] != s_proxy_emissive[1] || m->emissiveFactor[2] != s_proxy_emissive[2]) {
-            m->emissiveFactor[0] = s_proxy_emissive[0];
-            m->emissiveFactor[1] = s_proxy_emissive[1];
-            m->emissiveFactor[2] = s_proxy_emissive[2];
-            mat_changed = true;
-        }
-        row -= lh + 6.0f;
+            mat_changed |= field_vec4_color(cx, row, col2, cw, "Emissive", s_proxy_emissive, -1);
+            if (m->emissiveFactor[0] != s_proxy_emissive[0] || m->emissiveFactor[1] != s_proxy_emissive[1] || m->emissiveFactor[2] != s_proxy_emissive[2]) {
+                m->emissiveFactor[0] = s_proxy_emissive[0];
+                m->emissiveFactor[1] = s_proxy_emissive[1];
+                m->emissiveFactor[2] = s_proxy_emissive[2];
+                mat_changed = true;
+            }
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f, -1);
-        row -= lh + 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f, -1);
-        row -= lh + 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f, -1);
-        row -= lh + 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f, -1);
-        row -= lh + 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f, -1);
-        row -= lh + 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "Thickness", &m->thicknessFactor, 0.01f, true, 0.0f, 100.0f, -1);
-        row -= lh + 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "Thickness", &m->thicknessFactor, 0.01f, true, 0.0f, 100.0f, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_vec4_color(cx, row, col2_mat, cw, "Atten. Color", s_proxy_attenuation, -1);
-        if (m->attenuationColor[0] != s_proxy_attenuation[0] || m->attenuationColor[1] != s_proxy_attenuation[1] || m->attenuationColor[2] != s_proxy_attenuation[2]) {
-            m->attenuationColor[0] = s_proxy_attenuation[0];
-            m->attenuationColor[1] = s_proxy_attenuation[1];
-            m->attenuationColor[2] = s_proxy_attenuation[2];
-            mat_changed = true;
-        }
-        row -= lh + 6.0f;
+            mat_changed |= field_vec4_color(cx, row, col2_mat, cw, "Atten. Color", s_proxy_attenuation, -1);
+            if (m->attenuationColor[0] != s_proxy_attenuation[0] || m->attenuationColor[1] != s_proxy_attenuation[1] || m->attenuationColor[2] != s_proxy_attenuation[2]) {
+                m->attenuationColor[0] = s_proxy_attenuation[0];
+                m->attenuationColor[1] = s_proxy_attenuation[1];
+                m->attenuationColor[2] = s_proxy_attenuation[2];
+                mat_changed = true;
+            }
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "Atten. Distance", &m->attenuationDistance, 0.1f, true, 0.0f, 1e6f, -1);
-        row -= lh + 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "Atten. Distance", &m->attenuationDistance, 0.1f, true, 0.0f, 1e6f, -1);
+            row -= lh + 6.0f;
 
-        mat_changed |= field_float(cx, row, col2_mat, cw, "Dispersion", &m->dispersion, 0.01f, true, 0.0f, 1.0f, -1);
-        row -= lh + 6.0f;
-        row -= 6.0f;
+            mat_changed |= field_float(cx, row, col2_mat, cw, "Dispersion", &m->dispersion, 0.01f, true, 0.0f, 1.0f, -1);
+            row -= lh + 6.0f;
+            row -= 6.0f;
 
-        if (mat_changed) {
-            markMeshesSSBODirty(&context);
+            if (mat_changed) {
+                markMeshesSSBODirty(&context);
+            }
         }
     }
 
     // ── Geometry ───────────────────────────────────────────────────────────
-    if (begin_section("Geometry", &s_sec_geometry, cx, &row, cw, lh)) {
-        char buf[64];
-        snprintf(buf, sizeof buf, "%u", m->vertexCount);
-        field_text(cx, row, col2_geo, cw, "Vertices", buf, -1);
-        row -= lh + 6.0f;
+    if (!s_inspector_show_skeleton_only && !s_inspector_show_material_only) {
+        if (begin_section("Geometry", &s_sec_geometry, cx, &row, cw, lh)) {
+            char buf[64];
+            snprintf(buf, sizeof buf, "%u", m->vertexCount);
+            field_text(cx, row, col2_geo, cw, "Vertices", buf, -1);
+            row -= lh + 6.0f;
 
-        snprintf(buf, sizeof buf, "%u", m->indexCount);
-        field_text(cx, row, col2_geo, cw, "Indices", buf, -1);
-        row -= lh + 6.0f;
+            snprintf(buf, sizeof buf, "%u", m->indexCount);
+            field_text(cx, row, col2_geo, cw, "Indices", buf, -1);
+            row -= lh + 6.0f;
 
-        if (field_toggle(cx, row, col2_geo, cw, "Visible", &m->visible, -1)) {
-            if (m->node) {
-                scene.tree.nodes[(uint32_t)(uintptr_t)m->node].visible = m->visible;
-            }
-            markMeshesSSBODirty(&context);
-        }
-        row -= lh + 6.0f;
-
-        const char* amode = (m->alpha_mode == 0) ? "Opaque" : (m->alpha_mode == 1) ? "Mask" : "Blend";
-        field_text(cx, row, col2_geo, cw, "Alpha Mode", amode, -1);
-        row -= lh + 6.0f;
-
-        if (m->alpha_mode == 1) {
-            if (field_float(cx, row, col2_geo, cw, "Alpha Cutoff", &m->alpha_cutoff, 0.01f, true, 0.0f, 1.0f, -1)) {
+            if (field_toggle(cx, row, col2_geo, cw, "Visible", &m->visible, -1)) {
+                if (m->node) {
+                    scene.tree.nodes[(uint32_t)(uintptr_t)m->node].visible = m->visible;
+                }
                 markMeshesSSBODirty(&context);
             }
             row -= lh + 6.0f;
-        }
 
-        if (field_toggle(cx, row, col2_geo, cw, "Unlit", &m->is_unlit, -1)) {
-            markMeshesSSBODirty(&context);
-        }
-        row -= lh + 6.0f;
-
-        if (field_toggle(cx, row, col2_geo, cw, "Wireframe", &m->wireframe, -1)) {
-            markMeshesSSBODirty(&context);
-        }
-        row -= lh + 6.0f;
-
-        if (m->name) {
-            field_text(cx, row, col2_geo, cw, "Name", m->name, -1);
+            const char* amode = (m->alpha_mode == 0) ? "Opaque" : (m->alpha_mode == 1) ? "Mask" : "Blend";
+            field_text(cx, row, col2_geo, cw, "Alpha Mode", amode, -1);
             row -= lh + 6.0f;
+
+            if (m->alpha_mode == 1) {
+                if (field_float(cx, row, col2_geo, cw, "Alpha Cutoff", &m->alpha_cutoff, 0.01f, true, 0.0f, 1.0f, -1)) {
+                    markMeshesSSBODirty(&context);
+                }
+                row -= lh + 6.0f;
+            }
+
+            if (field_toggle(cx, row, col2_geo, cw, "Unlit", &m->is_unlit, -1)) {
+                markMeshesSSBODirty(&context);
+            }
+            row -= lh + 6.0f;
+
+            if (field_toggle(cx, row, col2_geo, cw, "Wireframe", &m->wireframe, -1)) {
+                markMeshesSSBODirty(&context);
+            }
+            row -= lh + 6.0f;
+
+            if (m->name) {
+                field_text(cx, row, col2_geo, cw, "Name", m->name, -1);
+                row -= lh + 6.0f;
+            }
+            row -= 6.0f;
         }
-        row -= 6.0f;
+
+        // ── Bounds ─────────────────────────────────────────────────────────────
+        if (!s_inspector_show_skeleton_only && !s_inspector_show_material_only) {
+            if (begin_section("Bounds", &s_sec_bounds, cx, &row, cw, lh)) {
+                vec3 bmin = {m->aabbMin[0], m->aabbMin[1], m->aabbMin[2]};
+                vec3 bmax = {m->aabbMax[0], m->aabbMax[1], m->aabbMax[2]};
+                field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m", 0.0f, s_icon_lock);
+                row -= lh + 6.0f;
+                field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m", 0.0f, s_icon_lock);
+                row -= lh + 6.0f;
+                row -= 6.0f;
+            }
+        }
     }
 
-    // ── Bounds ─────────────────────────────────────────────────────────────
-    if (begin_section("Bounds", &s_sec_bounds, cx, &row, cw, lh)) {
-        vec3 bmin = {m->aabbMin[0], m->aabbMin[1], m->aabbMin[2]};
-        vec3 bmax = {m->aabbMax[0], m->aabbMax[1], m->aabbMax[2]};
-        field_vec3(cx, row, col2, cw, "AABB Min", bmin, "m", 0.0f, s_icon_lock);
-        row -= lh + 6.0f;
-        field_vec3(cx, row, col2, cw, "AABB Max", bmax, "m", 0.0f, s_icon_lock);
-        row -= lh + 6.0f;
-        row -= 6.0f;
-    }
-    }
-
-    // ── Skeleton ──────────────────────────────────────────────────────────
-    if (m->jointCount > 0 || m->morphCount > 0) {
+    // ── Skeleton ──────────────────────────────────────────────────────────a
+    if (!s_inspector_show_material_only && (m->jointCount > 0 || m->morphCount > 0)) {
         if (begin_section("Skeleton", &s_sec_animation, cx, &row, cw, lh)) {
 
             field_toggle(cx, row, col2_anim, cw, "Show Bones", &editor_show_bones, -1);
@@ -1410,7 +1436,26 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
                             &s_bone_tree_state, bone_items, b_item_count,
                             cx + tree_pad, row, cw - tree_pad * 2.0f, tree_h, tab_y + 6.0f, editor.font,
                             s_ui_mx, s_ui_my, s_ui_mdown, s_ui_mclicked, NULL, &bone_cb
-                        );
+                            );
+
+                        if (s_bone_needs_scroll) {
+                            s_bone_needs_scroll = false;
+                            for (int i = 0; i < b_item_count; i++) {
+                                if (bone_items[i].selected) {
+                                    float item_lh = editor.font->ascent - editor.font->descent + 11.0f;
+                                    float target_y_pos = i * item_lh;
+                                    float scroll_y = s_bone_tree_state.scroll_target;
+
+                                    if (target_y_pos < scroll_y || target_y_pos > scroll_y + tree_h - item_lh) {
+                                        s_bone_tree_state.scroll_start  = s_bone_tree_state.scroll_y;
+                                        s_bone_tree_state.scroll_target = target_y_pos - (tree_h * 0.5f);
+                                        if (s_bone_tree_state.scroll_target < 0.0f) s_bone_tree_state.scroll_target = 0.0f;
+                                        s_bone_tree_state.scroll_t = 0.0f;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         row -= 24.0f; // Added extra vertical padding before Transform fields
 
                         if (s_bone_tree_state.selected_index >= 0 && s_bone_tree_state.selected_index < b_item_count) {
@@ -1887,6 +1932,14 @@ static void hier_on_select(int index, const TreeViewItem* item) {
     if (node->mesh_index >= 0) {
         inspector_select_mesh(node->mesh_index);
         s_inspector_show_skeleton_only = (item->tag == 1); // 1 = Skeleton Node
+        s_inspector_show_material_only = false;
+    } else if (strcmp(node->name, "Material") == 0 && node->parent >= 0) {
+        SceneNode* parent_node = &scene.tree.nodes[node->parent];
+        if (parent_node->mesh_index >= 0) {
+            inspector_select_mesh(parent_node->mesh_index);
+            s_inspector_show_skeleton_only = false;
+            s_inspector_show_material_only = true;
+        }
     }
 }
 
@@ -2003,7 +2056,7 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
             tv->icon_expanded  = editor.file_manager.icon_arrow_down;
             tv->icon_collapsed = editor.file_manager.icon_arrow_right;
             tv->icon_leaf      = s_icon_skeleton;
-            tv->icon_tint      = CT.accent;
+            tv->icon_tint      = (Color){1.0f, 1.0f, 1.0f, 1.0f};
             tv->show_dot       = false;
             tv->has_visibility = true;
             tv->is_visible     = editor_show_bones;
@@ -2014,20 +2067,32 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
         } else {
             tv->name           = node->name;
             tv->type           = (is_group || has_skel) ? TREE_ITEM_GROUP : TREE_ITEM_FILE;
+            if (is_group && strcmp(node->name, "Material") == 0) tv->type = TREE_ITEM_FILE;
             tv->tag            = 0; // 0 = Standard Node
             tv->depth          = d;
             tv->expanded       = node->expanded;
-            tv->selected       = (!is_group && node->mesh_index == editor.inspector.selected_mesh_index && !s_inspector_show_skeleton_only);
+            tv->selected       = (!is_group && node->mesh_index == editor.inspector.selected_mesh_index && !s_inspector_show_skeleton_only && !s_inspector_show_material_only);
+            if (is_group && strcmp(node->name, "Material") == 0 && node->parent >= 0) {
+                SceneNode* parent_node = &scene.tree.nodes[node->parent];
+                if (parent_node->mesh_index == editor.inspector.selected_mesh_index && s_inspector_show_material_only) {
+                    tv->selected = true;
+                }
+            }
             tv->icon_expanded  = editor.file_manager.icon_arrow_down;
             tv->icon_collapsed = editor.file_manager.icon_arrow_right;
 
             if (is_group) {
-                tv->icon_leaf = (node->parent == 0) ? s_icon_world : editor.file_manager.icon_folder;
+                if (strcmp(node->name, "Material") == 0) {
+                    tv->icon_leaf = s_icon_material;
+                } else {
+                    tv->icon_leaf = (node->parent == 0) ? s_icon_world : editor.file_manager.icon_folder;
+                }
             } else {
                 tv->icon_leaf = s_icon_mesh;
             }
 
             tv->icon_tint      = is_group ? CT.accent : (Color){1.0f, 1.0f, 1.0f, 1.0f};
+            if (is_group && strcmp(node->name, "Material") == 0) tv->icon_tint = CT.red;
             tv->show_dot       = false;
             tv->has_visibility = true;
             tv->is_visible     = node->visible;
@@ -2049,6 +2114,20 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
 
         // Push children in reverse sibling order when this node is expanded
         if (!is_skel_node && node->expanded) {
+            // Push synthetic skeleton node first (so it gets popped last, appearing below children)
+            if (!is_group && node->mesh_index >= 0 && node->mesh_index < (int)scene.meshes.count) {
+                Mesh* m = &scene.meshes.items[node->mesh_index];
+                if (m->jointCount > 0 || m->morphCount > 0) {
+                    if (top < SCENE_TREE_MAX_NODES) {
+                        stack[top].idx = node_idx;
+                        stack[top].depth = d + 1;
+                        stack[top].eff_vis = curr_eff_vis;
+                        stack[top].is_skel = true;
+                        top++;
+                    }
+                }
+            }
+
             int32_t children[256];
             int child_count = 0;
             int32_t cc = node->first_child;
@@ -2063,20 +2142,6 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
                     stack[top].eff_vis = curr_eff_vis;
                     stack[top].is_skel = false;
                     top++;
-                }
-            }
-
-            // Push synthetic skeleton node if the mesh has one
-            if (!is_group && node->mesh_index >= 0 && node->mesh_index < (int)scene.meshes.count) {
-                Mesh* m = &scene.meshes.items[node->mesh_index];
-                if (m->jointCount > 0 || m->morphCount > 0) {
-                    if (top < SCENE_TREE_MAX_NODES) {
-                        stack[top].idx = node_idx;
-                        stack[top].depth = d + 1;
-                        stack[top].eff_vis = curr_eff_vis;
-                        stack[top].is_skel = true;
-                        top++;
-                    }
                 }
             }
         }
@@ -2868,6 +2933,7 @@ void editor_init(void) {
     s_icon_hidden   = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityHidden.svg",  16, 16);
     s_icon_bone     = texture_pool_add_svg(&context, "./assets/icons/Bone.svg",                 16, 16);
     s_icon_skeleton = texture_pool_add_svg(&context, "./assets/icons/SkeletonModifier.svg",     16, 16);
+    s_icon_material = texture_pool_add_svg(&context, "./assets/blender-icons/material.svg",     16, 16);
 
     file_manager_navigate("./assets");
 
@@ -3166,6 +3232,7 @@ void inspector_select_mesh(int index) {
     editor.inspector.selected_mesh_index = index;
     editor.hierarchy.selected_index      = index;
     s_inspector_show_skeleton_only       = false;
+    s_inspector_show_material_only       = false;
     gizmo.active = true;
     editor_selected_bone = NULL;
     s_bone_tree_state.selected_index = -1;
@@ -3181,12 +3248,90 @@ void inspector_select_mesh(int index) {
         }
     }
     s_hier_needs_scroll = true;
+
+    if (index >= 0 && index < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[index];
+        if (m->jointCount > 0 && m->node) {
+            for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+                if (index >= (int)scene.gltf_instances[i].mesh_start_index &&
+                    index < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                    GLTFInstance* inst = &scene.gltf_instances[i];
+                    if (inst->gltf_data) {
+                        OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+                        uint32_t node_idx = (uint32_t)(uintptr_t)m->node;
+                        int32_t skin_idx = osg->nodes[node_idx].skin_idx;
+                        if (skin_idx >= 0) {
+                            OmdlSkin* skin = &osg->skins[skin_idx];
+                            bool is_joint[4096] = {false};
+                            for (uint32_t j = 0; j < skin->joints_count; j++) {
+                                uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                                if (j_node < 4096) is_joint[j_node] = true;
+                            }
+                            for (uint32_t j = 0; j < skin->joints_count; j++) {
+                                uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                                int32_t p = osg->nodes[j_node].parent;
+                                if (p < 0 || !is_joint[p]) {
+                                    osg->nodes[j_node].expanded = true;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void inspector_select_bone(void* bone) {
+    editor_selected_bone = bone;
+    s_inspector_show_skeleton_only = true;
+    s_inspector_show_material_only = false;
+
+    int mesh_idx = editor.inspector.selected_mesh_index;
+    if (mesh_idx >= 0) {
+        for (int i = 0; i < scene.tree.count; i++) {
+            if (scene.tree.nodes[i].mesh_index == mesh_idx) {
+                int p = i;
+                while (p >= 0) {
+                    scene.tree.nodes[p].expanded = true;
+                    p = scene.tree.nodes[p].parent;
+                }
+                break;
+            }
+        }
+
+        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+            if (mesh_idx >= (int)scene.gltf_instances[i].mesh_start_index &&
+                mesh_idx < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                GLTFInstance* inst = &scene.gltf_instances[i];
+                if (inst->gltf_data && bone) {
+                    OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+                    OmdlNode* bnode = (OmdlNode*)bone;
+                    int32_t b_idx = (int32_t)(bnode - osg->nodes);
+                    if (b_idx >= 0 && b_idx < (int32_t)osg->node_count) {
+                        int32_t p = osg->nodes[b_idx].parent;
+                        while (p >= 0) {
+                            osg->nodes[p].expanded = true;
+                            p = osg->nodes[p].parent;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    s_hier_needs_scroll = true;
+    s_bone_needs_scroll = true;
 }
 
 void inspector_deselect(void) {
     editor.inspector.selected_mesh_index = -1;
+
     editor.hierarchy.selected_index      = -1;
     s_inspector_show_skeleton_only       = false;
+    s_inspector_show_material_only       = false;
     gizmo.active = false;
     editor_selected_bone = NULL;
     s_bone_tree_state.selected_index = -1;
@@ -3197,6 +3342,7 @@ void inspector_deselect(void) {
 void hierarchy_select(int index) {
     editor.hierarchy.selected_index = index;
     s_inspector_show_skeleton_only  = false;
+    s_inspector_show_material_only  = false;
     if (index >= 0 && index < (int)scene.meshes.count) {
         editor.inspector.selected_mesh_index = index;
         gizmo.active = true;

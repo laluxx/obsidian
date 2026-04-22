@@ -847,11 +847,14 @@ void scene_tree_register_gltf(Scene* s, GLTFInstance* inst, const char* filepath
     // Create one group node parented to the virtual root (index 0)
     int32_t group = scene_tree_add_node(&s->tree, display, 0, -1);
 
-    // Create one leaf per mesh
+// Create one leaf per mesh
     for (size_t i = 0; i < inst->mesh_count; i++) {
         Mesh* m = &s->meshes.items[inst->mesh_start_index + i];
         const char* mesh_name = m->name ? m->name : "(unnamed)";
-        scene_tree_add_node(&s->tree, mesh_name, group, (int32_t)(inst->mesh_start_index + i));
+        int32_t mesh_node = scene_tree_add_node(&s->tree, mesh_name, group, (int32_t)(inst->mesh_start_index + i));
+
+        // Append Material as a child of the mesh
+        scene_tree_add_node(&s->tree, "Material", mesh_node, -1);
     }
 }
 

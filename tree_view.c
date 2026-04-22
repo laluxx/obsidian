@@ -271,7 +271,7 @@ void tree_view_render(
                     Texture2D* file_icon = texture_pool_get(item->icon_leaf);
                     if (file_icon)
                         texture2D((vec2){current_x, icon_y}, (vec2){16, 16},
-                                  file_icon, (Color){1.0f, 1.0f, 1.0f, 1.0f});
+                                  file_icon, item->icon_tint);
                     current_x += 20.0f;
                 }
             }
