@@ -358,6 +358,21 @@ vec4 green  = {0.0f, 1.0f, 0.0f, 1.0f};
 vec4 blue   = {0.0f, 0.0f, 1.0f, 1.0f};
 vec4 yellow = {1.0f, 1.0f, 0.0f, 1.0f};
 
+void drop_callback(GLFWwindow* window, int count, const char** paths) {
+    (void)window;
+    extern void message(int type, const char* text);
+    for (int i = 0; i < count; i++) {
+        const char* path = paths[i];
+        const char* ext = strrchr(path, '.');
+        if (ext && (strcmp(ext, ".gltf") == 0 || strcmp(ext, ".glb") == 0 ||
+                    strcmp(ext, ".GLTF") == 0 || strcmp(ext, ".GLB") == 0)) {
+            load_gltf(path, &scene);
+        } else {
+            message(3, "Unsupported format!");
+        }
+    }
+}
+
 int main() {
     /* context.currentFrame = 0; */
 
@@ -400,14 +415,14 @@ int main() {
     /* load_gltf("./assets/gltf/BoxAnimated.glb", &scene);                         // PASS */
     /* load_gltf("./assets/gltf/Box.glb", &scene);                                 // PASS */
     /* load_gltf("./assets/gltf/Corset.glb", &scene);                              // PASS (but it's really small) */
-    /* load_gltf("./assets/gltf/CesiumMan.glb", &scene);                           // PASS */
+    load_gltf("./assets/gltf/CesiumMan.glb", &scene);                           // PASS
     /* load_gltf("./assets/gltf/Fox.glb", &scene);                                 // PASS */
     /* load_gltf("./assets/gltf/RecursiveSkeletons.glb", &scene);                  // PASS */
     /* load_gltf("./assets/gltf/RiggedFigure.glb", &scene);                        // PASS */
     /* load_gltf("./assets/gltf/Sponza/glTF/Sponza.gltf", &scene);                 // PASS */
     /* load_gltf("./assets/gltf/CarbonFibre.glb", &scene);                         // PASS */
     /* load_gltf("./assets/gltf/MorphStressTest.glb", &scene);                     // PASS */
-    load_gltf("./assets/gltf/Avocado.glb", &scene);                             // PASS
+    /* load_gltf("./assets/gltf/Avocado.glb", &scene);                             // PASS */
     /* load_gltf("./assets/gltf/Lantern.glb", &scene);                             // PASS */
     /* load_gltf("./assets/gltf/TextureCoordinateTest.glb", &scene);               // PASS */
     /* load_gltf("./assets/gltf/AnimatedColorsCube.glb", &scene);                  // FAIL */
@@ -443,6 +458,7 @@ int main() {
     registerScrollCallback(scroll_callback);
     registerCursorPosCallback(cursor_pos_callback);
     registerMouseButtonCallback(mouse_button_callback);
+    glfwSetDropCallback(context.window, drop_callback);
 
     keychord_bind(&keymap, "<left>",    camera_snap_left,   "Camera snap left",     PRESS);
     keychord_bind(&keymap, "<right>",   camera_snap_right,  "Camera snap right",    PRESS);

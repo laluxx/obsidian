@@ -105,6 +105,9 @@ void tree_view_render(
         }
 
         // ── Input ────────────────────────────────────────────────────────
+        if (hovered && mdown && !clicked && is_visible && cb && cb->on_drag) {
+            cb->on_drag(i, item);
+        }
         if (hovered && clicked && is_visible && cb) {
             float vis_size = lh;
             float vis_x = cx + cw - vis_size;

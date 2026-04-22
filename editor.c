@@ -131,6 +131,12 @@ static float s_bottom_target_size = 280.0f;
 static bool s_hier_needs_scroll = false;
 static bool s_bone_needs_scroll = false;
 
+// --- Drag & Drop State ---
+static bool s_file_drag_active = false;
+static FileItem* s_file_drag_item = NULL;
+static float s_file_drag_start_x = 0.0f;
+static float s_file_drag_start_y = 0.0f;
+
 // --- Search & Incremental Caching State ---
 static bool  s_is_searching = false;
 static char  s_search_query[64] = "";
@@ -527,6 +533,39 @@ void editor_mouse_button(int button, int action) {
             s_ui_mdown = true;
             s_ui_mclicked = true;
         } else if (action == GLFW_RELEASE) {
+            if (s_file_drag_active) {
+                s_file_drag_active = false;
+                s_ui_active_id = NULL;
+
+                float dist = sqrtf(powf((float)s_ui_mx - s_file_drag_start_x, 2.0f) + powf((float)s_ui_my - s_file_drag_start_y, 2.0f));
+                if (dist > 5.0f && s_file_drag_item) {
+                    bool over_panel = false;
+                    for (int i = 0; i < PANEL_COUNT; i++) {
+                        Panel* p = &editor.panels[i];
+                        if (p->t < 0.0005f) continue;
+                        float px, py, pw, ph;
+                        panel_get_rect(p, &px, &py, &pw, &ph);
+                        if (s_ui_mx >= px && s_ui_mx <= px + pw && s_ui_my >= py && s_ui_my <= py + ph) {
+                            over_panel = true; break;
+                        }
+                    }
+                    if (!over_panel) {
+                        if (s_file_drag_item->type == FILE_ITEM_DIR) {
+                            message(MSG_WARNING, "Cannot load a folder!");
+                        } else {
+                            const char* ext = strrchr(s_file_drag_item->name, '.');
+                            if (ext && (strcasecmp(ext, ".gltf") == 0 || strcasecmp(ext, ".glb") == 0)) {
+                                extern bool load_gltf(const char*, Scene*);
+                                load_gltf(s_file_drag_item->full_path, &scene);
+                            } else {
+                                message(MSG_ERROR, "Unsupported format!");
+                            }
+                        }
+                    }
+                }
+                s_file_drag_item = NULL;
+            }
+
             if (s_message.is_dragging) {
                 s_message.is_dragging = false;
                 return; /* Consumed! */
@@ -1587,6 +1626,17 @@ static void render_emacs_input_box(float box_x, float box_y, float box_w, float 
     }
 }
 
+static void fs_on_drag(int index, const TreeViewItem* tree_item) {
+    (void)index;
+    if (!s_file_drag_active) {
+        s_file_drag_active = true;
+        s_file_drag_item = (FileItem*)tree_item->user_data;
+        s_file_drag_start_x = (float)s_ui_mx;
+        s_file_drag_start_y = (float)s_ui_my;
+        s_ui_active_id = &s_file_drag_active; // Block other UI elements
+    }
+}
+
 static void fs_on_select(int index, const TreeViewItem* tree_item) {
     FileManagerState* s = &editor.file_manager;
     s->selected_index = index;
@@ -1682,6 +1732,7 @@ static void render_filesystem_content(float cx, float cy, float cw, float ch) {
         static const TreeViewCallbacks fs_cb = {
             .on_select        = fs_on_select,
             .on_toggle_expand = fs_on_toggle_expand,
+            .on_drag          = fs_on_drag,
         };
 
         tree_view_render(
@@ -3196,6 +3247,31 @@ void editor_render(void) {
         // Text
         float ty = y + h * 0.5f - 2.0f; // Visual center
         text(editor.font, s_message.text, x + pad, ty, CT.text);
+    }
+
+    // Render active file drag
+    if (s_file_drag_active && s_file_drag_item) {
+        float dist = sqrtf(powf((float)s_ui_mx - s_file_drag_start_x, 2.0f) + powf((float)s_ui_my - s_file_drag_start_y, 2.0f));
+        if (dist > 5.0f && editor.font) {
+            float tw = measure_text_width(editor.font, s_file_drag_item->name, 1.0f);
+            float pad = 8.0f;
+            float lh = editor.font->ascent - editor.font->descent;
+
+            float draw_x = (float)s_ui_mx + 15.0f;
+            float draw_y = (float)s_ui_my - 15.0f - lh - pad * 2.0f;
+
+            exQuad2D((vec2){draw_x, draw_y},
+                     (vec2){tw + 20.0f + pad * 2.0f, lh + pad * 2.0f},
+                     (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
+
+            Texture2D* icon = texture_pool_get(editor.file_manager.icon_file);
+            if (s_file_drag_item->type == FILE_ITEM_DIR) icon = texture_pool_get(editor.file_manager.icon_folder);
+            if (icon) {
+                texture2D((vec2){draw_x + pad, draw_y + pad}, (vec2){16, 16}, icon, CT.text);
+            }
+
+            text(editor.font, s_file_drag_item->name, draw_x + pad + 20.0f, draw_y + pad + lh * 0.5f - 2.0f, CT.text);
+        }
     }
 
     s_ui_mclicked = false; // Reset one-frame click flag

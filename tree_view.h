@@ -36,6 +36,7 @@ typedef struct {
     void (*on_select)(int item_index, const TreeViewItem* item);
     void (*on_toggle_expand)(int item_index, const TreeViewItem* item);
     void (*on_toggle_visibility)(int item_index, const TreeViewItem* item);
+    void (*on_drag)(int item_index, const TreeViewItem* item);
 } TreeViewCallbacks;
 
 typedef struct {
