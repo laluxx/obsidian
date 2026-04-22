@@ -384,6 +384,10 @@ int main() {
     Texture2D* texture4 = texture_pool_get(tex4);
     Texture2D* texture5 = texture_pool_get(tex5);
 
+    /* load_gltf("./assets/gltf/TwoSidedPlane/glTF/TwoSidedPlane.gltf", &scene);     // FAIL TODO CULL and toggle switch in the inspector for backface culling */
+
+    /* load_gltf("./assets/gltf/VertexColorTest.glb", &scene);                     // PASS */
+    /* load_gltf("./assets/gltf/xmp.glb", &scene);                                 // PASS */
     /* load_gltf("./assets/gltf/AnimatedCube/glTF/AnimatedCube.gltf", &scene);     // PASS */
     /* load_gltf("./assets/gltf/MetalRoughSpheres.glb", &scene);                   // PASS */
     /* load_gltf("./assets/gltf/AnimatedMorphCube.glb", &scene);                   // PASS */

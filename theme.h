@@ -23,6 +23,7 @@ typedef struct {
     Color y_dark;
     Color z_dark;
     Color bone;
+    Color bone_hover;
     Color bone_selected;
     Color fs_hovered;
     Color fs_selected;

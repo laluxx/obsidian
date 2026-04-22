@@ -382,6 +382,7 @@ bool text_editor_open(const char *filepath) {
     /* Titlebar is rendered dynamically now */
     Panel *p = &editor.panels[PANEL_BOTTOM];
     p->title = "";
+    p->render_content = render_text_editor_panel;
 
     /* Resize the panel to fit the buffer, clamped to dynamic max */
     float sh = (float)context.swapChainExtent.height;

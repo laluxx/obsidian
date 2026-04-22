@@ -90,6 +90,7 @@ void initThemes() {
         .y_dark                = hexToColor("#6E8440"),
         .z_dark                = hexToColor("#436388"),
         .bone                  = hexToColor("#FFE483"),
+        .bone_hover            = hexToColor("#FFB347"),
         .bone_selected         = hexToColor("#E46000"),
         .fs_hovered            = hexToColor("#383838"),
         .fs_selected           = hexToColor("#494949"),

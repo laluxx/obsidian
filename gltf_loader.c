@@ -5,6 +5,7 @@
 #include "vulkan_setup.h"
 #include <sys/stat.h>
 #include <sys/types.h>
+#include "animation_editor.h"
 
 static int32_t gltf_texture_indices[MAX_TEXTURES];
 static size_t gltf_texture_count = 0;
@@ -1230,14 +1231,18 @@ static size_t find_keyframe(float* times, size_t count, float time) {
 }
 
 void animate_scene(Scene* scene, float time) {
+    (void)time; // Ignore global time to allow Editor control
+
     for (size_t inst = 0; inst < scene->gltf_instance_count; inst++) {
         GLTFInstance* instance = &scene->gltf_instances[inst];
         OmdlSceneGraph* osg = (OmdlSceneGraph*)instance->gltf_data;
         if (!osg || osg->anim_count == 0) continue;
 
-        // TODO: Add active_animation index to GLTFInstance to support selecting sequences
         OmdlAnimation* anim = &osg->anims[0];
-        float anim_time = fmodf(time, anim->duration);
+
+        // SYNC WITH EDITOR: Drive animation strictly via the timeline's playhead!
+        float anim_time = g_anim_editor.time;
+        if (anim_time > anim->duration) anim_time = anim->duration;
 
         memset(osg->node_resolved, 0, osg->node_count * sizeof(bool));
 

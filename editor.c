@@ -11,6 +11,7 @@
 #include "vulkan_setup.h"
 #include "vertico.h"
 #include "text_editor.h"
+#include "animation_editor.h"
 #include "tree_view.h"
 #include <string.h>
 #include <strings.h>
@@ -23,7 +24,7 @@
 ///  Globals
 
 Editor editor = {0};
-bool editor_show_bones = false;
+bool editor_show_bones = true;
 void* editor_selected_bone = NULL;
 
 // UI Input State
@@ -413,40 +414,64 @@ void editor_mouse_button(int button, int action) {
                 float close_x = px + pw - 14.0f - close_size;
                 if (s_ui_mx >= close_x - 8.0f && s_ui_mx <= close_x + close_size + 8.0f &&
                     s_ui_my >= bar_y && s_ui_my <= bar_y + TEXT_EDITOR_TITLE_H) {
-                    extern void text_editor_close(void);
-                    text_editor_close();
+                    if (g_anim_editor.visible) {
+                        anim_editor_close();
+                    } else {
+                        extern void text_editor_close(void);
+                        text_editor_close();
+                    }
                     s_ui_mdown = true;
                     s_ui_mclicked = true;
                     return; /* Consumed! */
                 }
 
                 /* Relaxed bounds so fast or slight-off clicks on the title bar still capture */
-                if (s_ui_mx >= px && s_ui_mx <= px + pw && s_ui_my >= bar_y - 8.0f && s_ui_my <= bar_y + TEXT_EDITOR_TITLE_H + 8.0f) {
-                    if (editor.panels[PANEL_BOTTOM].size <= TEXT_EDITOR_TITLE_H + 2.0f) {
-                        s_bottom_start_size = editor.panels[PANEL_BOTTOM].size;
-                        s_bottom_target_size = s_bottom_saved_size > TEXT_EDITOR_TITLE_H + 20.0f ? s_bottom_saved_size : 280.0f;
-                        s_bottom_anim_t = 0.0f;
-                    } else {
-                        double now = glfwGetTime();
-                        if (now - s_bottom_click_time < 0.3) {
-                            s_bottom_saved_size = editor.panels[PANEL_BOTTOM].size;
+                float hit_y_min = g_anim_editor.visible ? bar_y : bar_y - 8.0f; // Don't relax downwards into the ruler!
+                if (s_ui_mx >= px && s_ui_mx <= px + pw && s_ui_my >= hit_y_min && s_ui_my <= bar_y + TEXT_EDITOR_TITLE_H + 8.0f) {
+                    bool on_buttons = false;
+                    if (g_anim_editor.visible) {
+                        float label_w = 0.0f;
+                        if (g_anim_editor.selected_track >= 0 && g_anim_editor.selected_track < g_anim_editor.track_count)
+                            label_w = measure_text_width(editor.font, g_anim_editor.tracks[g_anim_editor.selected_track].name, 1.0f);
+                        float btn_start = px + 12.0f + label_w + 12.0f; // Pad + Label + Spacing
+                        float btn_end = btn_start + 64.0f; // Width of Stop + Play/Pause buttons + padding
+                        if (s_ui_mx >= btn_start && s_ui_mx <= btn_end) on_buttons = true;
+                    }
+
+                    if (!on_buttons) {
+                        if (editor.panels[PANEL_BOTTOM].size <= TEXT_EDITOR_TITLE_H + 2.0f) {
                             s_bottom_start_size = editor.panels[PANEL_BOTTOM].size;
-                            s_bottom_target_size = TEXT_EDITOR_TITLE_H;
+                            s_bottom_target_size = s_bottom_saved_size > TEXT_EDITOR_TITLE_H + 20.0f ? s_bottom_saved_size : 280.0f;
                             s_bottom_anim_t = 0.0f;
                         } else {
-                            s_ui_active_id = &editor.panels[PANEL_BOTTOM].size;
-                            s_ui_drag_start_y = (float)s_ui_my;
-                            s_ui_drag_start_val = editor.panels[PANEL_BOTTOM].size;
+                            double now = glfwGetTime();
+                            if (now - s_bottom_click_time < 0.3) {
+                                s_bottom_saved_size = editor.panels[PANEL_BOTTOM].size;
+                                s_bottom_start_size = editor.panels[PANEL_BOTTOM].size;
+                                s_bottom_target_size = TEXT_EDITOR_TITLE_H;
+                                s_bottom_anim_t = 0.0f;
+                            } else {
+                                s_ui_active_id = &editor.panels[PANEL_BOTTOM].size;
+                                s_ui_drag_start_y = (float)s_ui_my;
+                                s_ui_drag_start_val = editor.panels[PANEL_BOTTOM].size;
+                            }
                         }
+                        s_bottom_click_time = glfwGetTime();
+                        s_ui_mdown = true;
+                        s_ui_mclicked = true;
+                        return; /* Consumed! */
                     }
-                    s_bottom_click_time = glfwGetTime();
-                    s_ui_mdown = true;
-                    s_ui_mclicked = true;
-                    return; /* Consumed! */
                 }
             }
 
-            if (text_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
+            if (anim_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
+                anim_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
+                return; /* Consumed! */
+            }
+            if (g_anim_editor.visible && anim_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
+                anim_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
+                return; /* Consumed! */
+            } else if (!g_anim_editor.visible && text_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
                 text_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
                 return; /* Consumed! */
             }
@@ -459,7 +484,8 @@ void editor_mouse_button(int button, int action) {
                 return; /* Consumed! */
             }
 
-            /* Forward release to text editor to clear selection state */
+            /* Forward release to clear selection states */
+            anim_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
             text_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
 
             s_ui_mdown = false;
@@ -504,6 +530,7 @@ static void panel_get_rect(Panel* p,
             // Slides up from below the screen.
             float h = p->size;
             float w = sw * 0.45f;
+            if (g_anim_editor.visible) w = (sw * 0.85f) - 30.0f; // Animation editor gets a slightly less wide panel
             if (w < 450.0f) w = 450.0f;
             if (w > sw - 40.0f) w = sw - 40.0f;
             *out_x = (sw - w) * 0.5f;
@@ -601,9 +628,14 @@ static void panel_draw_titlebar(Panel* p, float x, float y, float w, float h) {
             break;
     }
 
-    if (p->side == PANEL_BOTTOM && p->open) {
-        extern void text_editor_draw_titlebar(float x, float y, float w, float h, float mx, float my);
-        text_editor_draw_titlebar(x, y + h - bar_h, w, bar_h, (float)s_ui_mx, (float)s_ui_my);
+    if (p->side == PANEL_BOTTOM && p->t > 0.0f) {
+        if (g_anim_editor.visible) {
+            extern void anim_editor_draw_titlebar(float x, float y, float w, float h, float mx, float my);
+            anim_editor_draw_titlebar(x, y + h - bar_h, w, bar_h, (float)s_ui_mx, (float)s_ui_my);
+        } else {
+            extern void text_editor_draw_titlebar(float x, float y, float w, float h, float mx, float my);
+            text_editor_draw_titlebar(x, y + h - bar_h, w, bar_h, (float)s_ui_mx, (float)s_ui_my);
+        }
     } else if (p->title && p->title[0] != '\0') {
         text(editor.font, p->title, tx, ty, CT.text);
     }
@@ -1277,13 +1309,18 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
                             int32_t d = e.depth;
                             OmdlNode* curr_node = &osg->nodes[curr_idx];
 
-                            TreeViewItem* tv = &bone_items[b_item_count++];
-                            tv->name = curr_node->name;
-                            tv->type = TREE_ITEM_FILE;
-                            tv->depth = d;
-                            tv->expanded = curr_node->expanded;
-                            tv->selected = (s_bone_tree_state.selected_index == b_item_count - 1);
-                            tv->icon_expanded = editor.file_manager.icon_arrow_down;
+                            TreeViewItem* tv   = &bone_items[b_item_count++];
+                            tv->name           = curr_node->name;
+                            tv->type           = TREE_ITEM_FILE;
+                            tv->depth          = d;
+                            tv->expanded       = curr_node->expanded;
+
+                            if (curr_node == editor_selected_bone) {
+                                s_bone_tree_state.selected_index = b_item_count - 1;
+                            }
+
+                            tv->selected       = (s_bone_tree_state.selected_index == b_item_count - 1);
+                            tv->icon_expanded  = editor.file_manager.icon_arrow_down;
                             tv->icon_collapsed = editor.file_manager.icon_arrow_right;
                             tv->icon_leaf = s_icon_bone;
                             tv->icon_tint = (Color){1.0f, 1.0f, 1.0f, 1.0f};
@@ -2081,6 +2118,13 @@ void file_manager_refresh(void) {
 /// Keybinding callbacks
 
 static void toggle_bottom(void) { editor_toggle_panel(PANEL_BOTTOM); }
+
+static void open_animation_editor(void) {
+    int idx = editor.inspector.selected_mesh_index;
+    if (idx < 0) { message(MSG_WARNING, "Select a mesh first"); return; }
+    if (!anim_editor_open(idx)) { message(MSG_WARNING, "No animations on this mesh"); return; }
+    editor_open_panel(PANEL_BOTTOM);
+}
 static void toggle_right(void)  { editor_toggle_panel(PANEL_RIGHT);  }
 static void toggle_top(void)    { editor_toggle_panel(PANEL_TOP);    }
 static void toggle_left(void)   { editor_toggle_panel(PANEL_LEFT);   }
@@ -2424,12 +2468,13 @@ void editor_init(void) {
     editor.font = load_font("./assets/fonts/MapleMono-NF-Regular.ttf", 18);
 
     // ── Keybindings ───────────────────────────────────────────────────────
-    /* keychord_bind(&keymap, "M-j", toggle_bottom, "Toggle file manager", PRESS); */
-    keychord_bind(&keymap, "M-l", toggle_right,  "Toggle Inspector",    PRESS);
-    /* keychord_bind(&keymap, "M-k", toggle_top,    "Toggle Vertico",      PRESS); */
-    keychord_bind(&keymap, "M-h", toggle_left,   "Toggle Hierarchy",    PRESS);
-    keychord_bind(&keymap, "C-s", search_start,  "Start search", PRESS);
-    keychord_bind(&keymap, "c",   cb_open_color_picker, "Pick Mesh Color", PRESS);
+    /* keychord_bind(&keymap, "M-j", toggle_bottom,        "Toggle file manager",   PRESS); */
+    /* keychord_bind(&keymap, "M-k", toggle_top,            "Toggle Vertico",        PRESS); */
+    keychord_bind(&keymap, "M-l", toggle_right,          "Toggle Inspector",      PRESS);
+    keychord_bind(&keymap, "M-h", toggle_left,           "Toggle Hierarchy",      PRESS);
+    keychord_bind(&keymap, "C-s", search_start,          "Start search",          PRESS);
+    keychord_bind(&keymap, "a",   open_animation_editor, "Open Animation Editor", PRESS);
+    keychord_bind(&keymap, "c",   cb_open_color_picker,  "Pick Mesh Color",       PRESS);
 
     keymap_init(&editor_search_keymap);
     keychord_bind(&editor_search_keymap, "C-g", search_cancel, "Cancel search", PRESS);
@@ -2455,6 +2500,7 @@ void editor_init(void) {
     editor.initialized = true;
 
     text_editor_init();
+    anim_editor_init();
 
     fprintf(stdout, "[Editor] Initialized — easeOutExpo panels, MapleMono 18px\n");
 }
@@ -2462,6 +2508,7 @@ void editor_init(void) {
 void editor_cleanup(void) {
     if (!editor.initialized) return;
     text_editor_cleanup();
+    anim_editor_cleanup();
     if (editor.font) {
         destroy_font(editor.font);
         editor.font = NULL;
@@ -2514,6 +2561,7 @@ void editor_update(void) {
 
     tree_view_update_scroll(&s_fs_tree_state, dt);
     tree_view_update_scroll(&s_hier_tree_state, dt);
+    anim_editor_update(dt, s_ui_mx, s_ui_my);
 
     float msg_h = editor.font ? (editor.font->ascent - editor.font->descent + 32.0f) : 50.0f;
 
@@ -2606,8 +2654,10 @@ void editor_update(void) {
 void editor_render(void) {
     if (!editor.initialized) return;
 
+    // Explicit Z-order: render BOTTOM panel last so it sits on top of the side panels
+    int render_order[] = { PANEL_TOP, PANEL_LEFT, PANEL_RIGHT, PANEL_BOTTOM };
     for (int i = 0; i < PANEL_COUNT; i++) {
-        Panel* p = &editor.panels[i];
+        Panel* p = &editor.panels[render_order[i]];
 
         // Skip fully-closed, non-animating panels
         if (p->t < 0.0005f && p->target_t <= 0.0f) continue;

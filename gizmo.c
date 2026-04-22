@@ -144,6 +144,7 @@ static mat4   s_drag_start_bone_override;
 
 extern bool editor_show_bones;
 extern void* editor_selected_bone;
+void* editor_hovered_bone = NULL;
 
 static mat4* get_bone_world_matrix(int mesh_index, OmdlSceneGraph** out_osg, int32_t* out_bnode_idx) {
     if (!editor_show_bones || !editor_selected_bone) return NULL;
@@ -887,6 +888,36 @@ int gizmo_pick_mesh(double mouse_x, double mouse_y) {
             }
         }
 
+        // Dynamically expand AABB to encapsulate live bone positions for animated meshes
+        if (m->jointCount > 0 && m->node) {
+            for (size_t g = 0; g < scene.gltf_instance_count; g++) {
+                if (i >= (int)scene.gltf_instances[g].mesh_start_index &&
+                    i < (int)(scene.gltf_instances[g].mesh_start_index + scene.gltf_instances[g].mesh_count)) {
+                    GLTFInstance* inst = &scene.gltf_instances[g];
+                    if (inst->gltf_data) {
+                        OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+                        uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
+                        int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+                        if (skin_idx >= 0) {
+                            OmdlSkin* skin = &osg->skins[skin_idx];
+                            for (uint32_t j = 0; j < skin->joints_count; j++) {
+                                uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                                vec3 j_pos;
+                                glm_vec3_copy(osg->world_transforms[j_node][3], j_pos);
+                                // Pad the bone by 1.0 unit (1 meter) to encompass the skin radius
+                                float pad = 1.0f;
+                                for (int k = 0; k < 3; k++) {
+                                    if (j_pos[k] - pad < world_min[k]) world_min[k] = j_pos[k] - pad;
+                                    if (j_pos[k] + pad > world_max[k]) world_max[k] = j_pos[k] + pad;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         // 4. Check if the exact 3D surface point is inside this mesh
         float eps = 0.001f;
         if (W[0] >= world_min[0] - eps && W[0] <= world_max[0] + eps &&
@@ -962,7 +993,8 @@ void gizmo_render(int mesh_index) {
                     uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
                     OmdlNode* node = &osg->nodes[j_node];
 
-                    Color c = (node == editor_selected_bone) ? CT.bone_selected : CT.bone;
+                    Color c = (node == editor_selected_bone) ? CT.bone_selected :
+                              (node == editor_hovered_bone) ? CT.bone_hover : CT.bone;
                     vec3 start_pos;
                     glm_vec3_copy(osg->world_transforms[j_node][3], start_pos);
 
@@ -1237,6 +1269,95 @@ void gizmo_mouse_move(double xpos, double ypos) {
     float scale = gizmo_world_scale(origin);
 
     gizmo_update_hover(origin, scale, xpos, my);
+
+    editor_hovered_bone = NULL;
+    if (editor_show_bones && m->jointCount > 0 && gizmo.hovered == GIZMO_PART_NONE) {
+        GLTFInstance* inst = NULL;
+        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+            if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
+                mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
+                inst = &scene.gltf_instances[i];
+                break;
+            }
+        }
+        if (inst && inst->gltf_data && m->node) {
+            OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+            uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
+            int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+            if (skin_idx >= 0) {
+                OmdlSkin* skin = &osg->skins[skin_idx];
+                bool is_joint[4096] = {false};
+                for (uint32_t j = 0; j < skin->joints_count; j++) {
+                    uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                    if (j_node < 4096) is_joint[j_node] = true;
+                }
+
+                float best_dist = 1e9f;
+                void* best_node = NULL;
+
+                for (uint32_t j = 0; j < skin->joints_count; j++) {
+                    uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+                    OmdlNode* node = &osg->nodes[j_node];
+                    vec3 start_pos;
+                    glm_vec3_copy(osg->world_transforms[j_node][3], start_pos);
+
+                    bool has_child_joint = false;
+                    for (uint32_t c_idx = 0; c_idx < osg->node_count; c_idx++) {
+                        if (osg->nodes[c_idx].parent == (int32_t)j_node && is_joint[c_idx]) {
+                            vec3 end_pos;
+                            glm_vec3_copy(osg->world_transforms[c_idx][3], end_pos);
+                            vec2 s1, s2;
+                            if (world_to_screen(start_pos, s1) && world_to_screen(end_pos, s2)) {
+                                float d = pt_seg_dist2d((vec2){(float)xpos, (float)my}, s1, s2);
+                                float bone_len = sqrtf((s2[0]-s1[0])*(s2[0]-s1[0]) + (s2[1]-s1[1])*(s2[1]-s1[1]));
+                                float dynamic_radius = fmaxf(18.0f, bone_len * 0.15f);
+                                if (d < dynamic_radius && d < best_dist) {
+                                    best_dist = d;
+                                    best_node = node;
+                                }
+                            }
+                            has_child_joint = true;
+                        }
+                    }
+
+                    if (!has_child_joint) {
+                        vec3 end_pos;
+                        int32_t p_idx = osg->nodes[j_node].parent;
+                        if (p_idx >= 0 && p_idx < 4096 && is_joint[p_idx]) {
+                            vec3 p_pos;
+                            glm_vec3_copy(osg->world_transforms[p_idx][3], p_pos);
+                            vec3 dir;
+                            glm_vec3_sub(start_pos, p_pos, dir);
+                            if (glm_vec3_norm2(dir) > 0.00001f) {
+                                glm_vec3_scale(dir, 0.5f, dir);
+                                glm_vec3_add(start_pos, dir, end_pos);
+                            } else {
+                                goto fallback_nub_pick;
+                            }
+                        } else {
+                        fallback_nub_pick:;
+                            vec3 local_up = {0.0f, 0.1f, 0.0f};
+                            mat3 rot;
+                            glm_mat4_pick3(osg->world_transforms[j_node], rot);
+                            glm_mat3_mulv(rot, local_up, local_up);
+                            glm_vec3_add(start_pos, local_up, end_pos);
+                        }
+                        vec2 s1, s2;
+                        if (world_to_screen(start_pos, s1) && world_to_screen(end_pos, s2)) {
+                            float d = pt_seg_dist2d((vec2){(float)xpos, (float)my}, s1, s2);
+                            float bone_len = sqrtf((s2[0]-s1[0])*(s2[0]-s1[0]) + (s2[1]-s1[1])*(s2[1]-s1[1]));
+                            float dynamic_radius = fmaxf(18.0f, bone_len * 0.15f);
+                            if (d < dynamic_radius && d < best_dist) {
+                                best_dist = d;
+                                best_node = node;
+                            }
+                        }
+                    }
+                }
+                editor_hovered_bone = best_node;
+            }
+        }
+    }
 }
 
 extern void editor_mouse_button(int button, int action);
@@ -1368,6 +1489,8 @@ void gizmo_mouse_button(int button, int action, int mods, double xpos, double yp
                     glm_vec3_copy(s_rot_v_start, s_rot_v_prev);
                 }
             }
+        } else if (editor_hovered_bone != NULL) {
+            editor_selected_bone = editor_hovered_bone;
         } else {
             // Not over gizmo → pick mesh
             gizmo_pick_mesh(xpos, ypos); // ypos in screen-top coords (pick handles flip)
