@@ -97,6 +97,7 @@ static const char** validationLayers = NULL;
 /// Globals
 
 bool ambientOcclusionEnabled = true;
+bool cullingFrozen = false;
 
 static VkPipelineCache pipelineCache = VK_NULL_HANDLE;
 
@@ -1115,6 +1116,14 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
 static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
 {
     VulkanContext* ctx = (VulkanContext*)user_data;
+
+    if (!cullingFrozen) {
+        glm_mat4_mul(camera.projection_matrix, camera.view_matrix, CTX_LIGHTING(ctx)->cullSpace);
+        CTX_LIGHTING(ctx)->cullCameraPos[0] = camera.position[0];
+        CTX_LIGHTING(ctx)->cullCameraPos[1] = camera.position[1];
+        CTX_LIGHTING(ctx)->cullCameraPos[2] = camera.position[2];
+    }
+    CTX_LIGHTING(ctx)->freezeCulling = cullingFrozen ? 1 : 0;
 
     VkViewport viewport = {
         .width    = (float)ctx->swapChainExtent.width,
@@ -3587,3 +3596,4 @@ void toggle_ambient_occlusion(void) { ambientOcclusionEnabled = !ambientOcclusio
 void toggle_skybox(void) { skyboxEnabled = !skyboxEnabled; }
 void toggle_ibl_lighting(void) { iblLightingEnabled = !iblLightingEnabled; }
 void toggle_shadows(void) { shadowsEnabled = !shadowsEnabled; }
+void toggle_culling_freeze(void) { cullingFrozen = !cullingFrozen; }

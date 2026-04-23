@@ -103,6 +103,7 @@ extern bool iblLightingEnabled;
 void toggle_ibl_lighting(void);
 extern bool shadowsEnabled;
 void toggle_shadows(void);
+void toggle_culling_freeze(void);
 
 void cleanup(VulkanContext* context);
 uint32_t findMemoryType(VkPhysicalDevice physDev, uint32_t typeFilter, VkMemoryPropertyFlags props);

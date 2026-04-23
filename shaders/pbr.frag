@@ -33,6 +33,10 @@ layout(set = 3, binding = 0) uniform LightingUBO {
     vec4       cameraPos;
     mat4       cascadeSpace[4];
     vec4       cascadeSplits;
+    mat4       cullSpace;
+    vec4       cullCameraPos;
+    int        freezeCulling;
+    int        _pad2[3];
 } lighting;
 
 layout(set = 3, binding = 1) uniform samplerCube irradianceMap;

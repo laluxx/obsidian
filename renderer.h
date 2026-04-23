@@ -36,6 +36,10 @@ typedef struct {
     vec4             cameraPos;   // xyz=pos, w=unused
     mat4             cascadeSpace[SHADOW_CASCADE_COUNT];
     vec4             cascadeSplits;
+    mat4             cullSpace;   // Used for frozen/active frustum culling
+    vec4             cullCameraPos; // Used for cone culling
+    int              freezeCulling; // 1 = frozen, 0 = active
+    int              _pad2[3];
 } LightingData;
 
 typedef struct {

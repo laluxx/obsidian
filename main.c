@@ -469,6 +469,7 @@ int main() {
     keychord_bind(&keymap, "l",         toggle_shadows,            "Toggle shadows",       PRESS);
     keychord_bind(&keymap, "C-h c",     vertico_show_keybindings,  "Help keybindings",     PRESS);
     keychord_bind(&keymap, "C-g",       keymap_reset_state,        "TestFunc description", PRESS);
+    keychord_bind(&keymap, "C-t",       toggle_culling_freeze,     "Toggle culling freeze", PRESS);
     keymap_print_bindings(&keymap);
 
 
