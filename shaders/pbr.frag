@@ -67,6 +67,10 @@ struct MeshData {
     int   morphDeltaOffset;
     int   morphWeightOffset;
     int   morphCount;
+    int   meshletOffset;
+    int   meshletCount;
+    int   meshletVertexOffset;
+    int   meshletTriangleOffset;
     float transmissionFactor;
     float ior;
     float thicknessFactor;
@@ -79,6 +83,10 @@ struct MeshData {
     float dispersion;
     int   isVisible;
     int   isWireframe;
+    int   vertexOffset;
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {

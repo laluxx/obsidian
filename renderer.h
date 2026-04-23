@@ -126,6 +126,21 @@ int32_t texture_pool_add_svg(VulkanContext* context, const char* filename, int w
 Texture2D* texture_pool_get(int32_t index);
 
 typedef struct {
+    uint32_t vertex_offset;
+    uint32_t triangle_offset;
+    uint32_t vertex_count;
+    uint32_t triangle_count;
+} Meshlet;
+
+typedef struct {
+    float center[3];
+    float radius;
+    float cone_apex[3];
+    float cone_axis[3];
+    float cone_cutoff;
+} MeshletBounds;
+
+typedef struct {
     int      ambientOcclusionEnabled;
     int      iblEnabled;
     int      meshIndex;           // -1 = indirect (gl_BaseInstanceARB), >=0 = direct
@@ -135,6 +150,10 @@ typedef struct {
     uint64_t jointBufferAddr;     // BDA: global joint SSBO
     uint64_t morphBufferAddr;     // BDA: megaMorphBuffer (permanent deltas)
     uint64_t morphWeightAddr;     // BDA: per-frame morph weights
+    uint64_t meshletBufferAddr;   // BDA: Meshlet array
+    uint64_t meshletBoundsAddr;   // BDA: Meshlet bounds
+    uint64_t meshletVertexAddr;   // BDA: Meshlet local vertices
+    uint64_t meshletTriangleAddr; // BDA: Meshlet local triangles
 } PushConstants;
 
 /* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */
@@ -170,6 +189,11 @@ typedef struct {
     int   morphWeightOffset;  // Offset into dynamic Morph Weight Buffer
     int   morphCount;         // Number of active morph targets
 
+    int   meshletOffset;         // AAA Task Shader integration
+    int   meshletCount;
+    int   meshletVertexOffset;
+    int   meshletTriangleOffset;
+
     float transmissionFactor;
     float ior;
     float thicknessFactor;
@@ -182,6 +206,10 @@ typedef struct {
     float dispersion;
     int   isVisible;
     int   isWireframe;
+    int   vertexOffset;
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
 } MeshGPUData;
 
 extern PushConstants pushConstants;
@@ -209,6 +237,10 @@ typedef struct {
     uint32_t         dynamicBaseVertex;
     uint32_t         vertexCount;
     uint32_t         indexCount;
+    uint32_t         meshletCount;
+    uint32_t         megaBaseMeshlet;
+    uint32_t         megaBaseMeshletVertex;
+    uint32_t         megaBaseMeshletTriangle;
     vec3             aabbMin;
     vec3             aabbMax;
     mat4  model;

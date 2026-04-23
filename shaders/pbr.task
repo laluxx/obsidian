@@ -1,0 +1,165 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform UBO {
+    mat4  vp;
+    mat4  view;
+    mat4  proj;
+    vec4  cameraPos;
+    float time;
+} ubo;
+
+struct DirLight { vec4 direction; vec4 color; };
+struct PointLight { vec4 position; vec4 color; };
+layout(set = 3, binding = 0) uniform LightingUBO {
+    DirLight   sun;
+    PointLight pointLights[8];
+    int        pointLightCount;
+    float      ambientIntensity;
+    int        iblEnabled;
+    int        _pad;
+    vec4       cameraPos;
+    mat4       cascadeSpace[4];
+    vec4       cascadeSplits;
+} lighting;
+
+struct MeshData {
+    mat4  model;
+    int   albedoIndex;
+    int   normalMapIndex;
+    int   metallicRoughIndex;
+    int   aoIndex;
+    int   emissiveIndex;
+    int   isUnlit;
+    int   alphaMode;
+    float alphaCutoff;
+    vec4  baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    float emissiveStrength;
+    int   displacementIndex;
+    vec3  emissiveFactor;
+    float displacementScale;
+    vec4  aabbMin;
+    vec4  aabbMax;
+    int   jointOffset;
+    int   morphDeltaOffset;
+    int   morphWeightOffset;
+    int   morphCount;
+    int   meshletOffset;
+    int   meshletCount;
+    int   meshletVertexOffset;
+    int   meshletTriangleOffset;
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    int   isVisible;
+    int   isWireframe;
+    int   vertexOffset;
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
+};
+
+struct MeshletBounds {
+    float center[3];
+    float radius;
+    float cone_apex[3];
+    float cone_axis[3];
+    float cone_cutoff;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer { MeshData meshes[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer BoundsBuffer { MeshletBounds bounds[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DummyBuffer { uint dummy[]; };
+
+layout(push_constant) uniform PC {
+    int          ambientOcclusionEnabled;
+    int          iblEnabled;
+    int          meshIndex;
+    int          cascadeIndex;
+    MeshBuffer   meshData;
+    DummyBuffer  vertexBufferAddr;
+    DummyBuffer  jointBufferAddr;
+    DummyBuffer  morphBufferAddr;
+    DummyBuffer  morphWeightAddr;
+    DummyBuffer  meshletData;
+    BoundsBuffer boundsData;
+    DummyBuffer  meshletVertexAddr;
+    DummyBuffer  meshletTriangleAddr;
+} pc;
+
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+taskPayloadSharedEXT TaskPayload payload;
+
+void extractPlanes(mat4 m, out vec4 planes[6]) {
+    // Gribb-Hartmann plane extraction from a column-major VP matrix.
+    // m[col][row] in GLSL. We need rows, so we transpose the access.
+    // Row i = (m[0][i], m[1][i], m[2][i], m[3][i])
+    planes[0] = vec4(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]); // Left
+    planes[1] = vec4(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]); // Right
+    planes[2] = vec4(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]); // Top
+    planes[3] = vec4(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]); // Bottom
+    planes[4] = vec4(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]); // Near
+    planes[5] = vec4(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]); // Far
+}
+
+void main() {
+    uint ti = gl_LocalInvocationID.x;
+    uint meshletIdx = gl_WorkGroupID.x * 32 + ti;
+    MeshData m = pc.meshData.meshes[pc.meshIndex];
+
+    bool accept = false;
+    if (meshletIdx < m.meshletCount) {
+        uint globalMeshletIdx = m.meshletOffset + meshletIdx;
+        MeshletBounds b = pc.boundsData.bounds[globalMeshletIdx];
+        vec3 center = vec3(b.center[0], b.center[1], b.center[2]);
+        vec3 worldCenter = (m.model * vec4(center, 1.0)).xyz;
+
+        float scale = max(length(m.model[0].xyz), max(length(m.model[1].xyz), length(m.model[2].xyz)));
+        float worldRadius = b.radius * scale;
+
+        mat4 cullMatrix = pc.cascadeIndex >= 0 ? lighting.cascadeSpace[pc.cascadeIndex] : ubo.vp;
+        vec4 planes[6];
+        extractPlanes(cullMatrix, planes);
+
+        accept = true;
+        for (int i = 0; i < 6; i++) {
+            if (dot(planes[i].xyz, worldCenter) + planes[i].w < -worldRadius) {
+                accept = false; break;
+            }
+        }
+
+        // Cone Culling (Meshlet Backface Culling)
+        if (accept && pc.cascadeIndex < 0) {
+            vec3 apex = vec3(b.cone_apex[0], b.cone_apex[1], b.cone_apex[2]);
+            vec3 axis = vec3(b.cone_axis[0], b.cone_axis[1], b.cone_axis[2]);
+            vec3 worldApex = (m.model * vec4(apex, 1.0)).xyz;
+            vec3 worldAxis = normalize(mat3(m.model) * axis);
+            vec3 viewDir = normalize(worldApex - ubo.cameraPos.xyz);
+            if (dot(viewDir, worldAxis) >= b.cone_cutoff) accept = false;
+        }
+    }
+
+    uvec4 ballot = subgroupBallot(accept);
+    uint index = subgroupBallotExclusiveBitCount(ballot);
+
+    if (accept) payload.meshletIndices[index] = meshletIdx;
+
+    uint count = subgroupBallotBitCount(ballot);
+    if (ti == 0) EmitMeshTasksEXT(count, 1, 1);
+}

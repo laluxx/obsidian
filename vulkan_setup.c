@@ -12,12 +12,12 @@
 #include <sys/types.h>
 #include "stb_image.h"
 
+#include "pbr.task.spv.h"
+#include "pbr.mesh.spv.h"
 #include "pbr.vert.spv.h"
 #include "pbr.frag.spv.h"
 #include "2D.vert.spv.h"
 #include "2D.frag.spv.h"
-#include "cull.comp.spv.h"
-#include "compact.comp.spv.h"
 #include "equirect2cube.comp.spv.h"
 #include "irradiance.comp.spv.h"
 #include "prefilter.comp.spv.h"
@@ -30,6 +30,29 @@
 static uint64_t meshSSBOAddr[MAX_FRAMES_IN_FLIGHT];
 uint64_t megaVertexBufferAddr = 0;
 uint64_t megaMorphBufferAddr = 0;
+
+uint64_t megaMeshletBufferAddr = 0;
+uint64_t megaMeshletBoundsBufferAddr = 0;
+uint64_t megaMeshletVertexAddr = 0;
+uint64_t megaMeshletTriangleAddr = 0;
+
+VkBuffer megaMeshletBuffer = VK_NULL_HANDLE;
+VkDeviceMemory megaMeshletBufferMemory = VK_NULL_HANDLE;
+uint32_t megaMeshletBufferSize = 0;
+uint32_t megaMeshletBufferOffset = 0;
+
+VkBuffer megaMeshletBoundsBuffer = VK_NULL_HANDLE;
+VkDeviceMemory megaMeshletBoundsBufferMemory = VK_NULL_HANDLE;
+
+VkBuffer megaMeshletVertexBuffer = VK_NULL_HANDLE;
+VkDeviceMemory megaMeshletVertexMemory = VK_NULL_HANDLE;
+uint32_t megaMeshletVertexBufferSize = 0;
+uint32_t megaMeshletVertexOffset = 0;
+
+VkBuffer megaMeshletTriangleBuffer = VK_NULL_HANDLE;
+VkDeviceMemory megaMeshletTriangleMemory = VK_NULL_HANDLE;
+uint32_t megaMeshletTriangleBufferSize = 0;
+uint32_t megaMeshletTriangleOffset = 0;
 
 // Forward declaration for internal use by gltf_loader
 uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_t deltaCount);
@@ -52,6 +75,7 @@ extern uint32_t opaqueMeshCount;
 extern uint32_t transparentMeshCount;
 VkPipeline skyboxPipeline = VK_NULL_HANDLE;
 VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
+PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasksEXT = NULL;
 VkImage iblSkyboxImage = VK_NULL_HANDLE;
 VkDeviceMemory iblSkyboxMemory = VK_NULL_HANDLE;
 VkImageView iblSkyboxView = VK_NULL_HANDLE;
@@ -368,10 +392,10 @@ void createLogicalDevice(VulkanContext* ctx)
         .pQueuePriorities = &pri
     };
 
-    /* Only request extensions the engine actually uses. Ray-tracing extensions
-       are listed here for future use; remove any your driver doesn't expose. */
+    // Extensions
     static const char* exts[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_EXT_MESH_SHADER_EXTENSION_NAME,
     };
     static const uint32_t extCount = sizeof(exts) / sizeof(exts[0]);
 
@@ -402,15 +426,23 @@ void createLogicalDevice(VulkanContext* ctx)
     };
 
     VkPhysicalDeviceVulkan13Features features13 = {
-        .sType                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext                          = &features12,
-        .dynamicRendering               = VK_TRUE,
+        .sType                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext                  = &features12,
+        .dynamicRendering       = VK_TRUE,
         .shaderDemoteToHelperInvocation = VK_TRUE,
+        .maintenance4           = VK_TRUE // AAA: Enabled natively in Vulkan 1.3!
+    };
+
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+        .pNext = &features13,
+        .meshShader = VK_TRUE,
+        .taskShader = VK_TRUE
     };
 
     VkDeviceCreateInfo ci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext                   = &features13,
+        .pNext                   = &meshFeatures,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &qci,
         .enabledExtensionCount   = extCount,
@@ -424,6 +456,10 @@ void createLogicalDevice(VulkanContext* ctx)
         exit(EXIT_FAILURE);
     }
     vkGetDeviceQueue(ctx->device, ctx->graphicsQueueFamily, 0, &ctx->graphicsQueue);
+    pfnCmdDrawMeshTasksEXT = (PFN_vkCmdDrawMeshTasksEXT)
+        vkGetDeviceProcAddr(ctx->device, "vkCmdDrawMeshTasksEXT");
+    if (!pfnCmdDrawMeshTasksEXT)
+        fprintf(stderr, "[WARN] vkCmdDrawMeshTasksEXT not available on this device\n");
 }
 
 /// SWAPCHAIN
@@ -517,7 +553,7 @@ void createDescriptorSetLayout(VulkanContext* ctx)
         .binding         = 0,
         .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = 1,
-        .stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+        .stageFlags      = VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
     };
     VkDescriptorSetLayoutCreateInfo ci = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -638,7 +674,7 @@ void createAllPipelineLayouts(VulkanContext* ctx)
 
     /* 3D push: PushConstants (16 bytes), both stages */
     VkPushConstantRange pcRange = {
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset     = 0,
         .size       = sizeof(PushConstants)
     };
@@ -747,7 +783,9 @@ void createGraphicsPipelines(VulkanContext* ctx)
     fill2DVertexInput(&vi2D, &ia2D, &bind2D, attr2D);
 
     /* ── shader modules ── */
-    VkShaderModule vsPBR  = createShaderModule(ctx->device, pbr_vert_spv,  sizeof(pbr_vert_spv));
+    VkShaderModule tsPBR  = createShaderModule(ctx->device, pbr_task_spv,  sizeof(pbr_task_spv));
+    VkShaderModule msPBR  = createShaderModule(ctx->device, pbr_mesh_spv,  sizeof(pbr_mesh_spv));
+    VkShaderModule vsPBR  = createShaderModule(ctx->device, pbr_vert_spv,  sizeof(pbr_vert_spv)); // RESTORED FOR LINES/DYNAMIC
     VkShaderModule fsPBR  = createShaderModule(ctx->device, pbr_frag_spv,  sizeof(pbr_frag_spv));
     VkShaderModule vs2D   = createShaderModule(ctx->device, __2D_vert_spv, sizeof(__2D_vert_spv));
     VkShaderModule fs2D   = createShaderModule(ctx->device, __2D_frag_spv, sizeof(__2D_frag_spv));
@@ -755,8 +793,13 @@ void createGraphicsPipelines(VulkanContext* ctx)
 #define STAGE(stg, mod) \
     {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, stg, mod, "main", NULL}
 
-    VkPipelineShaderStageCreateInfo ssPBR[2]     = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsPBR),
-                                                      STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsPBR) };
+    VkPipelineShaderStageCreateInfo ssPBR[3]     = { STAGE(VK_SHADER_STAGE_TASK_BIT_EXT, tsPBR),
+                                                     STAGE(VK_SHADER_STAGE_MESH_BIT_EXT, msPBR),
+                                                     STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsPBR) };
+
+    // AAA: Legacy pipeline for primitives that don't have pre-calculated Meshlets!
+    VkPipelineShaderStageCreateInfo ssPBR_Legacy[2] = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsPBR),
+                                                        STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsPBR) };
     VkPipelineShaderStageCreateInfo ss2DColor[2] = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fs2D)  };
 
@@ -765,8 +808,9 @@ void createGraphicsPipelines(VulkanContext* ctx)
     VkPipelineShaderStageCreateInfo ssSkybox[2]  = { STAGE(VK_SHADER_STAGE_VERTEX_BIT, vsSkybox),
                                                       STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsSkybox) };
 
-    VkShaderModule vsShadow = createShaderModule(ctx->device, shadow_vert_spv, sizeof(shadow_vert_spv));
-    VkPipelineShaderStageCreateInfo ssShadow[1]  = { STAGE(VK_SHADER_STAGE_VERTEX_BIT, vsShadow) };
+    // We reuse the Task and Mesh shaders for shadows! No fragment shader needed for depth-only passes.
+    VkPipelineShaderStageCreateInfo ssShadowMesh[2] = { STAGE(VK_SHADER_STAGE_TASK_BIT_EXT, tsPBR),
+                                                        STAGE(VK_SHADER_STAGE_MESH_BIT_EXT, msPBR) };
 
     VkPipelineRasterizationStateCreateInfo rastShadow = makeRasterizer(1.0f);
     rastShadow.depthBiasEnable = VK_TRUE;
@@ -801,13 +845,13 @@ void createGraphicsPipelines(VulkanContext* ctx)
        2      2D color
        3      2D textured
     */
-    VkGraphicsPipelineCreateInfo pci[6] = {
+    VkGraphicsPipelineCreateInfo pci[7] = {
         /* 0: 3D PBR triangles */
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages               = ssPBR,
-            .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
+            .stageCount          = 3, .pStages                = ssPBR,
+            .pVertexInputState   = NULL, .pInputAssemblyState = NULL, // Mesh Shaders completely bypass Input Assembly!
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
@@ -818,7 +862,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages                = ssPBR,
+            .stageCount          = 2, .pStages                = ssPBR_Legacy,
             .pVertexInputState   = &viEmpty, .pInputAssemblyState = &iaLine,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastLW, .pMultisampleState = &kMultisampling,
@@ -855,8 +899,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &shadowRenderingCI,
-            .stageCount          = 1, .pStages                = ssShadow,
-            .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
+            .stageCount          = 2, .pStages                = ssShadowMesh, // AAA: Use the Mesh Shaders!
+            .pVertexInputState   = NULL, .pInputAssemblyState = NULL,         // AAA: Mesh Shaders skip input assembly
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastShadow, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = NULL, .pDepthStencilState = &depth3D,
@@ -867,18 +911,30 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &pipelineRenderingCI,
-            .stageCount          = 2, .pStages                = ssPBR,
+            .stageCount          = 2, .pStages                = ssPBR_Legacy,
             .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastWireframe, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
             .pDynamicState       = &kDynamicStateLine, // Allows dynamic line width!
             .layout              = ctx->pipelineLayout,
+        },
+        /* 6: Legacy 3D PBR Solid (For Immediate Mode / Gizmos) */
+        {
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = &pipelineRenderingCI,
+            .stageCount          = 2, .pStages                = ssPBR_Legacy,
+            .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
+            .pViewportState      = &kViewportState,
+            .pRasterizationState = &rast1, .pMultisampleState  = &kMultisampling,
+            .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
+            .pDynamicState       = &kDynamicState,
+            .layout              = ctx->pipelineLayout,
         }
     };
 
-    VkPipeline pipelines[6];
-    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 6, pci, NULL, pipelines) != VK_SUCCESS) {
+    VkPipeline pipelines[7];
+    if (vkCreateGraphicsPipelines(ctx->device, pipelineCache, 7, pci, NULL, pipelines) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipelines\n");
         exit(EXIT_FAILURE);
     }
@@ -887,7 +943,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
 
     /* One PBR pipeline serves all 3D draw paths */
     ctx->graphicsPipeline           = pipelines[0];
-    ctx->graphicsPipelineTextured3D = pipelines[0];
+    ctx->graphicsPipelineTextured3D = pipelines[6]; // AAA: Immediate mode uses the legacy pipeline!
     ctx->graphicsPipelineLine       = pipelines[1];
     pipelineIndirectSolid           = pipelines[0];
     pipelineIndirectTextured        = pipelines[0];
@@ -898,7 +954,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
     shadowPipeline                  = pipelines[4];
     graphicsPipelineWireframe       = pipelines[5];
 
-    vkDestroyShaderModule(ctx->device, vsShadow, NULL);
+    vkDestroyShaderModule(ctx->device, tsPBR, NULL);
+    vkDestroyShaderModule(ctx->device, msPBR, NULL);
     vkDestroyShaderModule(ctx->device, vsPBR, NULL);
     vkDestroyShaderModule(ctx->device, fsPBR, NULL);
     vkDestroyShaderModule(ctx->device, vs2D,  NULL);
@@ -914,234 +971,19 @@ void createIndirectPipelineLayout(VulkanContext* ctx)
     (void)ctx;
 }
 
-/* ── Cull pipeline: SSBO + visibility out + frustum UBO ───────────── */
-void createComputeCullPipeline(VulkanContext* ctx)
-{
-    VkDescriptorSetLayoutBinding bindings[3] = {
-        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-        { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-        { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-    };
-    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = bindings };
-    vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->computeCullSetLayout);
+void createComputeCullPipeline(VulkanContext* ctx) { (void)ctx; }
+void createComputeCompactPipeline(VulkanContext* ctx) { (void)ctx; }
 
-    VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &ctx->computeCullSetLayout };
-    vkCreatePipelineLayout(ctx->device, &plci, NULL, &ctx->computeCullPipelineLayout);
-
-    VkShaderModule cullShader = createShaderModule(ctx->device, cull_comp_spv, sizeof(cull_comp_spv));
-    VkComputePipelineCreateInfo cpci = {
-        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage  = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cullShader, .pName = "main" },
-        .layout = ctx->computeCullPipelineLayout
-    };
-    vkCreateComputePipelines(ctx->device, pipelineCache, 1, &cpci, NULL, &ctx->computeCullPipeline);
-    vkDestroyShaderModule(ctx->device, cullShader, NULL);
-
-    typedef struct { vec4 planes[5][6]; uint32_t meshCount; uint32_t frustumCount; uint32_t _pad[2]; } FrustumUBO;
-    VkDeviceSize uboSize = sizeof(FrustumUBO);
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        createBuffer(ctx, uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     &ctx->frustumUBOBuffer[i], &ctx->frustumUBOMemory[i]);
-        vkMapMemory(ctx->device, ctx->frustumUBOMemory[i], 0, uboSize, 0, &ctx->frustumUBOMapped[i]);
-    }
-
-    VkDescriptorPoolSize poolSizes[2] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 2 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT     }
-    };
-    VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 2, .pPoolSizes = poolSizes };
-    vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->computeCullPool);
-
-    VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT];
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) layouts[i] = ctx->computeCullSetLayout;
-    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = ctx->computeCullPool, .descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
-        .pSetLayouts = layouts };
-    vkAllocateDescriptorSets(ctx->device, &dai, ctx->computeCullSets);
-
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorBufferInfo ssboInfo  = { .buffer = ctx->meshSSBO[i],        .range = VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo visInfo   = { .buffer = ctx->visibilityBuffer,   .range = VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo uboInfo   = { .buffer = ctx->frustumUBOBuffer[i],.range = VK_WHOLE_SIZE };
-        VkWriteDescriptorSet writes[3] = {
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCullSets[i], .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &ssboInfo },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCullSets[i], .dstBinding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &visInfo  },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCullSets[i], .dstBinding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &uboInfo  },
-        };
-        vkUpdateDescriptorSets(ctx->device, 3, writes, 0, NULL);
-    }
-    fprintf(stdout, "Cull pipeline: SSBO → visibility buffer\n");
-}
-
-/* ── Compact pipeline: visibility → compacted indirect + count ──────── */
-void createComputeCompactPipeline(VulkanContext* ctx)
-{
-    VkDescriptorSetLayoutBinding bindings[5] = {
-        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-        { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-        { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-        { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-        { .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
-    };
-    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 5, .pBindings = bindings };
-    vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->computeCompactSetLayout);
-
-    VkPushConstantRange pcRange = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 16 };
-    VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1, .pSetLayouts = &ctx->computeCompactSetLayout,
-        .pushConstantRangeCount = 1, .pPushConstantRanges = &pcRange };
-    vkCreatePipelineLayout(ctx->device, &plci, NULL, &ctx->computeCompactPipelineLayout);
-
-    VkShaderModule compactShader = createShaderModule(ctx->device, compact_comp_spv, sizeof(compact_comp_spv));
-    VkComputePipelineCreateInfo cpci = {
-        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage  = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = compactShader, .pName = "main" },
-        .layout = ctx->computeCompactPipelineLayout
-    };
-    vkCreateComputePipelines(ctx->device, pipelineCache, 1, &cpci, NULL, &ctx->computeCompactPipeline);
-    vkDestroyShaderModule(ctx->device, compactShader, NULL);
-
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 5 };
-    VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &ps };
-    vkCreateDescriptorPool(ctx->device, &pci, NULL, &ctx->computeCompactPool);
-
-    VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT];
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) layouts[i] = ctx->computeCompactSetLayout;
-    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = ctx->computeCompactPool, .descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
-        .pSetLayouts = layouts };
-    vkAllocateDescriptorSets(ctx->device, &dai, ctx->computeCompactSets);
-
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
-        VkDescriptorBufferInfo visInfo   = { .buffer = ctx->visibilityBuffer,            .range = VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo srcInfo   = { .buffer = ctx->srcIndirectBuffer,  .offset = i * drawSize, .range = drawSize };
-        VkDescriptorBufferInfo dstInfo   = { .buffer = ctx->indirectBuffer,               .range = VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo cntInfo   = { .buffer = ctx->drawCountBuffer,              .range = VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo meshInfo  = { .buffer = ctx->meshSSBO[i],                  .range = VK_WHOLE_SIZE };
-        VkWriteDescriptorSet writes[5] = {
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &visInfo  },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &srcInfo  },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &dstInfo  },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &cntInfo  },
-            { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->computeCompactSets[i], .dstBinding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .pBufferInfo = &meshInfo },
-        };
-        vkUpdateDescriptorSets(ctx->device, 5, writes, 0, NULL);
-    }
-    fprintf(stdout, "Compact pipeline: visibility → compacted indirect + count\n");
-}
-
-static void extractPlanes(const mat4 m, vec4* planes) {
-    for (int j = 0; j < 4; j++) {
-        planes[0][j] = m[j][3] + m[j][0]; // Left
-        planes[1][j] = m[j][3] - m[j][0]; // Right
-        planes[2][j] = m[j][3] - m[j][1]; // Top
-        planes[3][j] = m[j][3] + m[j][1]; // Bottom
-        planes[4][j] = m[j][3] + m[j][2]; // Near
-        planes[5][j] = m[j][3] - m[j][2]; // Far
-    }
-    for (int i = 0; i < 6; i++) {
-        float lenSq = planes[i][0]*planes[i][0] + planes[i][1]*planes[i][1] + planes[i][2]*planes[i][2];
-        if (lenSq > 0.0f) {
-            float invLen = 1.0f / sqrtf(lenSq);
-            planes[i][0] *= invLen; planes[i][1] *= invLen;
-            planes[i][2] *= invLen; planes[i][3] *= invLen;
-        }
-    }
-}
-
-static void updateFrustumUBO(VulkanContext* ctx)
-{
-    if (ctx->indirectDrawCount == 0) return;
-    typedef struct { vec4 planes[5][6]; uint32_t meshCount; uint32_t frustumCount; uint32_t _pad[2]; } FrustumUBO;
-
-    uint32_t f = ctx->currentFrame;
-    FrustumUBO ubo;
-    ubo.meshCount    = ctx->indirectDrawCount;
-    ubo.frustumCount = shadowsEnabled ? 5 : 1;
-
-    // 1. Main Camera Frustum -> Index 0
-    mat4 vp;
-    glm_mat4_mul(camera.projection_matrix, camera.view_matrix, vp);
-    extractPlanes(vp, ubo.planes[0]);
-
-    // 2. Shadow Cascades -> Index 1 to 4
-    if (shadowsEnabled) {
-        for (int i = 0; i < 4; i++) {
-            mat4 shadow_vp;
-            glm_mat4_copy(CTX_LIGHTING(ctx)->cascadeSpace[i], shadow_vp);
-            shadow_vp[1][1] *= -1.0f; // Un-flip Vulkan Y
-            extractPlanes(shadow_vp, ubo.planes[i + 1]);
-        }
-    }
-    memcpy(ctx->frustumUBOMapped[f], &ubo, sizeof(FrustumUBO));
-}
-
-static void execute_mega_cull_pass(VkCommandBuffer cmd, void* user_data)
-{
-    VulkanContext* ctx     = (VulkanContext*)user_data;
-    if (ctx->indirectDrawCount == 0) return;
-
-    uint32_t f            = ctx->currentFrame;
-    uint32_t groupCount   = (ctx->indirectDrawCount + 63) / 64;
-    uint32_t frustumCount = shadowsEnabled ? 5u : 1u;
-
-    /* ── 1. Clear drawCountBuffer to 0 for all frustums ─────────────── */
-    vkCmdFillBuffer(cmd, ctx->drawCountBuffer, 0, 20 * sizeof(uint32_t), 0);
-
-    VkBufferMemoryBarrier countClear = {
-        .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-        .srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .buffer              = ctx->drawCountBuffer,
-        .size                = VK_WHOLE_SIZE
-    };
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, NULL, 1, &countClear, 0, NULL);
-
-    /* ── 2. Cull: write visibility[frustumCount][N] ──────────────────── */
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->computeCullPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            ctx->computeCullPipelineLayout, 0, 1,
-                            &ctx->computeCullSets[f], 0, NULL);
-    vkCmdDispatch(cmd, groupCount, 1, 1);
-
-    /* ── 3. Barrier: visibility write → compact read ─────────────────── */
-    VkBufferMemoryBarrier visBarrier = {
-        .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-        .srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT,
-        .dstAccessMask       = VK_ACCESS_SHADER_READ_BIT,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .buffer              = ctx->visibilityBuffer,
-        .size                = VK_WHOLE_SIZE
-    };
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, NULL, 1, &visBarrier, 0, NULL);
-
-    /* ── 4. Compact: all frustums in one parallel dispatch ───────────── */
-    /* X = frustum index (0=camera, 1-4=cascades)   */
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->computeCompactPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            ctx->computeCompactPipelineLayout, 0, 1,
-                            &ctx->computeCompactSets[f], 0, NULL);
-
-    // opaqueMeshCount is unused in new compact.comp (routing by material property)
-    // but kept in PC struct for ABI compatibility. staticMeshCount marks dynamic start.
-    uint32_t compactPC[4] = { ctx->indirectDrawCount, 20480, opaqueMeshCount, (uint32_t)scene.meshes.count };
-    vkCmdPushConstants(cmd, ctx->computeCompactPipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, compactPC);
-    vkCmdDispatch(cmd, frustumCount, 1, 1);
+static void fill_gpu_addresses(VulkanContext* ctx) {
+    pushConstants.meshBufferAddr      = meshSSBOAddr[ctx->currentFrame];
+    pushConstants.vertexBufferAddr    = megaVertexBufferAddr;
+    pushConstants.jointBufferAddr     = jointSSBOAddr[ctx->currentFrame];
+    pushConstants.morphBufferAddr     = megaMorphBufferAddr;
+    pushConstants.morphWeightAddr     = morphWeightAddr[ctx->currentFrame];
+    pushConstants.meshletBufferAddr   = megaMeshletBufferAddr;
+    pushConstants.meshletBoundsAddr   = megaMeshletBoundsBufferAddr;
+    pushConstants.meshletVertexAddr   = megaMeshletVertexAddr;
+    pushConstants.meshletTriangleAddr = megaMeshletTriangleAddr;
 }
 
 static void update_cascade_matrices(VulkanContext* ctx) {
@@ -1250,24 +1092,23 @@ static void execute_shadow_pass(VkCommandBuffer cmd, void* user_data)
 
         pushConstants.cascadeIndex     = i;
         pushConstants.meshIndex        = -1;
-        pushConstants.meshBufferAddr   = meshSSBOAddr[ctx->currentFrame];
-        pushConstants.vertexBufferAddr = megaVertexBufferAddr;
-        pushConstants.jointBufferAddr  = jointSSBOAddr[ctx->currentFrame];
-        pushConstants.morphBufferAddr  = megaMorphBufferAddr;
-        pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
-        vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+        fill_gpu_addresses(ctx);
+        vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
 
-        // count buffer is now 4 elements per frustum (Opaque, Transmission, Transparent, Wireframe)
-        uint32_t shadowStride = 20480u / 4u; // 5120 — matches compact.comp
-        uint32_t frustumIdx = (uint32_t)(i + 1); // shadow frustums are 1..4
+        if (pfnCmdDrawMeshTasksEXT) {
+            for (uint32_t mIdx = 0; mIdx < scene.meshes.count; mIdx++) {
+                Mesh* m = &scene.meshes.items[mIdx];
+                if (!m->visible || m->meshletCount == 0 || m->wireframe) continue;
+                if (m->megaBaseMeshlet == UINT32_MAX) continue;
+                if (m->megaBaseVertex  == UINT32_MAX) continue;
 
-        // We only cast shadows for streams 0, 1, and 2. Wireframes (stream 3) skip shadow casting!
-        for (uint32_t stream = 0; stream < 3; stream++) {
-            VkDeviceSize offset   = (VkDeviceSize)(frustumIdx * 20480u + stream * shadowStride) * sizeof(VkDrawIndexedIndirectCommand);
-            VkDeviceSize countOff = (VkDeviceSize)(frustumIdx * 4u + stream) * sizeof(uint32_t);
-            vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, offset, ctx->drawCountBuffer, countOff, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+                pushConstants.meshIndex = mIdx;
+                vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+
+                uint32_t taskGroups = (m->meshletCount + 31) / 32;
+                pfnCmdDrawMeshTasksEXT(cmd, taskGroups, 1, 1);
+            }
         }
-
     }
 }
 
@@ -1303,20 +1144,24 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
     };
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
 
-    pushConstants.meshIndex        = -1;
-    pushConstants.meshBufferAddr   = meshSSBOAddr[ctx->currentFrame];
-    pushConstants.vertexBufferAddr = megaVertexBufferAddr;
-    pushConstants.jointBufferAddr  = jointSSBOAddr[ctx->currentFrame];
-    pushConstants.morphBufferAddr  = megaMorphBufferAddr;
-    pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
-    vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+    pushConstants.cascadeIndex = -1; // AAA CRITICAL FIX: Reset from shadow pass!
+    pushConstants.meshIndex    = -1;
+    fill_gpu_addresses(ctx);
 
-    if (ctx->indirectDrawCount > 0) {
-        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, 0,
-                                      ctx->drawCountBuffer, 0,
-                                      ctx->indirectDrawCount,
-                                      sizeof(VkDrawIndexedIndirectCommand));
+    if (scene.meshes.count > 0 && pfnCmdDrawMeshTasksEXT) {
+            for (uint32_t i = 0; i < scene.meshes.count; i++) {
+                Mesh* m = &scene.meshes.items[i];
+                if (!m->visible || m->meshletCount == 0 || m->alpha_mode == 2 || m->transmissionFactor > 0.0f) continue;
+                if (m->megaBaseMeshlet == UINT32_MAX) continue;
+                if (m->megaBaseVertex  == UINT32_MAX) continue;
+
+            pushConstants.meshIndex = i;
+            vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+
+            // Dispatch 1 task workgroup per 32 meshlets!
+            uint32_t taskGroups = (m->meshletCount + 31) / 32;
+            pfnCmdDrawMeshTasksEXT(cmd, taskGroups, 1, 1);
+        }
     }
 
     if (skyboxEnabled && iblSkyboxView != VK_NULL_HANDLE) {
@@ -1612,7 +1457,8 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
 
     // Update dynamic mesh vertex offsets for the current frame
     if (scene.meshes.count > 0) {
-        VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)ctx->srcIndirectBufferMapped;
+        VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+        VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)((uint8_t*)ctx->srcIndirectBufferMapped + (ctx->currentFrame * drawSize));
         for (size_t i = 0; i < scene.meshes.count; i++) {
             Mesh* m = &scene.meshes.items[i];
             if (m->megaBaseVertex == UINT32_MAX && m->dynamicBaseVertex != UINT32_MAX) {
@@ -1622,7 +1468,6 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     }
 
     update_cascade_matrices(ctx); // MUST happen before updateFrustumUBO!
-    updateFrustumUBO(ctx);
 
     uint32_t f = ctx->currentFrame;
     uint32_t f_shadow = ctx->currentFrame + MAX_FRAMES_IN_FLIGHT;
@@ -1634,12 +1479,8 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     RgResId frustumUBO = rg_import_buffer(ctx->renderGraph, "FrustumUBO", ctx->frustumUBOBuffer[f]);
     RgResId drawCountBuf = rg_import_buffer(ctx->renderGraph, "DrawCountBuffer", ctx->drawCountBuffer);
 
-    // 2. Define Mega Culling Pass (1 Dispatch for everything!)
-    RgPass* cullPass = rg_add_pass(ctx->renderGraph, "MegaCull");
-    rg_pass_read_buffer(cullPass, frustumUBO, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-    rg_pass_write_buffer(cullPass, indirectBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-    rg_pass_write_buffer(cullPass, drawCountBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-    rg_pass_execute(cullPass, execute_mega_cull_pass, ctx);
+    // 2. Culling is now 100% handled implicitly by the Task Shaders!
+    // We completely bypassed the old compute pipeline.
 
     // 3. Define Shadow Pass (Creates the Atlas)
     RgResId shadowAtlasId = rg_import_image(ctx->renderGraph, "ShadowAtlas", ctx->shadowImage, ctx->shadowView, VK_FORMAT_D32_SFLOAT, 2048, 2048, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -1761,21 +1602,31 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
         // AAA CRITICAL FIX: line_renderer_draw (executed in the main pass) corrupted the global
         // pushConstants state (setting meshIndex > 0 and pointing to the line vertex buffer).
         // We MUST restore the state to use indirect instances and the mega buffer before drawing glass!
-        pushConstants.meshIndex        = -1;
-        pushConstants.meshBufferAddr   = meshSSBOAddr[ctx->currentFrame];
-        pushConstants.vertexBufferAddr = megaVertexBufferAddr;
-        pushConstants.jointBufferAddr  = jointSSBOAddr[ctx->currentFrame];
-        pushConstants.morphBufferAddr  = megaMorphBufferAddr;
-        pushConstants.morphWeightAddr  = morphWeightAddr[ctx->currentFrame];
+        pushConstants.cascadeIndex = -1;
+        pushConstants.meshIndex    = -1;
+        fill_gpu_addresses(ctx);
 
-        vkCmdPushConstants(cmd, ctx->pipelineLayout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(PushConstants), &pushConstants);
-        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        if (pfnCmdDrawMeshTasksEXT) {
+            for (uint32_t stream = 1; stream <= 2; stream++) {
+                for (uint32_t i = 0; i < scene.meshes.count; i++) {
+                    Mesh* m = &scene.meshes.items[i];
+                    if (!m->visible || m->meshletCount == 0) continue;
+                    if (m->megaBaseMeshlet == UINT32_MAX) continue;
+                    if (m->megaBaseVertex  == UINT32_MAX) continue;
 
-        for (uint32_t stream = 1; stream <= 2; stream++) {
-            vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, (VkDeviceSize)(stream * sStride) * sizeof(VkDrawIndexedIndirectCommand),
-                                          ctx->drawCountBuffer, stream * 4, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+                    bool isTransmission = m->transmissionFactor > 0.0f;
+                    bool isBlend = m->alpha_mode == 2 && !isTransmission;
+
+                    if (stream == 1 && !isTransmission) continue;
+                    if (stream == 2 && !isBlend) continue;
+
+                    pushConstants.meshIndex = i;
+                    vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+
+                    uint32_t taskGroups = (m->meshletCount + 31) / 32;
+                    pfnCmdDrawMeshTasksEXT(cmd, taskGroups, 1, 1);
+                }
+            }
         }
 
         // --- Stream 3: Wireframe Pass ---
@@ -1817,12 +1668,53 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
 
 /// Draw frame
 
+// ---------------------------------------------------------------------------
+// Runtime GLTF deferred load queue.
+// The UI drop handler calls gltf_load_enqueue().  drawFrame() drains it here,
+// AFTER all in-flight fences are waited on, so vkQueueSubmit inside load_gltf
+// can never race with a pending frame submission.
+// ---------------------------------------------------------------------------
+#define MAX_PENDING_GLTF_LOADS 16
+static char   s_pending_gltf_paths[MAX_PENDING_GLTF_LOADS][512];
+static int    s_pending_gltf_count = 0;
+
+void gltf_load_enqueue(const char* filepath)
+{
+    if (s_pending_gltf_count < MAX_PENDING_GLTF_LOADS) {
+        strncpy(s_pending_gltf_paths[s_pending_gltf_count],
+                filepath, 511);
+        s_pending_gltf_paths[s_pending_gltf_count][511] = '\0';
+        s_pending_gltf_count++;
+    }
+}
+
+#include "gltf_loader.h"
+
 void drawFrame(VulkanContext* ctx)
 {
     uint32_t frameIndex = ctx->currentFrame;
     VkFence  fence      = ctx->inFlightFences[frameIndex];
 
+    // Wait for ALL in-flight fences first so the queue is truly idle
+    // before we potentially call load_gltf (which does vkQueueWaitIdle).
     vkWaitForFences(ctx->device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    // Drain deferred GLTF loads at the only safe inter-frame point.
+    if (s_pending_gltf_count > 0) {
+        extern Scene scene;
+        // Wait for all frames, not just the current slot, because
+        // load_gltf calls vkQueueWaitIdle which stalls the whole queue.
+        for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++)
+            if (ctx->inFlightFences[f] != VK_NULL_HANDLE)
+                vkWaitForFences(ctx->device, 1,
+                                &ctx->inFlightFences[f], VK_TRUE, UINT64_MAX);
+        for (int i = 0; i < s_pending_gltf_count; i++) {
+            fprintf(stdout, "[DEFERRED LOAD] %s\n", s_pending_gltf_paths[i]);
+            load_gltf(s_pending_gltf_paths[i], &scene);
+            markMeshesSSBODirty(ctx);
+        }
+        s_pending_gltf_count = 0;
+    }
 
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(ctx->device, ctx->swapChain, UINT64_MAX,
@@ -2078,23 +1970,6 @@ void cleanup(VulkanContext* ctx)
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
 
-#define VK_DEL(func, obj) if (ctx->obj) { func(ctx->device, ctx->obj, NULL); ctx->obj = VK_NULL_HANDLE; }
-    VK_DEL(vkDestroyPipeline,            computeCullPipeline);
-    VK_DEL(vkDestroyPipelineLayout,      computeCullPipelineLayout);
-    VK_DEL(vkDestroyDescriptorSetLayout, computeCullSetLayout);
-    VK_DEL(vkDestroyDescriptorPool,      computeCullPool);
-    VK_DEL(vkDestroyPipeline,            computeCompactPipeline);
-    VK_DEL(vkDestroyPipelineLayout,      computeCompactPipelineLayout);
-    VK_DEL(vkDestroyDescriptorSetLayout, computeCompactSetLayout);
-    VK_DEL(vkDestroyDescriptorPool,      computeCompactPool);
-#undef VK_DEL
-
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (ctx->frustumUBOMapped[i])   { vkUnmapMemory  (ctx->device, ctx->frustumUBOMemory[i]);                    ctx->frustumUBOMapped[i]       = NULL;            }
-        if (ctx->frustumUBOBuffer[i])   { vkDestroyBuffer(ctx->device, ctx->frustumUBOBuffer[i],   NULL);            ctx->frustumUBOBuffer[i]       = VK_NULL_HANDLE; }
-        if (ctx->frustumUBOMemory[i])   { vkFreeMemory   (ctx->device, ctx->frustumUBOMemory[i],   NULL);            ctx->frustumUBOMemory[i]       = VK_NULL_HANDLE; }
-    }
-
     destroyUploadStagingBuffer(ctx);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (jointSSBOMapped[i]) { vkUnmapMemory(ctx->device, jointSSBOMemory[i]); jointSSBOMapped[i] = NULL; }
@@ -2164,11 +2039,11 @@ void cleanup(VulkanContext* ctx)
     if (ctx->ssboSetLayout) { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout, NULL); ctx->ssboSetLayout = VK_NULL_HANDLE; }
     if (ctx->ssboPool)      { vkDestroyDescriptorPool     (ctx->device, ctx->ssboPool,      NULL); ctx->ssboPool      = VK_NULL_HANDLE; }
 
-    if (ctx->srcIndirectBufferMapped) { vkUnmapMemory(ctx->device, ctx->srcIndirectBufferMemory); ctx->srcIndirectBufferMapped = NULL; }
-    CLEANUP_BUFFER(srcIndirectBuffer, srcIndirectBufferMemory);
-    CLEANUP_BUFFER(indirectBuffer, indirectBufferMemory);
-    CLEANUP_BUFFER(visibilityBuffer, visibilityBufferMemory);
-    CLEANUP_BUFFER(drawCountBuffer, drawCountBufferMemory);
+    if (ctx->srcIndirectBufferMapped) { vkUnmapMemory(ctx->device, ctx->indirectBufferMemory); ctx->srcIndirectBufferMapped = NULL; }
+    if (ctx->indirectBuffer)          { vkDestroyBuffer(ctx->device, ctx->indirectBuffer,       NULL); ctx->indirectBuffer       = VK_NULL_HANDLE; }
+    if (ctx->indirectBufferMemory)    { vkFreeMemory   (ctx->device, ctx->indirectBufferMemory, NULL); ctx->indirectBufferMemory = VK_NULL_HANDLE; }
+    if (ctx->drawCountBuffer)         { vkDestroyBuffer(ctx->device, ctx->drawCountBuffer,       NULL); ctx->drawCountBuffer       = VK_NULL_HANDLE; }
+    if (ctx->drawCountBufferMemory)   { vkFreeMemory   (ctx->device, ctx->drawCountBufferMemory, NULL); ctx->drawCountBufferMemory = VK_NULL_HANDLE; }
 
 #undef CLEANUP_BUFFER
 
@@ -2223,6 +2098,38 @@ void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size)
         VkBufferDeviceAddressInfo weightInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = ctx->morphWeightBuffer[i] };
         morphWeightAddr[i] = vkGetBufferDeviceAddress(ctx->device, &weightInfo);
     }
+
+    // ── CREATE MEGA MESHLET BUFFERS ──
+    VkDeviceSize mlSize = 16 * 1024 * 1024; // 16 MB for Meshlets
+    VkDeviceSize mlBoundsSize = 32 * 1024 * 1024; // 32 MB for Bounds
+    VkDeviceSize mlVertSize = 64 * 1024 * 1024; // 64 MB for Meshlet Vertices
+    VkDeviceSize mlTriSize = 64 * 1024 * 1024; // 64 MB for Meshlet Triangles
+
+    megaMeshletBufferSize = mlSize;
+    megaMeshletBufferOffset = 0;
+    createBuffer(ctx, mlSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &megaMeshletBuffer, &megaMeshletBufferMemory);
+    VkBufferDeviceAddressInfo mlInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = megaMeshletBuffer };
+    megaMeshletBufferAddr = vkGetBufferDeviceAddress(ctx->device, &mlInfo);
+
+    createBuffer(ctx, mlBoundsSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &megaMeshletBoundsBuffer, &megaMeshletBoundsBufferMemory);
+    VkBufferDeviceAddressInfo mlBoundsInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = megaMeshletBoundsBuffer };
+    megaMeshletBoundsBufferAddr = vkGetBufferDeviceAddress(ctx->device, &mlBoundsInfo);
+
+    megaMeshletVertexBufferSize = mlVertSize;
+    megaMeshletVertexOffset = 0;
+    createBuffer(ctx, mlVertSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &megaMeshletVertexBuffer, &megaMeshletVertexMemory);
+    VkBufferDeviceAddressInfo mlVertInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = megaMeshletVertexBuffer };
+    megaMeshletVertexAddr = vkGetBufferDeviceAddress(ctx->device, &mlVertInfo);
+
+    megaMeshletTriangleBufferSize = mlTriSize;
+    megaMeshletTriangleOffset = 0;
+    createBuffer(ctx, mlTriSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &megaMeshletTriangleBuffer, &megaMeshletTriangleMemory);
+    VkBufferDeviceAddressInfo mlTriInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = megaMeshletTriangleBuffer };
+    megaMeshletTriangleAddr = vkGetBufferDeviceAddress(ctx->device, &mlTriInfo);
+
+    fprintf(stdout, "Meshlet Buffers allocated: %llx, %llx, %llx, %llx\n",
+            (unsigned long long)megaMeshletBufferAddr, (unsigned long long)megaMeshletBoundsBufferAddr,
+            (unsigned long long)megaMeshletVertexAddr, (unsigned long long)megaMeshletTriangleAddr);
 }
 
 /* Upload vertices into the mega buffer, return the BASE VERTEX INDEX for DrawIndexed/Draw offset.
@@ -2235,55 +2142,88 @@ void createUploadStagingBuffer(VulkanContext* ctx, VkDeviceSize size)
     vkMapMemory(ctx->device, ctx->uploadStagingMemory, 0, size, 0, &ctx->uploadStagingMapped);
 
     /* pre-allocate region arrays */
-    ctx->pendingVertexCopyCapacity = 256;
-    ctx->pendingVertexCopyCount    = 0;
-    ctx->pendingVertexCopies       = malloc(256 * sizeof(VkBufferCopy));
-    ctx->pendingIndexCopyCapacity  = 256;
-    ctx->pendingIndexCopyCount     = 0;
-    ctx->pendingIndexCopies        = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingVertexCopyCapacity         = 256;
+    ctx->pendingVertexCopyCount            = 0;
+    ctx->pendingVertexCopies               = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingIndexCopyCapacity          = 256;
+    ctx->pendingIndexCopyCount             = 0;
+    ctx->pendingIndexCopies                = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingMeshletCopyCapacity        = 256;
+    ctx->pendingMeshletCopyCount           = 0;
+    ctx->pendingMeshletCopies              = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingMeshletBoundsCopyCapacity  = 256;
+    ctx->pendingMeshletBoundsCopyCount     = 0;
+    ctx->pendingMeshletBoundsCopies        = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingMeshletVertexCopyCapacity  = 256;
+    ctx->pendingMeshletVertexCopyCount     = 0;
+    ctx->pendingMeshletVertexCopies        = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingMeshletTriangleCopyCapacity = 256;
+    ctx->pendingMeshletTriangleCopyCount   = 0;
+    ctx->pendingMeshletTriangleCopies      = malloc(256 * sizeof(VkBufferCopy));
 
     fprintf(stdout, "Upload staging buffer: %.1f MB\n", (double)size / (1024.0 * 1024.0));
 }
 
-void flushUploadStagingBuffer(VulkanContext* ctx)
-{
-    if (ctx->pendingVertexCopyCount == 0 && ctx->pendingIndexCopyCount == 0) return;
-
-    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
-
-    if (ctx->pendingVertexCopyCount > 0) {
-        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaVertexBuffer,
-                        ctx->pendingVertexCopyCount, ctx->pendingVertexCopies);
-    }
-    if (ctx->pendingIndexCopyCount > 0) {
-        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaIndexBuffer,
-                        ctx->pendingIndexCopyCount, ctx->pendingIndexCopies);
-    }
-
-    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
-
-    /* reset for next batch */
-    ctx->pendingVertexCopyCount = 0;
-    ctx->pendingIndexCopyCount  = 0;
-    ctx->uploadStagingOffset    = 0;
-
-    fprintf(stdout, "Flushed upload staging buffer: %u vertex + %u index regions\n",
-            ctx->pendingVertexCopyCount, ctx->pendingIndexCopyCount);
-}
 
 void destroyUploadStagingBuffer(VulkanContext* ctx)
 {
     if (ctx->uploadStagingMapped)  { vkUnmapMemory(ctx->device, ctx->uploadStagingMemory); ctx->uploadStagingMapped = NULL; }
     if (ctx->uploadStagingBuffer)  { vkDestroyBuffer(ctx->device, ctx->uploadStagingBuffer, NULL); ctx->uploadStagingBuffer = VK_NULL_HANDLE; }
     if (ctx->uploadStagingMemory)  { vkFreeMemory(ctx->device, ctx->uploadStagingMemory, NULL);    ctx->uploadStagingMemory = VK_NULL_HANDLE; }
-    if (ctx->pendingVertexCopies)  { free(ctx->pendingVertexCopies); ctx->pendingVertexCopies = NULL; }
-    if (ctx->pendingIndexCopies)   { free(ctx->pendingIndexCopies);  ctx->pendingIndexCopies  = NULL; }
+    if (ctx->pendingVertexCopies)          { free(ctx->pendingVertexCopies);          ctx->pendingVertexCopies          = NULL; }
+    if (ctx->pendingIndexCopies)           { free(ctx->pendingIndexCopies);           ctx->pendingIndexCopies           = NULL; }
+    if (ctx->pendingMeshletCopies)         { free(ctx->pendingMeshletCopies);         ctx->pendingMeshletCopies         = NULL; }
+    if (ctx->pendingMeshletBoundsCopies)   { free(ctx->pendingMeshletBoundsCopies);   ctx->pendingMeshletBoundsCopies   = NULL; }
+    if (ctx->pendingMeshletVertexCopies)   { free(ctx->pendingMeshletVertexCopies);   ctx->pendingMeshletVertexCopies   = NULL; }
+    if (ctx->pendingMeshletTriangleCopies) { free(ctx->pendingMeshletTriangleCopies); ctx->pendingMeshletTriangleCopies = NULL; }
     ctx->uploadStagingSize            = 0;
     ctx->uploadStagingOffset          = 0;
     ctx->pendingVertexCopyCount       = 0;
     ctx->pendingVertexCopyCapacity    = 0;
     ctx->pendingIndexCopyCount        = 0;
     ctx->pendingIndexCopyCapacity     = 0;
+}
+
+void flushUploadStagingBuffer(VulkanContext* ctx)
+{
+    bool any = ctx->pendingVertexCopyCount > 0 || ctx->pendingIndexCopyCount > 0 ||
+               ctx->pendingMeshletCopyCount > 0 || ctx->pendingMeshletBoundsCopyCount > 0 ||
+               ctx->pendingMeshletVertexCopyCount > 0 || ctx->pendingMeshletTriangleCopyCount > 0;
+    if (!any) return;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+
+    if (ctx->pendingVertexCopyCount > 0)
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaVertexBuffer,
+                        ctx->pendingVertexCopyCount, ctx->pendingVertexCopies);
+    if (ctx->pendingIndexCopyCount > 0)
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, ctx->megaIndexBuffer,
+                        ctx->pendingIndexCopyCount, ctx->pendingIndexCopies);
+    if (ctx->pendingMeshletCopyCount > 0)
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletBuffer,
+                        ctx->pendingMeshletCopyCount, ctx->pendingMeshletCopies);
+    if (ctx->pendingMeshletBoundsCopyCount > 0)
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletBoundsBuffer,
+                        ctx->pendingMeshletBoundsCopyCount, ctx->pendingMeshletBoundsCopies);
+    if (ctx->pendingMeshletVertexCopyCount > 0)
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletVertexBuffer,
+                        ctx->pendingMeshletVertexCopyCount, ctx->pendingMeshletVertexCopies);
+    if (ctx->pendingMeshletTriangleCopyCount > 0)
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletTriangleBuffer,
+                        ctx->pendingMeshletTriangleCopyCount, ctx->pendingMeshletTriangleCopies);
+
+    endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+
+    uint32_t vc = ctx->pendingVertexCopyCount;
+    uint32_t ic = ctx->pendingIndexCopyCount;
+    ctx->pendingVertexCopyCount          = 0;
+    ctx->pendingIndexCopyCount           = 0;
+    ctx->pendingMeshletCopyCount         = 0;
+    ctx->pendingMeshletBoundsCopyCount   = 0;
+    ctx->pendingMeshletVertexCopyCount   = 0;
+    ctx->pendingMeshletTriangleCopyCount = 0;
+    ctx->uploadStagingOffset             = 0;
+    fprintf(stdout, "Flushed upload staging buffer: %u vertex + %u index + meshlet regions\n", vc, ic);
 }
 
 uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount)
@@ -2414,6 +2354,148 @@ uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_
     uint32_t baseOffset = ctx->megaMorphBufferOffset;
     ctx->megaMorphBufferOffset += deltaCount;
     return baseOffset;
+}
+
+uint32_t megaMeshletBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count)
+{
+    VkDeviceSize mlUploadSize = count * sizeof(Meshlet);
+    VkDeviceSize boundsUploadSize = count * sizeof(MeshletBounds);
+    VkDeviceSize totalUploadSize = mlUploadSize + boundsUploadSize;
+
+    VkDeviceSize dstOffsetML = megaMeshletBufferOffset * sizeof(Meshlet);
+    VkDeviceSize dstOffsetBounds = megaMeshletBufferOffset * sizeof(MeshletBounds);
+
+    if (dstOffsetML + mlUploadSize > megaMeshletBufferSize) return UINT32_MAX;
+
+    if (ctx->uploadStagingBuffer && ctx->uploadStagingOffset + totalUploadSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+
+    if (ctx->uploadStagingBuffer) {
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, 1, mlUploadSize, f);
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset + mlUploadSize, 1, boundsUploadSize, f);
+
+        VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+        VkBufferCopy regionML = { .srcOffset = ctx->uploadStagingOffset, .dstOffset = dstOffsetML, .size = mlUploadSize };
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletBuffer, 1, &regionML);
+
+        VkBufferCopy regionBounds = { .srcOffset = ctx->uploadStagingOffset + mlUploadSize, .dstOffset = dstOffsetBounds, .size = boundsUploadSize };
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletBoundsBuffer, 1, &regionBounds);
+
+        endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+        ctx->uploadStagingOffset += totalUploadSize;
+    }
+
+    uint32_t baseOffset = megaMeshletBufferOffset;
+    megaMeshletBufferOffset += count;
+    return baseOffset;
+}
+
+uint32_t megaMeshletVertexBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count)
+{
+    VkDeviceSize uploadSize = count * sizeof(uint32_t);
+    VkDeviceSize dstOffset = megaMeshletVertexOffset * sizeof(uint32_t);
+
+    if (dstOffset + uploadSize > megaMeshletVertexBufferSize) return UINT32_MAX;
+
+    if (ctx->uploadStagingBuffer && ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+
+    if (ctx->uploadStagingBuffer) {
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, 1, uploadSize, f);
+        VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+        VkBufferCopy region = { .srcOffset = ctx->uploadStagingOffset, .dstOffset = dstOffset, .size = uploadSize };
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletVertexBuffer, 1, &region);
+        endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+        ctx->uploadStagingOffset += uploadSize;
+    }
+
+    uint32_t baseOffset = megaMeshletVertexOffset;
+    megaMeshletVertexOffset += count;
+    return baseOffset;
+}
+
+uint32_t megaMeshletTriangleBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count)
+{
+    VkDeviceSize uploadSize = count * sizeof(uint8_t);
+    VkDeviceSize dstOffset = megaMeshletTriangleOffset * sizeof(uint8_t);
+
+    if (dstOffset + uploadSize > megaMeshletTriangleBufferSize) return UINT32_MAX;
+
+    if (ctx->uploadStagingBuffer && ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+
+    if (ctx->uploadStagingBuffer) {
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, 1, uploadSize, f);
+        VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
+        VkBufferCopy region = { .srcOffset = ctx->uploadStagingOffset, .dstOffset = dstOffset, .size = uploadSize };
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletTriangleBuffer, 1, &region);
+        endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
+        ctx->uploadStagingOffset += uploadSize;
+    }
+
+    uint32_t baseOffset = megaMeshletTriangleOffset;
+    megaMeshletTriangleOffset += count;
+    return baseOffset;
+}
+
+uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, MeshletBounds* bounds, uint32_t count) {
+    VkDeviceSize mlSize     = count * sizeof(Meshlet);
+    VkDeviceSize boundsSize = count * sizeof(MeshletBounds);
+    VkDeviceSize dstOffsetML     = megaMeshletBufferOffset * sizeof(Meshlet);
+    VkDeviceSize dstOffsetBounds = megaMeshletBufferOffset * sizeof(MeshletBounds);
+    if (dstOffsetML + mlSize > megaMeshletBufferSize) { fprintf(stderr, "megaMeshletBuffer overflow!\n"); return UINT32_MAX; }
+    if (ctx->uploadStagingOffset + mlSize + boundsSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+
+    memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, meshlets, mlSize);
+    if (ctx->pendingMeshletCopyCount == ctx->pendingMeshletCopyCapacity) {
+        ctx->pendingMeshletCopyCapacity *= 2;
+        ctx->pendingMeshletCopies = realloc(ctx->pendingMeshletCopies, ctx->pendingMeshletCopyCapacity * sizeof(VkBufferCopy));
+    }
+    ctx->pendingMeshletCopies[ctx->pendingMeshletCopyCount++] = (VkBufferCopy){ ctx->uploadStagingOffset, dstOffsetML, mlSize };
+    ctx->uploadStagingOffset += mlSize;
+
+    memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, bounds, boundsSize);
+    if (ctx->pendingMeshletBoundsCopyCount == ctx->pendingMeshletBoundsCopyCapacity) {
+        ctx->pendingMeshletBoundsCopyCapacity *= 2;
+        ctx->pendingMeshletBoundsCopies = realloc(ctx->pendingMeshletBoundsCopies, ctx->pendingMeshletBoundsCopyCapacity * sizeof(VkBufferCopy));
+    }
+    ctx->pendingMeshletBoundsCopies[ctx->pendingMeshletBoundsCopyCount++] = (VkBufferCopy){ ctx->uploadStagingOffset, dstOffsetBounds, boundsSize };
+    ctx->uploadStagingOffset += boundsSize;
+
+    uint32_t base = megaMeshletBufferOffset;
+    megaMeshletBufferOffset += count;
+    return base;
+}
+
+uint32_t megaMeshletVertexBufferAllocate(VulkanContext* ctx, uint32_t* vertices, uint32_t count) {
+    VkDeviceSize uploadSize = count * sizeof(uint32_t);
+    VkDeviceSize dstOffset  = megaMeshletVertexOffset * sizeof(uint32_t);
+    if (dstOffset + uploadSize > megaMeshletVertexBufferSize) { fprintf(stderr, "megaMeshletVertexBuffer overflow!\n"); return UINT32_MAX; }
+    if (ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+    memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, vertices, uploadSize);
+    if (ctx->pendingMeshletVertexCopyCount == ctx->pendingMeshletVertexCopyCapacity) {
+        ctx->pendingMeshletVertexCopyCapacity *= 2;
+        ctx->pendingMeshletVertexCopies = realloc(ctx->pendingMeshletVertexCopies, ctx->pendingMeshletVertexCopyCapacity * sizeof(VkBufferCopy));
+    }
+    ctx->pendingMeshletVertexCopies[ctx->pendingMeshletVertexCopyCount++] = (VkBufferCopy){ ctx->uploadStagingOffset, dstOffset, uploadSize };
+    ctx->uploadStagingOffset += uploadSize;
+    uint32_t base = megaMeshletVertexOffset;
+    megaMeshletVertexOffset += count;
+    return base;
+}
+
+uint32_t megaMeshletTriangleBufferAllocate(VulkanContext* ctx, uint8_t* triangles, uint32_t count) {
+    VkDeviceSize uploadSize = count * sizeof(uint8_t);
+    VkDeviceSize dstOffset  = megaMeshletTriangleOffset * sizeof(uint8_t);
+    if (dstOffset + uploadSize > megaMeshletTriangleBufferSize) { fprintf(stderr, "megaMeshletTriangleBuffer overflow!\n"); return UINT32_MAX; }
+    if (ctx->uploadStagingOffset + uploadSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+    memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, triangles, uploadSize);
+    if (ctx->pendingMeshletTriangleCopyCount == ctx->pendingMeshletTriangleCopyCapacity) {
+        ctx->pendingMeshletTriangleCopyCapacity *= 2;
+        ctx->pendingMeshletTriangleCopies = realloc(ctx->pendingMeshletTriangleCopies, ctx->pendingMeshletTriangleCopyCapacity * sizeof(VkBufferCopy));
+    }
+    ctx->pendingMeshletTriangleCopies[ctx->pendingMeshletTriangleCopyCount++] = (VkBufferCopy){ ctx->uploadStagingOffset, dstOffset, uploadSize };
+    ctx->uploadStagingOffset += uploadSize;
+    uint32_t base = megaMeshletTriangleOffset;
+    megaMeshletTriangleOffset += count;
+    return base;
 }
 
 uint32_t megaMorphBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t deltaCount)
@@ -2570,7 +2652,7 @@ void createBindlessDescriptorLayout(VulkanContext* ctx)
         .binding            = 0,
         .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount    = MAX_TEXTURES,
-        .stageFlags         = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .stageFlags         = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_MESH_BIT_EXT,
         .pImmutableSamplers = NULL
     };
 
@@ -2660,7 +2742,7 @@ void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
 void createLightingDescriptors(VulkanContext* ctx)
 {
     VkDescriptorSetLayoutBinding b[7] = {
-        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT },
+        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
@@ -2783,44 +2865,80 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
             (double)jointSize/(1024*1024), MAX_FRAMES_IN_FLIGHT);
 }
 
-void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes)
-{
-    maxMeshes = 16384 + 4096;
-    VkDeviceSize drawSize  = maxMeshes * sizeof(VkDrawIndexedIndirectCommand);
-    VkDeviceSize visSize   = maxMeshes * 5 * sizeof(uint32_t);
-    // 4 streams (Opaque, Transmission, Transparent, Wireframe) per frustum x 5 frustums = 20 slots
-    VkDeviceSize countSize = 20 * sizeof(uint32_t);
+void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes) {
+    (void)maxMeshes;
+    // Mesh shaders draw via vkCmdDrawMeshTasksEXT — no indirect buffer needed there.
+    // This scratch buffer exists only for the legacy vertex shader path:
+    // immediate-mode primitives, lines, and debug draws via emit_draw_with_slot.
+    // Sized for two frames * (max static + max dynamic) slots.
+    VkDeviceSize drawSize = (VkDeviceSize)(16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+    VkDeviceSize totalSize = drawSize * MAX_FRAMES_IN_FLIGHT;
 
-    /* Source: CPU writes per-mesh draw commands, compact.comp reads.
-       CRITICAL: Multiplied by MAX_FRAMES_IN_FLIGHT to prevent CPU/GPU tearing! */
-    createBuffer(ctx, drawSize * MAX_FRAMES_IN_FLIGHT,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        &ctx->srcIndirectBuffer, &ctx->srcIndirectBufferMemory);
-    vkMapMemory(ctx->device, ctx->srcIndirectBufferMemory, 0, drawSize * MAX_FRAMES_IN_FLIGHT, 0,
+    VkBufferCreateInfo bci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = totalSize,
+        .usage       = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    if (vkCreateBuffer(ctx->device, &bci, NULL, &ctx->indirectBuffer) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create immediate-mode scratch buffer\n");
+        exit(EXIT_FAILURE);
+    }
+
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(ctx->device, ctx->indirectBuffer, &req);
+
+    VkMemoryAllocateInfo ai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+    if (vkAllocateMemory(ctx->device, &ai, NULL, &ctx->indirectBufferMemory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate immediate-mode scratch buffer memory\n");
+        exit(EXIT_FAILURE);
+    }
+    vkBindBufferMemory(ctx->device, ctx->indirectBuffer, ctx->indirectBufferMemory, 0);
+    vkMapMemory(ctx->device, ctx->indirectBufferMemory, 0, totalSize, 0,
                 &ctx->srcIndirectBufferMapped);
+    memset(ctx->srcIndirectBufferMapped, 0, totalSize);
 
-    /* Compacted output: compact.comp writes, GPU draws from — 5 frustums */
-    createBuffer(ctx, drawSize * 5,
-        VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        &ctx->indirectBuffer, &ctx->indirectBufferMemory);
+    // drawCountBuffer: tiny 8-slot uint32 array, zeroed each frame.
+    // Used by vkCmdDrawIndexedIndirectCount for the wireframe stream.
+    VkDeviceSize countSize = (VkDeviceSize)8 * sizeof(uint32_t);
+    VkBufferCreateInfo cbci = {
+        .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size        = countSize,
+        .usage       = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    if (vkCreateBuffer(ctx->device, &cbci, NULL, &ctx->drawCountBuffer) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create draw count buffer\n");
+        exit(EXIT_FAILURE);
+    }
 
-    /* Visibility: cull.comp writes uint[5][N] */
-    createBuffer(ctx, visSize,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        &ctx->visibilityBuffer, &ctx->visibilityBufferMemory);
+    VkMemoryRequirements creq;
+    vkGetBufferMemoryRequirements(ctx->device, ctx->drawCountBuffer, &creq);
+    VkMemoryAllocateInfo cai = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = creq.size,
+        .memoryTypeIndex = findMemoryType(ctx->physicalDevice, creq.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    };
+    if (vkAllocateMemory(ctx->device, &cai, NULL, &ctx->drawCountBufferMemory) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to allocate draw count buffer memory\n");
+        exit(EXIT_FAILURE);
+    }
+    vkBindBufferMemory(ctx->device, ctx->drawCountBuffer, ctx->drawCountBufferMemory, 0);
 
-    /* Draw count: compact.comp writes uint[5], vkCmdDrawIndexedIndirectCount reads */
-    createBuffer(ctx, countSize,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        &ctx->drawCountBuffer, &ctx->drawCountBufferMemory);
+    // We don't need a persistent map for drawCountBuffer — it's zeroed via
+    // vkCmdFillBuffer each frame in the render graph, not CPU-written.
+    memset(&ctx->drawCountBufferMemory, 0, 0); // no-op, just documents intent
 
-    fprintf(stdout, "GPU-compacted indirect: %u meshes × 5 frustums\n", maxMeshes);
+    fprintf(stdout, "Immediate-mode scratch: %.1f MB | Draw count: %zu B\n",
+            (double)totalSize / (1024.0 * 1024.0), (size_t)countSize);
 }
 
 void markMeshesSSBODirty(VulkanContext* ctx)
@@ -2994,6 +3112,11 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].morphWeightOffset = m->morphWeightOffset;
             dst[i].morphCount   = m->morphCount;
 
+            dst[i].meshletCount = m->meshletCount;
+            dst[i].meshletOffset = (m->megaBaseMeshlet != UINT32_MAX) ? m->megaBaseMeshlet : -1;
+            dst[i].meshletVertexOffset = (m->megaBaseMeshletVertex != UINT32_MAX) ? m->megaBaseMeshletVertex : -1;
+            dst[i].meshletTriangleOffset = (m->megaBaseMeshletTriangle != UINT32_MAX) ? m->megaBaseMeshletTriangle : -1;
+
             dst[i].transmissionFactor = m->transmissionFactor;
             dst[i].ior                = m->ior;
             dst[i].thicknessFactor    = m->thicknessFactor;
@@ -3006,6 +3129,10 @@ void flushMeshSSBO(VulkanContext* ctx, Meshes* meshes)
             dst[i].dispersion         = m->dispersion;
             dst[i].isVisible          = m->visible ? 1 : 0;
             dst[i].isWireframe        = m->wireframe ? 1 : 0;
+            dst[i].vertexOffset       = (m->megaBaseVertex != UINT32_MAX) ? m->megaBaseVertex : (ctx->megaVertexBufferOffset + (ctx->currentFrame * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex);
+            dst[i]._pad1 = 0;
+            dst[i]._pad2 = 0;
+            dst[i]._pad3 = 0;
 
             #undef GET_BINDLESS
         }

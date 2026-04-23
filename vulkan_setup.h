@@ -123,3 +123,4 @@ uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t
 void dynamicBufferUploadAndCopy(VulkanContext* ctx, void* data, VkDeviceSize size, VkDeviceSize dstOffset);
 
 
+void gltf_load_enqueue(const char* filepath);

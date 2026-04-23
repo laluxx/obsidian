@@ -973,6 +973,9 @@ void begin_frame(void) {
     line_renderer_clear();
     context.indirectDrawCount = (uint32_t)scene.meshes.count;
 
+    extern void animate_scene(Scene* scene, float time);
+    animate_scene(&scene, 0.0f);
+
     vec3 camPos = { camera.position[0], camera.position[1], camera.position[2] };
     float cam_delta = glm_vec3_distance2(camPos, last_camera_pos);
 
@@ -1376,7 +1379,7 @@ void mesh(VkCommandBuffer cmd, Mesh* mesh) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, context.graphicsPipelineTextured3D);
     pushConstants.vertexBufferAddr = (mesh->megaBaseVertex != UINT32_MAX) ? megaVertexBufferAddr : dynamicVertexBufferAddr;
     vkCmdPushConstants(cmd, context.pipelineLayoutTextured3D,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
 
     uint32_t first_vertex = (mesh->megaBaseVertex != UINT32_MAX) ? mesh->megaBaseVertex : (context.megaVertexBufferOffset + (frame_index * MAX_DYNAMIC_VERTICES) + mesh->dynamicBaseVertex);
@@ -1455,7 +1458,7 @@ void meshes_draw(VkCommandBuffer cmd, Meshes* meshes) {
 
         pushConstants.vertexBufferAddr = (m->megaBaseVertex != UINT32_MAX) ? megaVertexBufferAddr : dynamicVertexBufferAddr;
         vkCmdPushConstants(cmd, want_layout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(PushConstants), &pushConstants);
 
         uint32_t first_vertex = (m->megaBaseVertex != UINT32_MAX) ? m->megaBaseVertex : (context.megaVertexBufferOffset + (frame_index * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex);
@@ -2372,7 +2375,8 @@ void line_renderer_draw(VkCommandBuffer cmd) {
     int slot = alloc_slot(identity);
 
     // Write a dummy indirect command with 0 instances so the compute culler safely ignores it
-    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)context.srcIndirectBufferMapped;
+    VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+    VkDrawIndexedIndirectCommand* cmds = (VkDrawIndexedIndirectCommand*)((uint8_t*)context.srcIndirectBufferMapped + (frame_index * drawSize));
     cmds[slot].indexCount = 0;
     cmds[slot].instanceCount = 0;
     cmds[slot].firstIndex = 0;
@@ -2393,7 +2397,7 @@ void line_renderer_draw(VkCommandBuffer cmd) {
     pushConstants.morphBufferAddr  = megaMorphBufferAddr;
     pushConstants.morphWeightAddr  = morphWeightAddr[frame_index];
     vkCmdPushConstants(cmd, context.pipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pushConstants);
 
     // Loop through batches and explicitly set the dynamic line width per batch!

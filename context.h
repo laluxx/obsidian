@@ -138,6 +138,18 @@ typedef struct {
     VkBufferCopy*    pendingIndexCopies;
     uint32_t         pendingIndexCopyCount;
     uint32_t         pendingIndexCopyCapacity;
+    VkBufferCopy*    pendingMeshletCopies;
+    uint32_t         pendingMeshletCopyCount;
+    uint32_t         pendingMeshletCopyCapacity;
+    VkBufferCopy*    pendingMeshletBoundsCopies;
+    uint32_t         pendingMeshletBoundsCopyCount;
+    uint32_t         pendingMeshletBoundsCopyCapacity;
+    VkBufferCopy*    pendingMeshletVertexCopies;
+    uint32_t         pendingMeshletVertexCopyCount;
+    uint32_t         pendingMeshletVertexCopyCapacity;
+    VkBufferCopy*    pendingMeshletTriangleCopies;
+    uint32_t         pendingMeshletTriangleCopyCount;
+    uint32_t         pendingMeshletTriangleCopyCapacity;
 
     // ── per-frame dynamic buffers (2D, lines, morph) ──
     // staging (HOST_VISIBLE|HOST_COHERENT, persistently mapped)
@@ -203,17 +215,16 @@ typedef struct {
     VkDescriptorPool      ssboPool;
     VkDescriptorSet       ssboSets[MAX_FRAMES_IN_FLIGHT];
 
-    // ── indirect draw buffer ────────────────────────────────────────
-    VkBuffer         indirectBuffer;          /* compacted GPU output, read by draw     */
+    // ── immediate-mode scratch buffer ────────────────────────────────
+    // Used ONLY by the legacy vertex shader path: lines, debug prims,
+    // emit_draw_with_slot. Mesh shader draws bypass this entirely.
+    // One slot per (static mesh + dynamic draw), two frames in flight.
+    VkBuffer         indirectBuffer;          /* alias: scratch for imm-mode draws      */
     VkDeviceMemory   indirectBufferMemory;
-    VkBuffer         srcIndirectBuffer;       /* CPU-written source, read by compact    */
-    VkDeviceMemory   srcIndirectBufferMemory;
-    void*            srcIndirectBufferMapped;
-    VkBuffer         visibilityBuffer;        /* cull.comp writes uint[frustums][meshes]*/
-    VkDeviceMemory   visibilityBufferMemory;
-    VkBuffer         drawCountBuffer;         /* compact.comp writes uint[frustums]     */
+    void*            srcIndirectBufferMapped; /* persistently mapped write ptr          */
+    VkBuffer         drawCountBuffer;         /* 8 x uint32 slots, zeroed each frame    */
     VkDeviceMemory   drawCountBufferMemory;
-    uint32_t         indirectDrawCount;
+    uint32_t         indirectDrawCount;       /* total draws dispatched this frame      */
     uint32_t         ssboFramesDirty;
     uint64_t*        meshDirtyBits;
     uint32_t         meshDirtyCapacity;

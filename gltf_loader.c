@@ -6,12 +6,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "animation_editor.h"
+#include <meshoptimizer.h>
 
 static int32_t gltf_texture_indices[MAX_TEXTURES];
 static size_t gltf_texture_count = 0;
 
-// Bumped magic to force rebuild of OMDL files since embedded textures are now extracted to cache
-#define OMDL_MAGIC 0x4C444D51 // 'OMDQ'
+// Bumped magic to force rebuild of OMDL files for Meshlet Task/Mesh Shaders
+#define OMDL_MAGIC 0x4C444D53 // 'OMDS'
 
 typedef struct {
     uint32_t magic;
@@ -19,6 +20,9 @@ typedef struct {
     uint32_t total_vertices;
     uint32_t total_indices;
     uint32_t total_morph_deltas;
+    uint32_t total_meshlets;
+    uint32_t total_meshlet_vertices;
+    uint32_t total_meshlet_triangles;
     uint32_t node_count;
     uint32_t skin_count;
     uint32_t anim_count;
@@ -38,6 +42,10 @@ typedef struct {
     uint32_t vertexOffset;
     uint32_t indexOffset;
     uint32_t morphOffset;
+    uint32_t meshletCount;
+    uint32_t meshletOffset;
+    uint32_t meshletVertexOffset;
+    uint32_t meshletTriangleOffset;
 
     vec4 baseColorFactor;
     float metallicFactor;
@@ -66,14 +74,38 @@ typedef struct {
 
 static char gltf_texture_paths[MAX_TEXTURES][512];
 
+// Staging array for cache-miss mesh loading.
+// Meshes are held here until GPU addresses are patched, then committed to the live scene.
+static Mesh*  s_staged_meshes = NULL;
+static size_t s_staged_mesh_count = 0;
+static size_t s_staged_mesh_capacity = 0;
+
+static void staged_mesh_reset(void) { s_staged_mesh_count = 0; }
+
+static void staged_mesh_push(Mesh m) {
+    if (s_staged_mesh_count == s_staged_mesh_capacity) {
+        size_t new_cap = s_staged_mesh_capacity ? s_staged_mesh_capacity * 2 : 64;
+        s_staged_meshes = realloc(s_staged_meshes, new_cap * sizeof(Mesh));
+        s_staged_mesh_capacity = new_cap;
+    }
+    s_staged_meshes[s_staged_mesh_count++] = m;
+}
+
 // OMDL Cooker Arrays
 static Vertex* omdl_vertices = NULL;
 static uint32_t* omdl_indices = NULL;
 static MorphDelta* omdl_morphs = NULL;
+static Meshlet* omdl_meshlets = NULL;
+static MeshletBounds* omdl_meshlet_bounds = NULL;
+static uint32_t* omdl_meshlet_vertices = NULL;
+static uint8_t* omdl_meshlet_triangles = NULL;
 static OmdlMeshMeta* omdl_metas = NULL;
 static uint32_t omdl_vertex_count = 0;
 static uint32_t omdl_index_count = 0;
 static uint32_t omdl_morph_count = 0;
+static uint32_t omdl_meshlet_count = 0;
+static uint32_t omdl_meshlet_vertex_count = 0;
+static uint32_t omdl_meshlet_triangle_count = 0;
 static uint32_t omdl_mesh_count = 0;
 
 // OMDL Loader State
@@ -83,6 +115,9 @@ static uint32_t omdl_cache_idx = 0;
 static uint32_t omdl_base_v = 0;
 static uint32_t omdl_base_i = 0;
 static uint32_t omdl_base_m = 0;
+static uint32_t omdl_base_ml = 0;
+static uint32_t omdl_base_ml_v = 0;
+static uint32_t omdl_base_ml_t = 0;
 static OmdlSceneGraph* omdl_cache_osg = NULL;
 
 typedef struct {
@@ -101,6 +136,12 @@ extern bool scene_topology_dirty;
 extern uint32_t megaBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t vertexCount);
 extern uint32_t megaIndexBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t indexCount);
 extern uint32_t megaMorphBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t deltaCount);
+extern uint32_t megaMeshletBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count);
+extern uint32_t megaMeshletVertexBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count);
+extern uint32_t megaMeshletTriangleBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count);
+extern uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, MeshletBounds* bounds, uint32_t count);
+extern uint32_t megaMeshletVertexBufferAllocate(VulkanContext* ctx, uint32_t* vertices, uint32_t count);
+extern uint32_t megaMeshletTriangleBufferAllocate(VulkanContext* ctx, uint8_t* triangles, uint32_t count);
 
 void get_directory(const char* filepath, char* dir, size_t dir_size) {
     const char* last_slash = strrchr(filepath, '/');
@@ -258,9 +299,13 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         glm_vec3_copy(meta.aabbMax, mesh.aabbMax);
         mesh.vertexCount = meta.vertexCount;
         mesh.indexCount = meta.indexCount;
+        mesh.meshletCount = meta.meshletCount;
 
         mesh.megaBaseVertex = (omdl_base_v != UINT32_MAX) ? omdl_base_v + meta.vertexOffset : UINT32_MAX;
         mesh.megaBaseIndex = (omdl_base_i != UINT32_MAX && meta.indexCount > 0) ? omdl_base_i + meta.indexOffset : UINT32_MAX;
+        mesh.megaBaseMeshlet = (omdl_base_ml != UINT32_MAX) ? omdl_base_ml + meta.meshletOffset : UINT32_MAX;
+        mesh.megaBaseMeshletVertex = (omdl_base_ml_v != UINT32_MAX) ? omdl_base_ml_v + meta.meshletVertexOffset : UINT32_MAX;
+        mesh.megaBaseMeshletTriangle = (omdl_base_ml_t != UINT32_MAX) ? omdl_base_ml_t + meta.meshletTriangleOffset : UINT32_MAX;
         mesh.dynamicBaseVertex = UINT32_MAX;
 
         glm_vec4_copy(meta.baseColorFactor, mesh.baseColorFactor);
@@ -573,10 +618,79 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         }
     }
 
+    if (index_count > 0 && indices != NULL) {
+        meshopt_optimizeVertexCache(indices, indices, index_count, final_vertex_count);
+        meshopt_optimizeOverdraw(indices, indices, index_count, &final_vertices[0].pos[0], final_vertex_count, sizeof(Vertex), 1.05f);
+        meshopt_optimizeVertexFetch(final_vertices, indices, index_count, final_vertices, final_vertex_count, sizeof(Vertex));
+    }
+
     final_indices = indices;
     indices = NULL;
 
     final_morphs = extract_morph_targets(prim, final_vertex_count);
+
+    Meshlet* final_meshlets = NULL;
+    MeshletBounds* final_bounds = NULL;
+    uint32_t* final_meshlet_vertices = NULL;
+    uint8_t* final_meshlet_triangles = NULL;
+    size_t final_meshlet_count = 0;
+    size_t final_ml_vertex_count = 0;
+    size_t final_ml_triangle_count = 0;
+
+    if (final_index_count > 0 && final_indices != NULL) {
+        size_t max_meshlets = meshopt_buildMeshletsBound(final_index_count, 64, 124);
+        final_meshlets = malloc(max_meshlets * sizeof(Meshlet));
+        final_bounds = malloc(max_meshlets * sizeof(MeshletBounds));
+        final_meshlet_vertices = malloc(max_meshlets * 64 * sizeof(uint32_t));
+        final_meshlet_triangles = malloc(max_meshlets * 124 * 3 * sizeof(uint8_t));
+
+        struct meshopt_Meshlet* mo_meshlets = malloc(max_meshlets * sizeof(struct meshopt_Meshlet));
+
+        final_meshlet_count = meshopt_buildMeshlets(
+            mo_meshlets, final_meshlet_vertices, final_meshlet_triangles,
+            final_indices, final_index_count,
+            &final_vertices[0].pos[0], final_vertex_count, sizeof(Vertex),
+            64, 124, 0.0f
+            );
+
+        for (size_t i = 0; i < final_meshlet_count; i++) {
+            final_meshlets[i].vertex_offset = mo_meshlets[i].vertex_offset;
+            final_meshlets[i].triangle_offset = mo_meshlets[i].triangle_offset;
+            final_meshlets[i].vertex_count = mo_meshlets[i].vertex_count;
+            final_meshlets[i].triangle_count = mo_meshlets[i].triangle_count;
+
+            struct meshopt_Bounds bounds = meshopt_computeMeshletBounds(
+                &final_meshlet_vertices[mo_meshlets[i].vertex_offset],
+                &final_meshlet_triangles[mo_meshlets[i].triangle_offset],
+                mo_meshlets[i].triangle_count,
+                &final_vertices[0].pos[0], final_vertex_count, sizeof(Vertex)
+                );
+
+            final_bounds[i].center[0] = bounds.center[0];
+            final_bounds[i].center[1] = bounds.center[1];
+            final_bounds[i].center[2] = bounds.center[2];
+            final_bounds[i].radius = bounds.radius;
+            final_bounds[i].cone_apex[0] = bounds.cone_apex[0];
+            final_bounds[i].cone_apex[1] = bounds.cone_apex[1];
+            final_bounds[i].cone_apex[2] = bounds.cone_apex[2];
+            final_bounds[i].cone_axis[0] = bounds.cone_axis[0];
+            final_bounds[i].cone_axis[1] = bounds.cone_axis[1];
+            final_bounds[i].cone_axis[2] = bounds.cone_axis[2];
+            final_bounds[i].cone_cutoff = bounds.cone_cutoff;
+
+            final_ml_vertex_count += mo_meshlets[i].vertex_count;
+            final_ml_triangle_count += ((mo_meshlets[i].triangle_count * 3 + 3) & ~3);
+        }
+
+        // Recalculate exactly how much byte data we generated to avoid padding overflow reads
+        final_ml_triangle_count = 0;
+        for(size_t i = 0; i < final_meshlet_count; i++) {
+            size_t end = mo_meshlets[i].triangle_offset + ((mo_meshlets[i].triangle_count * 3 + 3) & ~3);
+            if (end > final_ml_triangle_count) final_ml_triangle_count = end;
+        }
+
+        free(mo_meshlets);
+    }
 
     vec3 bmin = { 1e30f,  1e30f,  1e30f};
     vec3 bmax = {-1e30f, -1e30f, -1e30f};
@@ -602,6 +716,10 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     meta.vertexOffset = omdl_vertex_count;
     meta.indexOffset = omdl_index_count;
     meta.morphOffset = omdl_morph_count;
+    meta.meshletCount = (uint32_t)final_meshlet_count;
+    meta.meshletOffset = omdl_meshlet_count;
+    meta.meshletVertexOffset = omdl_meshlet_vertex_count;
+    meta.meshletTriangleOffset = omdl_meshlet_triangle_count;
 
     memcpy(meta.baseColorFactor, mesh.baseColorFactor, sizeof(vec4));
     meta.metallicFactor = mesh.metallicFactor;
@@ -664,12 +782,33 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         mesh.morph_data->weights = calloc(final_morph_count, sizeof(float));
     }
 
+    if (final_meshlet_count > 0) {
+        omdl_meshlets = realloc(omdl_meshlets, (omdl_meshlet_count + final_meshlet_count) * sizeof(Meshlet));
+        memcpy(&omdl_meshlets[omdl_meshlet_count], final_meshlets, final_meshlet_count * sizeof(Meshlet));
+        omdl_meshlet_bounds = realloc(omdl_meshlet_bounds, (omdl_meshlet_count + final_meshlet_count) * sizeof(MeshletBounds));
+        memcpy(&omdl_meshlet_bounds[omdl_meshlet_count], final_bounds, final_meshlet_count * sizeof(MeshletBounds));
+        omdl_meshlet_count += final_meshlet_count;
+
+        omdl_meshlet_vertices = realloc(omdl_meshlet_vertices, (omdl_meshlet_vertex_count + final_ml_vertex_count) * sizeof(uint32_t));
+        memcpy(&omdl_meshlet_vertices[omdl_meshlet_vertex_count], final_meshlet_vertices, final_ml_vertex_count * sizeof(uint32_t));
+        omdl_meshlet_vertex_count += final_ml_vertex_count;
+
+        omdl_meshlet_triangles = realloc(omdl_meshlet_triangles, (omdl_meshlet_triangle_count + final_ml_triangle_count) * sizeof(uint8_t));
+        memcpy(&omdl_meshlet_triangles[omdl_meshlet_triangle_count], final_meshlet_triangles, final_ml_triangle_count * sizeof(uint8_t));
+        omdl_meshlet_triangle_count += final_ml_triangle_count;
+    }
+
     if (final_vertices) free(final_vertices);
     if (final_indices) free(final_indices);
     if (final_morphs) free(final_morphs);
+    if (final_meshlets) free(final_meshlets);
+    if (final_bounds) free(final_bounds);
+    if (final_meshlet_vertices) free(final_meshlet_vertices);
+    if (final_meshlet_triangles) free(final_meshlet_triangles);
 
     mesh.vertexCount = final_vertex_count;
     mesh.indexCount  = final_index_count;
+    mesh.meshletCount = final_meshlet_count;
     mesh.megaBaseVertex = UINT32_MAX;
     mesh.megaBaseIndex = UINT32_MAX;
     mesh.dynamicBaseVertex = UINT32_MAX;
@@ -685,7 +824,7 @@ static void process_node(cgltf_node* node, cgltf_data* data, Meshes* meshes, mat
     cgltf_node_transform_local(node, (float*)local_transform);
     glm_mat4_mul(parent_transform, local_transform, world_transform);
 
-    size_t mesh_start = meshes->count;
+    size_t mesh_start = is_omdl_cache_hit ? meshes->count : s_staged_mesh_count;
 
     if (node->mesh) {
         cgltf_mesh* gltf_mesh = node->mesh;
@@ -702,19 +841,27 @@ static void process_node(cgltf_node* node, cgltf_data* data, Meshes* meshes, mat
                 glm_mat4_copy(world_transform, mesh.model);
                 glm_mat4_copy(local_transform, mesh.local_transform);
 
-                // Copy initial weights from mesh if available
                 if (mesh.morph_data && gltf_mesh->weights_count > 0) {
                     for (size_t w = 0; w < mesh.morph_data->target_count && w < gltf_mesh->weights_count; w++) {
                         mesh.morph_data->weights[w] = gltf_mesh->weights[w];
                     }
                 }
 
-                meshes_add(meshes, mesh);
+                if (is_omdl_cache_hit) {
+                    // Cache hit: GPU addresses already valid from create_mesh_from_primitive.
+                    // Safe to add directly to the live scene.
+                    meshes_add(meshes, mesh);
+                } else {
+                    // Cache miss: megaBaseVertex is UINT32_MAX until after GPU batch upload.
+                    // Stage the mesh and commit to scene only after patching.
+                    staged_mesh_push(mesh);
+                }
             }
         }
     }
 
-    size_t mesh_count = meshes->count - mesh_start;
+    size_t mesh_end = is_omdl_cache_hit ? meshes->count : s_staged_mesh_count;
+    size_t mesh_count = mesh_end - mesh_start;
     if (mesh_count > 0 && node_mapping_count < 256) {
         node_mappings[node_mapping_count].node = node;
         node_mappings[node_mapping_count].mesh_start_index = mesh_start;
@@ -886,6 +1033,12 @@ void scene_tree_register_gltf(Scene* s, GLTFInstance* inst, const char* filepath
 }
 
 bool load_gltf(const char* filepath, Scene* scene) {
+    // Guard: ensure GPU is idle before any staging upload commands are submitted.
+    // This function is always called from the deferred queue in drawFrame() after
+    // waiting on all in-flight fences, so vkDeviceWaitIdle is a no-op in normal operation.
+    // It acts as a safety net if called directly (e.g. from main() at startup).
+    vkDeviceWaitIdle(context.device);
+
     char omdl_path[512];
     const char* home = getenv("HOME");
     if (!home) home = ".";
@@ -915,6 +1068,10 @@ bool load_gltf(const char* filepath, Scene* scene) {
             omdl_base_v = header.total_vertices > 0 ? megaBufferAllocateFromFile(&context, fomdl, header.total_vertices) : UINT32_MAX;
             omdl_base_i = header.total_indices > 0 ? megaIndexBufferAllocateFromFile(&context, fomdl, header.total_indices) : UINT32_MAX;
             omdl_base_m = header.total_morph_deltas > 0 ? megaMorphBufferAllocateFromFile(&context, fomdl, header.total_morph_deltas) : UINT32_MAX;
+
+            omdl_base_ml = header.total_meshlets > 0 ? megaMeshletBufferAllocateFromFile(&context, fomdl, header.total_meshlets) : UINT32_MAX;
+            omdl_base_ml_v = header.total_meshlet_vertices > 0 ? megaMeshletVertexBufferAllocateFromFile(&context, fomdl, header.total_meshlet_vertices) : UINT32_MAX;
+            omdl_base_ml_t = header.total_meshlet_triangles > 0 ? megaMeshletTriangleBufferAllocateFromFile(&context, fomdl, header.total_meshlet_triangles) : UINT32_MAX;
 
             /* CRITICAL FIX: Flush the pending staging buffer! The NVMe read the data into the
                persistent CPU-mapped staging memory, but the GPU copy commands were never submitted! */
@@ -971,7 +1128,9 @@ bool load_gltf(const char* filepath, Scene* scene) {
         fprintf(stdout, "\033[33m[OMDL] Cache Miss: Compiling GLTF to monolithic binary...\033[0m\n");
 
         omdl_vertex_count = 0; omdl_index_count = 0; omdl_morph_count = 0; omdl_mesh_count = 0;
+        omdl_meshlet_count = 0; omdl_meshlet_vertex_count = 0; omdl_meshlet_triangle_count = 0;
         omdl_vertices = NULL; omdl_indices = NULL; omdl_morphs = NULL; omdl_metas = NULL;
+        omdl_meshlets = NULL; omdl_meshlet_bounds = NULL; omdl_meshlet_vertices = NULL; omdl_meshlet_triangles = NULL;
 
         load_gltf_textures(data, filepath);
     }
@@ -991,24 +1150,37 @@ bool load_gltf(const char* filepath, Scene* scene) {
     instance->mesh_count = 0;
 
     load_gltf_meshes(data, &scene->meshes);
-    instance->mesh_count = scene->meshes.count - instance->mesh_start_index;
+    if (is_omdl_cache_hit) {
+        instance->mesh_count = scene->meshes.count - instance->mesh_start_index;
+    }
 
     if (!is_omdl_cache_hit) {
-        // 1. Bulk GPU Allocation
-        createUploadStagingBuffer(&context, 256 * 1024 * 1024);
-        uint32_t base_v = omdl_vertex_count > 0 ? megaBufferAllocate(&context, omdl_vertices, omdl_vertex_count) : UINT32_MAX;
-        uint32_t base_i = omdl_index_count > 0 ? megaIndexBufferAllocate(&context, omdl_indices, omdl_index_count) : UINT32_MAX;
-        uint32_t base_m = omdl_morph_count > 0 ? megaMorphBufferAllocate(&context, omdl_morphs, omdl_morph_count) : UINT32_MAX;
+        // Phase 1: Batch upload all geometry to GPU.
+        uint32_t base_v  = omdl_vertex_count > 0             ? megaBufferAllocate(&context, omdl_vertices, omdl_vertex_count)                                   : UINT32_MAX;
+        uint32_t base_i  = omdl_index_count > 0              ? megaIndexBufferAllocate(&context, omdl_indices, omdl_index_count)                                 : UINT32_MAX;
+        uint32_t base_m  = omdl_morph_count > 0              ? megaMorphBufferAllocate(&context, omdl_morphs, omdl_morph_count)                                  : UINT32_MAX;
+        uint32_t base_ml   = omdl_meshlet_count > 0          ? megaMeshletBufferAllocate(&context, omdl_meshlets, omdl_meshlet_bounds, omdl_meshlet_count)       : UINT32_MAX;
+        uint32_t base_ml_v = omdl_meshlet_vertex_count > 0   ? megaMeshletVertexBufferAllocate(&context, omdl_meshlet_vertices, omdl_meshlet_vertex_count)       : UINT32_MAX;
+        uint32_t base_ml_t = omdl_meshlet_triangle_count > 0 ? megaMeshletTriangleBufferAllocate(&context, omdl_meshlet_triangles, omdl_meshlet_triangle_count)  : UINT32_MAX;
         flushUploadStagingBuffer(&context);
-        destroyUploadStagingBuffer(&context);
 
-        // 2. Patch Runtime Meshes
-        for (size_t i = 0; i < omdl_mesh_count; i++) {
-            Mesh* m = &scene->meshes.items[instance->mesh_start_index + i];
-            m->megaBaseVertex = (base_v != UINT32_MAX) ? base_v + omdl_metas[i].vertexOffset : UINT32_MAX;
-            if (m->indexCount > 0) m->megaBaseIndex = (base_i != UINT32_MAX) ? base_i + omdl_metas[i].indexOffset : UINT32_MAX;
-            if (m->morphCount > 0) m->morphDeltaOffset = (base_m != UINT32_MAX) ? base_m + omdl_metas[i].morphOffset : UINT32_MAX;
+        // Phase 2: Patch GPU addresses into staged meshes before they enter the live scene.
+        // This is the critical invariant: megaBaseVertex is NEVER UINT32_MAX in the live scene.
+        for (size_t i = 0; i < s_staged_mesh_count; i++) {
+            Mesh* m = &s_staged_meshes[i];
+            m->megaBaseVertex   = (base_v  != UINT32_MAX) ? base_v  + omdl_metas[i].vertexOffset          : UINT32_MAX;
+            if (m->indexCount > 0)  m->megaBaseIndex      = (base_i  != UINT32_MAX) ? base_i  + omdl_metas[i].indexOffset           : UINT32_MAX;
+            if (m->morphCount > 0)  m->morphDeltaOffset   = (base_m  != UINT32_MAX) ? base_m  + omdl_metas[i].morphOffset            : UINT32_MAX;
+            m->megaBaseMeshlet         = (base_ml   != UINT32_MAX) ? base_ml   + omdl_metas[i].meshletOffset         : UINT32_MAX;
+            m->megaBaseMeshletVertex   = (base_ml_v != UINT32_MAX) ? base_ml_v + omdl_metas[i].meshletVertexOffset   : UINT32_MAX;
+            m->megaBaseMeshletTriangle = (base_ml_t != UINT32_MAX) ? base_ml_t + omdl_metas[i].meshletTriangleOffset : UINT32_MAX;
         }
+        // Phase 3: Atomically commit all patched meshes to the live scene.
+        for (size_t i = 0; i < s_staged_mesh_count; i++) {
+            meshes_add(&scene->meshes, s_staged_meshes[i]);
+        }
+        instance->mesh_count = s_staged_mesh_count;
+        staged_mesh_reset();
 
         // 3. Extract Scene Graph (Nodes, Skins, Animations)
         OmdlSceneGraph* osg = calloc(1, sizeof(OmdlSceneGraph));
@@ -1129,12 +1301,19 @@ bool load_gltf(const char* filepath, Scene* scene) {
         FILE* fout = fopen(omdl_path, "wb");
         if (fout) {
             OmdlHeader header = { OMDL_MAGIC, omdl_mesh_count, omdl_vertex_count, omdl_index_count, omdl_morph_count,
-                                  osg->node_count, osg->skin_count, osg->anim_count, total_joints, total_channels, total_floats };
+                omdl_meshlet_count, omdl_meshlet_vertex_count, omdl_meshlet_triangle_count,
+                osg->node_count, osg->skin_count, osg->anim_count, total_joints, total_channels, total_floats };
             fwrite(&header, sizeof(OmdlHeader), 1, fout);
             fwrite(omdl_metas, sizeof(OmdlMeshMeta), omdl_mesh_count, fout);
             if (omdl_vertex_count > 0) fwrite(omdl_vertices, sizeof(Vertex), omdl_vertex_count, fout);
             if (omdl_index_count > 0) fwrite(omdl_indices, sizeof(uint32_t), omdl_index_count, fout);
             if (omdl_morph_count > 0) fwrite(omdl_morphs, sizeof(MorphDelta), omdl_morph_count, fout);
+            if (omdl_meshlet_count > 0) {
+                fwrite(omdl_meshlets, sizeof(Meshlet), omdl_meshlet_count, fout);
+                fwrite(omdl_meshlet_bounds, sizeof(MeshletBounds), omdl_meshlet_count, fout);
+            }
+            if (omdl_meshlet_vertex_count > 0) fwrite(omdl_meshlet_vertices, sizeof(uint32_t), omdl_meshlet_vertex_count, fout);
+            if (omdl_meshlet_triangle_count > 0) fwrite(omdl_meshlet_triangles, sizeof(uint8_t), omdl_meshlet_triangle_count, fout);
 
             if (osg->node_count > 0) fwrite(osg->nodes, sizeof(OmdlNode), osg->node_count, fout);
             if (osg->skin_count > 0) {
@@ -1160,6 +1339,10 @@ bool load_gltf(const char* filepath, Scene* scene) {
         if (omdl_indices) free(omdl_indices);
         if (omdl_morphs) free(omdl_morphs);
         if (omdl_metas) free(omdl_metas);
+        if (omdl_meshlets) free(omdl_meshlets);
+        if (omdl_meshlet_bounds) free(omdl_meshlet_bounds);
+        if (omdl_meshlet_vertices) free(omdl_meshlet_vertices);
+        if (omdl_meshlet_triangles) free(omdl_meshlet_triangles);
     } else {
         instance->gltf_data = (void*)omdl_cache_osg;
 
@@ -1225,6 +1408,10 @@ bool load_gltf(const char* filepath, Scene* scene) {
            instance->mesh_start_index,
            instance->mesh_start_index + instance->mesh_count - 1);
 
+    if (instance->mesh_count > 0) {
+        glm_mat4_identity(scene->meshes.items[instance->mesh_start_index].local_transform);
+    }
+
     scene_topology_dirty = true;
     markMeshesSSBODirty(&context);
 
@@ -1266,13 +1453,13 @@ void animate_scene(Scene* scene, float time) {
     for (size_t inst = 0; inst < scene->gltf_instance_count; inst++) {
         GLTFInstance* instance = &scene->gltf_instances[inst];
         OmdlSceneGraph* osg = (OmdlSceneGraph*)instance->gltf_data;
-        if (!osg || osg->anim_count == 0) continue;
+        if (!osg) continue;
 
-        OmdlAnimation* anim = &osg->anims[0];
+        OmdlAnimation* anim = osg->anim_count > 0 ? &osg->anims[0] : NULL;
 
         // SYNC WITH EDITOR: Drive animation strictly via the timeline's playhead!
         float anim_time = g_anim_editor.time;
-        if (anim_time > anim->duration) anim_time = anim->duration;
+        if (anim && anim_time > anim->duration) anim_time = anim->duration;
 
         memset(osg->node_resolved, 0, osg->node_count * sizeof(bool));
 
@@ -1284,8 +1471,9 @@ void animate_scene(Scene* scene, float time) {
             vec3 S = { node->scale[0], node->scale[1], node->scale[2] };
             bool animated = false;
 
-            for (uint32_t c = 0; c < anim->channel_count; c++) {
-                OmdlChannel* chan = &osg->channels[anim->channel_offset + c];
+            if (anim) {
+                for (uint32_t c = 0; c < anim->channel_count; c++) {
+                    OmdlChannel* chan = &osg->channels[anim->channel_offset + c];
 
                 if (chan->target_node == UINT32_MAX) continue;
 
@@ -1339,9 +1527,10 @@ void animate_scene(Scene* scene, float time) {
                     glm_quat_normalize(R);
                 }
                 else if (chan->path_type == cgltf_animation_path_type_scale) {
-                    S[0] = lerp(v0[0], v1[0], factor);
-                    S[1] = lerp(v0[1], v1[1], factor);
-                    S[2] = lerp(v0[2], v1[2], factor);
+                        S[0] = lerp(v0[0], v1[0], factor);
+                        S[1] = lerp(v0[1], v1[1], factor);
+                        S[2] = lerp(v0[2], v1[2], factor);
+                    }
                 }
             }
 

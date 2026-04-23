@@ -47,6 +47,10 @@ struct MeshData {
     float dispersion;
     int   isVisible;
     int   isWireframe;
+    int   vertexOffset;
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
@@ -80,6 +84,8 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Wei
     float weights[];
 };
 
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DummyBuffer { uint dummy[]; };
+
 mat4 unpackJoint(PackedJoint j) {
     return mat4(
         vec4(j.row0.x, j.row1.x, j.row2.x, 0.0),
@@ -90,15 +96,19 @@ mat4 unpackJoint(PackedJoint j) {
 }
 
 layout(push_constant) uniform PC {
-    int ambientOcclusionEnabled;
-    int iblEnabled;
-    int meshIndex;
-    int cascadeIndex;
-    MeshBuffer meshData;
+    int          ambientOcclusionEnabled;
+    int          iblEnabled;
+    int          meshIndex;
+    int          cascadeIndex;
+    MeshBuffer   meshData;
     VertexBuffer vertexData;
-    JointBuffer jointData;
-    MorphBuffer morphData;
+    JointBuffer  jointData;
+    MorphBuffer  morphData;
     WeightBuffer weightData;
+    DummyBuffer  meshletData;
+    DummyBuffer  boundsData;
+    DummyBuffer  meshletVertexAddr;
+    DummyBuffer  meshletTriangleAddr;
 } pc;
 
 void main() {

@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -std=c23 -Wall -Wextra -g -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
-LDFLAGS = -fuse-ld=mold -lvulkan -lglfw -lX11 -lcglm -lm -lminiz $(shell pkg-config --libs freetype2 guile-3.0)
+LDFLAGS = -fuse-ld=mold -lvulkan -lglfw -lX11 -lcglm -lm -lminiz -lmeshoptimizer $(shell pkg-config --libs freetype2 guile-3.0)
 
 GLSLANG = glslangValidator
 XXD = xxd
@@ -27,7 +27,9 @@ SHADER_DIR = shaders
 SHADER_VERTS = $(wildcard $(SHADER_DIR)/*.vert)
 SHADER_FRAGS = $(wildcard $(SHADER_DIR)/*.frag)
 SHADER_COMPS = $(wildcard $(SHADER_DIR)/*.comp)
-SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv) $(SHADER_COMPS:.comp=.comp.spv)
+SHADER_TASKS = $(wildcard $(SHADER_DIR)/*.task)
+SHADER_MESHS = $(wildcard $(SHADER_DIR)/*.mesh)
+SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv) $(SHADER_COMPS:.comp=.comp.spv) $(SHADER_TASKS:.task=.task.spv) $(SHADER_MESHS:.mesh=.mesh.spv)
 SPV_HEADERS = $(SHADER_SPVS:.spv=.spv.h)
 
 # Default target - build executable directly
@@ -42,6 +44,10 @@ $(SHADER_DIR)/%.vert.spv: $(SHADER_DIR)/%.vert
 $(SHADER_DIR)/%.frag.spv: $(SHADER_DIR)/%.frag
 	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
 $(SHADER_DIR)/%.comp.spv: $(SHADER_DIR)/%.comp
+	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
+$(SHADER_DIR)/%.task.spv: $(SHADER_DIR)/%.task
+	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
+$(SHADER_DIR)/%.mesh.spv: $(SHADER_DIR)/%.mesh
 	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
 # Convert SPIR-V to C header
 $(SHADER_DIR)/%.spv.h: $(SHADER_DIR)/%.spv

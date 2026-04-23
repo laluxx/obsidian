@@ -73,6 +73,23 @@ static KeyChordMap s_saved_keymap;
 
 static void panel_get_rect(Panel* p, float* out_x, float* out_y, float* out_w, float* out_h);
 
+// Returns the GLTFInstance that owns mesh index mi, or NULL if none.
+static GLTFInstance* find_gltf_instance_for_mesh(int mi) {
+    for (size_t i = 0; i < scene.gltf_instance_count; i++) {
+        GLTFInstance* inst = &scene.gltf_instances[i];
+        if (mi >= (int)inst->mesh_start_index &&
+            mi < (int)(inst->mesh_start_index + inst->mesh_count))
+            return inst;
+    }
+    return NULL;
+}
+
+// Returns the root mesh index (mesh_start_index) of the instance owning mi.
+static int find_gltf_root_mesh(int mi) {
+    GLTFInstance* inst = find_gltf_instance_for_mesh(mi);
+    return inst ? (int)inst->mesh_start_index : mi;
+}
+
 typedef enum { MSG_INFO, MSG_SUCCESS, MSG_WARNING, MSG_ERROR } MessageType;
 typedef struct {
     char text[128];
@@ -367,6 +384,21 @@ static inline bool ui_hovered(float x, float y, float w, float h) {
     return s_ui_mx >= x && s_ui_mx <= x + w && s_ui_my >= y && s_ui_my <= y + h;
 }
 
+// Expands all ancestor SceneTree nodes for a given mesh index so it is visible in the hierarchy.
+static void scene_tree_expand_to_mesh(int mesh_index) {
+    for (int i = 0; i < scene.tree.count; i++) {
+        if (scene.tree.nodes[i].mesh_index == mesh_index) {
+            int p = scene.tree.nodes[i].parent;
+            while (p >= 0) {
+                scene.tree.nodes[p].expanded = true;
+                p = scene.tree.nodes[p].parent;
+            }
+            break;
+        }
+    }
+    s_hier_needs_scroll = true;
+}
+
 bool editor_wants_mouse(void) {
     if (s_grab_active || s_grab_just_finished) return true;
 
@@ -521,14 +553,11 @@ void editor_mouse_button(int button, int action) {
                 }
             }
 
-            if (anim_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
-                anim_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
-                return; /* Consumed! */
-            }
             if (g_anim_editor.visible && anim_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
                 anim_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
                 return; /* Consumed! */
-            } else if (!g_anim_editor.visible && text_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
+            }
+            if (!g_anim_editor.visible && text_editor_wants_mouse(s_ui_mx, sh - s_ui_my)) {
                 text_editor_mouse_button(button, action, s_ui_mx, sh - s_ui_my);
                 return; /* Consumed! */
             }
@@ -1100,21 +1129,7 @@ static void bone_on_select(int index, const TreeViewItem* item) {
     editor_selected_bone = item->user_data;
     s_inspector_show_skeleton_only = true;
     s_inspector_show_material_only = false;
-
-    int mesh_idx = editor.inspector.selected_mesh_index;
-    if (mesh_idx >= 0) {
-        for (int i = 0; i < scene.tree.count; i++) {
-            if (scene.tree.nodes[i].mesh_index == mesh_idx) {
-                int p = i;
-                while (p >= 0) {
-                    scene.tree.nodes[p].expanded = true;
-                    p = scene.tree.nodes[p].parent;
-                }
-                break;
-            }
-        }
-    }
-    s_hier_needs_scroll = true;
+    scene_tree_expand_to_mesh(editor.inspector.selected_mesh_index);
 }
 
 static void bone_on_toggle_expand(int index, const TreeViewItem* item) {
@@ -1327,14 +1342,7 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
             row -= lh - 2.0f; // Pull the bones tree significantly closer to the toggle line
 
             if (m->jointCount > 0) {
-                GLTFInstance* inst = NULL;
-                for (size_t i = 0; i < scene.gltf_instance_count; i++) {
-                    if (s->selected_mesh_index >= (int)scene.gltf_instances[i].mesh_start_index &&
-                        s->selected_mesh_index < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
-                        inst = &scene.gltf_instances[i];
-                        break;
-                    }
-                }
+                GLTFInstance* inst = find_gltf_instance_for_mesh(s->selected_mesh_index);
 
                 if (inst && inst->gltf_data && m->node) {
                     OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
@@ -2204,13 +2212,6 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
     }
 }
 
-static void render_file_manager(Panel* panel, float px, float py, float pw, float ph) {
-    if (!editor.font) return;
-    float cx, cy, cw, ch;
-    content_area(panel, px, py, pw, ph, &cx, &cy, &cw, &ch);
-    text(editor.font, "— bottom panel coming soon —", cx, cy + ch - PAD, CT.text_dim);
-}
-
 /// File Manager
 // Native POSIX case-insensitive sort, prioritizing folders
 static int compare_file_items(const void* a, const void* b) {
@@ -2395,18 +2396,10 @@ void apply_grab_update(void) {
             glm_mat4_mul(T, s_grab_initial_model, new_world);
             glm_mat4_copy(new_world, s_grab_osg->world_transforms[s_grab_bnode_idx]);
         } else {
-            int target_idx = mi;
-            bool is_gltf = false;
-            for (size_t i = 0; i < scene.gltf_instance_count; i++) {
-                if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
-                    mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
-                    target_idx = (int)scene.gltf_instances[i].mesh_start_index;
-                    is_gltf = true;
-                    break;
-                }
-            }
+            GLTFInstance* gltf_inst = find_gltf_instance_for_mesh(mi);
+            int target_idx = gltf_inst ? (int)gltf_inst->mesh_start_index : mi;
 
-            if (is_gltf) {
+            if (gltf_inst) {
                 Mesh* root_m = &scene.meshes.items[target_idx];
                 mat4 result, inv_start, new_world;
                 glm_mat4_mul(T, s_grab_initial_model, new_world);
@@ -2456,14 +2449,7 @@ void grab_cancel(void) {
             glm_mat4_copy(s_grab_initial_model, m->model);
             glm_mat4_copy(s_grab_initial_local, m->local_transform);
             if (s_grab_initial_root_local[3][3] != 0.0f) {
-                int target_idx = mi;
-                for (size_t i = 0; i < scene.gltf_instance_count; i++) {
-                    if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
-                        mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
-                        target_idx = (int)scene.gltf_instances[i].mesh_start_index;
-                        break;
-                    }
-                }
+                int target_idx = find_gltf_root_mesh(mi);
                 glm_mat4_copy(s_grab_initial_root_local, scene.meshes.items[target_idx].local_transform);
             }
         }
@@ -2526,59 +2512,42 @@ void editor_start_transform(int mode) {
     glm_vec3_copy(m->model[3], s_grab_pivot);
 
     if (editor_show_bones && editor_selected_bone && m->jointCount > 0) {
-        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
-            if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
-                mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
-                GLTFInstance* inst = &scene.gltf_instances[i];
-                if (inst->gltf_data) {
-                    OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
-                    OmdlNode* bnode = (OmdlNode*)editor_selected_bone;
-                    int32_t bnode_idx = (int32_t)(bnode - osg->nodes);
-                    if (bnode_idx >= 0 && bnode_idx < (int32_t)osg->node_count) {
-                        s_grab_is_bone = true;
-                        s_grab_osg = osg;
-                        s_grab_bnode_idx = bnode_idx;
-
-                        uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
-                        int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
-                        if (skin_idx >= 0) {
-                            OmdlSkin* skin = &osg->skins[skin_idx];
-                            for (uint32_t j = 0; j < skin->joints_count; j++) {
-                                if (osg->skin_joints[skin->joints_offset + j] == (uint32_t)bnode_idx) {
-                                    s_grab_local_j = j; break;
-                                }
-                            }
+        GLTFInstance* inst = find_gltf_instance_for_mesh(mi);
+        if (inst && inst->gltf_data) {
+            OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+            OmdlNode* bnode = (OmdlNode*)editor_selected_bone;
+            int32_t bnode_idx = (int32_t)(bnode - osg->nodes);
+            if (bnode_idx >= 0 && bnode_idx < (int32_t)osg->node_count) {
+                s_grab_is_bone = true;
+                s_grab_osg = osg;
+                s_grab_bnode_idx = bnode_idx;
+                uint32_t mesh_node_idx = (uint32_t)(uintptr_t)m->node;
+                int32_t skin_idx = osg->nodes[mesh_node_idx].skin_idx;
+                if (skin_idx >= 0) {
+                    OmdlSkin* skin = &osg->skins[skin_idx];
+                    for (uint32_t j = 0; j < skin->joints_count; j++) {
+                        if (osg->skin_joints[skin->joints_offset + j] == (uint32_t)bnode_idx) {
+                            s_grab_local_j = j; break;
                         }
-
-                        if (s_grab_local_j >= 0) {
-                            if (!m->bone_overrides[s_grab_local_j].active) {
-                                glm_mat4_identity(m->bone_overrides[s_grab_local_j].world_offset);
-                                m->bone_overrides[s_grab_local_j].active = true;
-                            }
-                            glm_mat4_copy(m->bone_overrides[s_grab_local_j].world_offset, s_grab_initial_bone_override);
-                        } else {
-                            glm_mat4_identity(s_grab_initial_bone_override);
-                        }
-
-                        glm_mat4_copy(osg->world_transforms[bnode_idx], s_grab_initial_model);
-                        glm_vec3_copy(s_grab_initial_model[3], s_grab_pivot);
-                        break;
                     }
                 }
+                if (s_grab_local_j >= 0) {
+                    if (!m->bone_overrides[s_grab_local_j].active) {
+                        glm_mat4_identity(m->bone_overrides[s_grab_local_j].world_offset);
+                        m->bone_overrides[s_grab_local_j].active = true;
+                    }
+                    glm_mat4_copy(m->bone_overrides[s_grab_local_j].world_offset, s_grab_initial_bone_override);
+                } else {
+                    glm_mat4_identity(s_grab_initial_bone_override);
+                }
+                glm_mat4_copy(osg->world_transforms[bnode_idx], s_grab_initial_model);
+                glm_vec3_copy(s_grab_initial_model[3], s_grab_pivot);
             }
         }
     }
 
     if (!s_grab_is_bone) {
-        int target_idx = mi;
-        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
-            if (mi >= (int)scene.gltf_instances[i].mesh_start_index &&
-                mi < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
-                target_idx = (int)scene.gltf_instances[i].mesh_start_index;
-                break;
-            }
-        }
-        glm_mat4_copy(scene.meshes.items[target_idx].local_transform, s_grab_initial_root_local);
+        glm_mat4_copy(scene.meshes.items[find_gltf_root_mesh(mi)].local_transform, s_grab_initial_root_local);
     }
 
     if (mode == 1) {
@@ -2596,8 +2565,6 @@ void editor_start_transform(int mode) {
 
 void editor_start_grab(void) { editor_start_transform(0); }
 void editor_start_rotate(void) { editor_start_transform(1); }
-
-static void toggle_bottom(void) { editor_toggle_panel(PANEL_BOTTOM); }
 
 static void open_animation_editor(void) {
     int idx = editor.inspector.selected_mesh_index;
@@ -3031,7 +2998,7 @@ void editor_update(void) {
                 if (ext && (strcasecmp(ext, ".gltf") == 0 || strcasecmp(ext, ".glb") == 0)) {
                     extern bool load_gltf(const char*, Scene*);
                     if (load_gltf(s_file_drag_item->full_path, &scene)) {
-                        s_placement_mesh_idx = scene.gltf_instances[scene.gltf_instance_count - 1].mesh_start_index;
+                        s_placement_mesh_idx = (int)scene.gltf_instances[scene.gltf_instance_count - 1].mesh_start_index;
                         s_placement_active = true;
                         inspector_select_mesh(s_placement_mesh_idx);
                     }
@@ -3074,22 +3041,17 @@ void editor_update(void) {
         }
     }
 
-    if (s_color_picker.visible) {
+    if (s_color_picker.visible)
         colorpicker_update(&s_color_picker, dt, s_ui_mx, s_ui_my);
-    }
 
-    if (s_image_viewer.visible) {
-            image_viewer_update(&s_image_viewer, dt, s_ui_mx, s_ui_my);
-        }
+    if (s_image_viewer.visible)
+        image_viewer_update(&s_image_viewer, dt, s_ui_mx, s_ui_my);
 
-        float sh = (float)context.swapChainExtent.height;
-        text_editor_update(dt, s_ui_mx, sh - s_ui_my);
+    float sh = (float)context.swapChainExtent.height;
+    text_editor_update(dt, s_ui_mx, sh - s_ui_my);
 
-        if (s_is_searching) {
-        if (s_search_anim_t < 1.0f) {
-            s_search_anim_t += 3.0f * dt;
-        }
-    }
+    if (s_is_searching && s_search_anim_t < 1.0f)
+        s_search_anim_t += 3.0f * dt;
 
     tree_view_update_scroll(&s_fs_tree_state, dt);
     tree_view_update_scroll(&s_hier_tree_state, dt);
@@ -3232,11 +3194,7 @@ void editor_render(void) {
         else if (s_message.type == MSG_WARNING) base_border = CT.warning;
         else if (s_message.type == MSG_SUCCESS) base_border = CT.success;
 
-        Color border;
-        border.r = base_border.r + (CT.border.r - base_border.r) * s_message.hover_t;
-        border.g = base_border.g + (CT.border.g - base_border.g) * s_message.hover_t;
-        border.b = base_border.b + (CT.border.b - base_border.b) * s_message.hover_t;
-        border.a = base_border.a + (CT.border.a - base_border.a) * s_message.hover_t;
+        Color border = lerp_color(base_border, CT.border, s_message.hover_t);
 
         // Background and Border in a single call
         exQuad2D((vec2){x, y}, (vec2){w, h}, radii, 2.0f, border, CT.bg);
@@ -3306,53 +3264,36 @@ void inspector_select_mesh(int index) {
     editor.hierarchy.selected_index      = index;
     s_inspector_show_skeleton_only       = false;
     s_inspector_show_material_only       = false;
-    gizmo.active = true;
-    editor_selected_bone = NULL;
-    s_bone_tree_state.selected_index = -1;
+    gizmo.active                         = true;
+    editor_selected_bone                 = NULL;
+    s_bone_tree_state.selected_index     = -1;
 
-    for (int i = 0; i < scene.tree.count; i++) {
-        if (scene.tree.nodes[i].mesh_index == index) {
-            int p = scene.tree.nodes[i].parent;
-            while (p >= 0) {
-                scene.tree.nodes[p].expanded = true;
-                p = scene.tree.nodes[p].parent;
-            }
-            break;
-        }
+    scene_tree_expand_to_mesh(index);
+
+    if (index < 0 || index >= (int)scene.meshes.count) return;
+
+    Mesh* m = &scene.meshes.items[index];
+    if (m->jointCount == 0 || !m->node) return;
+
+    GLTFInstance* inst = find_gltf_instance_for_mesh(index);
+    if (!inst || !inst->gltf_data) return;
+
+    OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+    uint32_t node_idx = (uint32_t)(uintptr_t)m->node;
+    int32_t skin_idx = osg->nodes[node_idx].skin_idx;
+    if (skin_idx < 0) return;
+
+    OmdlSkin* skin = &osg->skins[skin_idx];
+    bool is_joint[4096] = {false};
+    for (uint32_t j = 0; j < skin->joints_count; j++) {
+        uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+        if (j_node < 4096) is_joint[j_node] = true;
     }
-    s_hier_needs_scroll = true;
-
-    if (index >= 0 && index < (int)scene.meshes.count) {
-        Mesh* m = &scene.meshes.items[index];
-        if (m->jointCount > 0 && m->node) {
-            for (size_t i = 0; i < scene.gltf_instance_count; i++) {
-                if (index >= (int)scene.gltf_instances[i].mesh_start_index &&
-                    index < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
-                    GLTFInstance* inst = &scene.gltf_instances[i];
-                    if (inst->gltf_data) {
-                        OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
-                        uint32_t node_idx = (uint32_t)(uintptr_t)m->node;
-                        int32_t skin_idx = osg->nodes[node_idx].skin_idx;
-                        if (skin_idx >= 0) {
-                            OmdlSkin* skin = &osg->skins[skin_idx];
-                            bool is_joint[4096] = {false};
-                            for (uint32_t j = 0; j < skin->joints_count; j++) {
-                                uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
-                                if (j_node < 4096) is_joint[j_node] = true;
-                            }
-                            for (uint32_t j = 0; j < skin->joints_count; j++) {
-                                uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
-                                int32_t p = osg->nodes[j_node].parent;
-                                if (p < 0 || !is_joint[p]) {
-                                    osg->nodes[j_node].expanded = true;
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-        }
+    for (uint32_t j = 0; j < skin->joints_count; j++) {
+        uint32_t j_node = osg->skin_joints[skin->joints_offset + j];
+        int32_t p = osg->nodes[j_node].parent;
+        if (p < 0 || !is_joint[p])
+            osg->nodes[j_node].expanded = true;
     }
 }
 
@@ -3363,39 +3304,23 @@ void inspector_select_bone(void* bone) {
 
     int mesh_idx = editor.inspector.selected_mesh_index;
     if (mesh_idx >= 0) {
-        for (int i = 0; i < scene.tree.count; i++) {
-            if (scene.tree.nodes[i].mesh_index == mesh_idx) {
-                int p = i;
-                while (p >= 0) {
-                    scene.tree.nodes[p].expanded = true;
-                    p = scene.tree.nodes[p].parent;
-                }
-                break;
-            }
-        }
+        scene_tree_expand_to_mesh(mesh_idx);
 
-        for (size_t i = 0; i < scene.gltf_instance_count; i++) {
-            if (mesh_idx >= (int)scene.gltf_instances[i].mesh_start_index &&
-                mesh_idx < (int)(scene.gltf_instances[i].mesh_start_index + scene.gltf_instances[i].mesh_count)) {
-                GLTFInstance* inst = &scene.gltf_instances[i];
-                if (inst->gltf_data && bone) {
-                    OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
-                    OmdlNode* bnode = (OmdlNode*)bone;
-                    int32_t b_idx = (int32_t)(bnode - osg->nodes);
-                    if (b_idx >= 0 && b_idx < (int32_t)osg->node_count) {
-                        int32_t p = osg->nodes[b_idx].parent;
-                        while (p >= 0) {
-                            osg->nodes[p].expanded = true;
-                            p = osg->nodes[p].parent;
-                        }
-                    }
+        GLTFInstance* inst = find_gltf_instance_for_mesh(mesh_idx);
+        if (inst && inst->gltf_data && bone) {
+            OmdlSceneGraph* osg = (OmdlSceneGraph*)inst->gltf_data;
+            OmdlNode* bnode = (OmdlNode*)bone;
+            int32_t b_idx = (int32_t)(bnode - osg->nodes);
+            if (b_idx >= 0 && b_idx < (int32_t)osg->node_count) {
+                int32_t p = osg->nodes[b_idx].parent;
+                while (p >= 0) {
+                    osg->nodes[p].expanded = true;
+                    p = osg->nodes[p].parent;
                 }
-                break;
             }
         }
     }
 
-    s_hier_needs_scroll = true;
     s_bone_needs_scroll = true;
 }
 
@@ -3420,17 +3345,7 @@ void hierarchy_select(int index) {
         editor.inspector.selected_mesh_index = index;
         gizmo.active = true;
 
-        for (int i = 0; i < scene.tree.count; i++) {
-            if (scene.tree.nodes[i].mesh_index == index) {
-                int p = scene.tree.nodes[i].parent;
-                while (p >= 0) {
-                    scene.tree.nodes[p].expanded = true;
-                    p = scene.tree.nodes[p].parent;
-                }
-                break;
-            }
-        }
-        s_hier_needs_scroll = true;
+        scene_tree_expand_to_mesh(index);
     } else {
         editor.inspector.selected_mesh_index = -1;
         gizmo.active = false;

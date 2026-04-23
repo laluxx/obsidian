@@ -120,6 +120,29 @@ missing
 # TODO Make sure those are right and add them all..
 
 
+# TODO 
+#+begin_src txt
+Transforming the pre-computed local bounds using bone matrices is brilliant, but it introduces a specific data challenge we need to solve first.
+Here is the candor: meshoptimizer does not calculate bone influences for meshlets. It only gives us the spatial bounds (center, radius, cone_apex, cone_axis). To transform a meshlet's cone and sphere on the GPU, the compute shader needs to know which bones affect that specific meshlet and with what weights.
+
+To build your architecture, we have to execute a three-phase plan. Here is the roadmap to make your idea a reality:
+Phase 1: The Cooker (gltf_loader.c)
+
+We need to modify the OMDL generation. After meshopt_computeMeshletBounds generates the spatial bounds, we must loop through all the vertices belonging to that specific meshlet, accumulate their bone weights, and determine the dominant bones (up to 4) and their averaged weights for the entire meshlet.
+We then append this data into a new struct (e.g., MeshletSkinData) and upload it to a new Mega Buffer alongside the bounds.
+
+Phase 2: The Compute Pass (refit_bounds.comp)
+We write your proposed Compute Shader. It will dispatch just before the main drawing pass.
+    Input: Static MeshletBounds, MeshletSkinData, and the current frame's JointBuffer.
+    Logic: For each meshlet, read its 4 dominant bones, fetch the joint matrices, blend them using the meshlet's average weights, and apply that resulting matrix to the static center, cone_apex, and cone_axis.
+    Output: A dynamically updated DynamicBoundsBuffer for the current frame.
+
+Phase 3: The Task Shader (pbr.task)
+We revert the Task Shader back to its hyper-efficient spatial culling logic, but instead of reading from the static pc.boundsData, we point it to the new DynamicBoundsBuffer.
+This gives you the exact ~0.1ms overhead you are aiming for, keeps the Task Shader strictly focused on culling rather than math, and guarantees zero holes in the mesh.
+If you are ready to build this, we need to start with Phase 1. Shall we modify gltf_loader.c to extract and pack the average bone influences for each meshlet?
+#+end_src
+
 
 
 as you can see i heavily optimized everything What do you think are the next big wins in perfomance, i want to optimize EVERYTHING LIKE A MANIAC i really want to go in the rabbithole and squeeze every possible frame out of this engine it has to spend 0 time in the CPU it has to be AAA level it has to be super fast i want to focus on optimizations, NOTE that i also value ALOT refactors and removing lines count from a file what do you think we should do next ?

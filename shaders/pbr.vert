@@ -33,13 +33,14 @@ struct MeshData {
     float displacementScale;
     vec4  aabbMin;
     vec4  aabbMax;
-
-    // AAA: Must perfectly mirror renderer.h MeshGPUData layout
     int   jointOffset;
     int   morphDeltaOffset;
     int   morphWeightOffset;
     int   morphCount;
-
+    int   meshletOffset;
+    int   meshletCount;
+    int   meshletVertexOffset;
+    int   meshletTriangleOffset;
     float transmissionFactor;
     float ior;
     float thicknessFactor;
@@ -52,40 +53,20 @@ struct MeshData {
     float dispersion;
     int   isVisible;
     int   isWireframe;
+    int   vertexOffset;
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
 };
 
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer {
-    MeshData meshes[];
-};
-
-// Reading floats prevents C vs GLSL struct padding disasters.
-// Vertex size is now exactly 128 bytes (32 floats) to accommodate bone joints and weights.
-layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer {
-    float data[];
-};
-
-struct PackedJoint {
-    vec4 row0;
-    vec4 row1;
-    vec4 row2;
-};
-
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer JointBuffer {
-    PackedJoint joints[];
-};
-
-struct MorphDelta {
-    vec4 pos_delta;
-    vec4 normal_delta;
-};
-
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MorphBuffer {
-    MorphDelta deltas[];
-};
-
-layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer WeightBuffer {
-    float weights[];
-};
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer { MeshData meshes[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer { float data[]; };
+struct PackedJoint { vec4 row0; vec4 row1; vec4 row2; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer JointBuffer { PackedJoint joints[]; };
+struct MorphDelta { vec4 pos_delta; vec4 normal_delta; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MorphBuffer { MorphDelta deltas[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer WeightBuffer { float weights[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DummyBuffer { uint dummy[]; };
 
 mat4 unpackJoint(PackedJoint j) {
     return mat4(
@@ -106,6 +87,10 @@ layout(push_constant) uniform PC {
     JointBuffer  jointData;
     MorphBuffer  morphData;
     WeightBuffer weightData;
+    DummyBuffer  meshletData;
+    DummyBuffer  boundsData;
+    DummyBuffer  meshletVertexAddr;
+    DummyBuffer  meshletTriangleAddr;
 } pc;
 
 layout(location = 0) out vec3 outWorldPos;
@@ -116,20 +101,16 @@ layout(location = 6) out flat int outMeshIndex;
 
 void main() {
     int mIdx = pc.meshIndex;
-    if (mIdx < 0) {
-        mIdx = gl_BaseInstanceARB;
-    }
+    if (mIdx < 0) mIdx = gl_BaseInstanceARB;
     outMeshIndex = mIdx;
 
     MeshData m = pc.meshData.meshes[mIdx];
 
     if (m.isVisible == 0) {
-        // Efficiently degenerate the triangle and push it off-screen for any un-culled immediate mode draws
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }
 
-    // ── PERFECT 128-BYTE (32 FLOAT) CGLM STRIDE ──
     uint base = gl_VertexIndex * 32;
     vec3 inPos      = vec3(pc.vertexData.data[base+0], pc.vertexData.data[base+1], pc.vertexData.data[base+2]);
     vec4 inColor    = vec4(pc.vertexData.data[base+4], pc.vertexData.data[base+5], pc.vertexData.data[base+6], pc.vertexData.data[base+7]);
@@ -145,9 +126,6 @@ void main() {
         floatBitsToUint(pc.vertexData.data[base+31])
     );
 
-    // ── HARDWARE MORPH TARGETS ──
-    // No branch per target — multiply-accumulate with zero weight costs
-    // 2 FMAs and is faster than a warp-divergent branch on modern GPUs.
     if (m.morphCount > 0) {
         uint vertBase = uint(m.morphDeltaOffset) + gl_VertexIndex * uint(m.morphCount);
         for (int i = 0; i < m.morphCount; i++) {
@@ -158,7 +136,6 @@ void main() {
         }
     }
 
-    // ── HARDWARE SKELETAL SKINNING ──
     mat4 skinMat = mat4(1.0);
     if (m.jointOffset >= 0) {
         skinMat =
@@ -173,7 +150,6 @@ void main() {
     vec3 localNormal = normalize(skinNormalMat * inNormal);
     vec3 localTangent = normalize(skinNormalMat * inTangent.xyz);
 
-    // ── AAA VERTEX DISPLACEMENT ──
     if (m.displacementIndex >= 0) {
         float disp = textureLod(textures[nonuniformEXT(m.displacementIndex)], inTexCoord, 0.0).r;
         disp = disp - 0.5;
@@ -189,18 +165,15 @@ void main() {
     vec3 N = normalize(normalMatrix * localNormal);
     vec3 T = normalize(normalMatrix * localTangent);
 
-    // AAA NaN Protection: Gram-Schmidt orthogonalization can explode if T and N align!
     vec3 T_ortho = T - dot(T, N) * N;
     if (dot(T_ortho, T_ortho) > 0.0001) {
         T = normalize(T_ortho);
     } else {
-        // Fallback tangent to prevent black hole pixel explosions at grazing angles
         vec3 up = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
         T = normalize(cross(up, N));
     }
 
     vec3 B = cross(N, T) * inTangent.w;
-
     outTBN = mat3(T, B, N);
 
     gl_Position = ubo.vp * worldPos;
