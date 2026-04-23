@@ -137,6 +137,11 @@ typedef struct {
 } Meshlet;
 
 typedef struct {
+    uint32_t joints[4];
+    float weights[4];
+} MeshletSkinData;
+
+typedef struct {
     float center[3];
     float radius;
     float cone_apex[3];
@@ -155,7 +160,9 @@ typedef struct {
     uint64_t morphBufferAddr;     // BDA: megaMorphBuffer (permanent deltas)
     uint64_t morphWeightAddr;     // BDA: per-frame morph weights
     uint64_t meshletBufferAddr;   // BDA: Meshlet array
-    uint64_t meshletBoundsAddr;   // BDA: Meshlet bounds
+    uint64_t meshletBoundsAddr;   // BDA: Meshlet static bounds
+    uint64_t meshletSkinAddr;     // BDA: Meshlet skin data
+    uint64_t dynamicBoundsAddr;   // BDA: Meshlet dynamic bounds
     uint64_t meshletVertexAddr;   // BDA: Meshlet local vertices
     uint64_t meshletTriangleAddr; // BDA: Meshlet local triangles
 } PushConstants;

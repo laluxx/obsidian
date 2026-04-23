@@ -100,7 +100,9 @@ layout(push_constant) uniform PC {
     DummyBuffer  morphBufferAddr;
     DummyBuffer  morphWeightAddr;
     DummyBuffer  meshletData;
-    BoundsBuffer boundsData;
+    BoundsBuffer staticBounds;
+    DummyBuffer  meshletSkinData;
+    BoundsBuffer dynamicBounds;
     DummyBuffer  meshletVertexAddr;
     DummyBuffer  meshletTriangleAddr;
 } pc;
@@ -136,7 +138,13 @@ void main() {
     bool accept = false;
     if (meshletIdx < m.meshletCount) {
         uint globalMeshletIdx = m.meshletOffset + meshletIdx;
-        MeshletBounds b = pc.boundsData.bounds[globalMeshletIdx];
+
+        // AAA Phase 3: Zero-Cost Hardware Branching!
+        // Read from dynamic buffer if skinned, otherwise static!
+        MeshletBounds b = (m.jointOffset >= 0)
+                        ? pc.dynamicBounds.bounds[globalMeshletIdx]
+                        : pc.staticBounds.bounds[globalMeshletIdx];
+
         vec3 center = vec3(b.center[0], b.center[1], b.center[2]);
         vec3 worldCenter = (m.model * vec4(center, 1.0)).xyz;
 

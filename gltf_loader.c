@@ -11,8 +11,8 @@
 static int32_t gltf_texture_indices[MAX_TEXTURES];
 static size_t gltf_texture_count = 0;
 
-// Bumped magic to force rebuild of OMDL files for Meshlet Task/Mesh Shaders
-#define OMDL_MAGIC 0x4C444D53 // 'OMDS'
+// Bumped magic to force rebuild of OMDL files for Meshlet Skinning
+#define OMDL_MAGIC 0x4C444D54 // 'OMDT'
 
 typedef struct {
     uint32_t magic;
@@ -97,6 +97,7 @@ static uint32_t* omdl_indices = NULL;
 static MorphDelta* omdl_morphs = NULL;
 static Meshlet* omdl_meshlets = NULL;
 static MeshletBounds* omdl_meshlet_bounds = NULL;
+static MeshletSkinData* omdl_meshlet_skins = NULL;
 static uint32_t* omdl_meshlet_vertices = NULL;
 static uint8_t* omdl_meshlet_triangles = NULL;
 static OmdlMeshMeta* omdl_metas = NULL;
@@ -139,7 +140,7 @@ extern uint32_t megaMorphBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uin
 extern uint32_t megaMeshletBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count);
 extern uint32_t megaMeshletVertexBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count);
 extern uint32_t megaMeshletTriangleBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t count);
-extern uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, MeshletBounds* bounds, uint32_t count);
+extern uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, MeshletBounds* bounds, MeshletSkinData* skins, uint32_t count);
 extern uint32_t megaMeshletVertexBufferAllocate(VulkanContext* ctx, uint32_t* vertices, uint32_t count);
 extern uint32_t megaMeshletTriangleBufferAllocate(VulkanContext* ctx, uint8_t* triangles, uint32_t count);
 
@@ -631,6 +632,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
 
     Meshlet* final_meshlets = NULL;
     MeshletBounds* final_bounds = NULL;
+    MeshletSkinData* final_skins = NULL;
     uint32_t* final_meshlet_vertices = NULL;
     uint8_t* final_meshlet_triangles = NULL;
     size_t final_meshlet_count = 0;
@@ -641,6 +643,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         size_t max_meshlets = meshopt_buildMeshletsBound(final_index_count, 64, 124);
         final_meshlets = malloc(max_meshlets * sizeof(Meshlet));
         final_bounds = malloc(max_meshlets * sizeof(MeshletBounds));
+        final_skins = malloc(max_meshlets * sizeof(MeshletSkinData));
         final_meshlet_vertices = malloc(max_meshlets * 64 * sizeof(uint32_t));
         final_meshlet_triangles = malloc(max_meshlets * 124 * 3 * sizeof(uint8_t));
 
@@ -677,6 +680,52 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             final_bounds[i].cone_axis[1] = bounds.cone_axis[1];
             final_bounds[i].cone_axis[2] = bounds.cone_axis[2];
             final_bounds[i].cone_cutoff = bounds.cone_cutoff;
+
+            // AAA Phase 1: Accumulate average bone influences for this meshlet
+            float joint_sums[256] = {0};
+            uint32_t active_joints[256];
+            uint32_t active_joint_count = 0;
+
+            for (uint32_t j = 0; j < mo_meshlets[i].vertex_count; j++) {
+                uint32_t local_v_idx = final_meshlet_vertices[mo_meshlets[i].vertex_offset + j];
+                Vertex* v = &final_vertices[local_v_idx];
+                for (int w = 0; w < 4; w++) {
+                    if (v->weights[w] > 0.0f) {
+                        uint32_t joint = v->joints[w];
+                        if (joint < 256) {
+                            if (joint_sums[joint] == 0.0f) {
+                                active_joints[active_joint_count++] = joint;
+                            }
+                            joint_sums[joint] += v->weights[w];
+                        }
+                    }
+                }
+            }
+
+            MeshletSkinData skin = { {0,0,0,0}, {0.0f, 0.0f, 0.0f, 0.0f} };
+            for (int t = 0; t < 4; t++) {
+                float max_w = 0.0f;
+                uint32_t best_j = 0;
+                for (uint32_t k = 0; k < active_joint_count; k++) {
+                    uint32_t joint = active_joints[k];
+                    if (joint_sums[joint] > max_w) {
+                        max_w = joint_sums[joint];
+                        best_j = joint;
+                    }
+                }
+                if (max_w > 0.0f) {
+                    skin.joints[t] = best_j;
+                    skin.weights[t] = max_w;
+                    joint_sums[best_j] = 0.0f; // remove from next iteration
+                }
+            }
+
+            float sum = skin.weights[0] + skin.weights[1] + skin.weights[2] + skin.weights[3];
+            if (sum > 0.0f) {
+                skin.weights[0] /= sum; skin.weights[1] /= sum;
+                skin.weights[2] /= sum; skin.weights[3] /= sum;
+            }
+            final_skins[i] = skin;
 
             final_ml_vertex_count += mo_meshlets[i].vertex_count;
             final_ml_triangle_count += ((mo_meshlets[i].triangle_count * 3 + 3) & ~3);
@@ -787,6 +836,8 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
         memcpy(&omdl_meshlets[omdl_meshlet_count], final_meshlets, final_meshlet_count * sizeof(Meshlet));
         omdl_meshlet_bounds = realloc(omdl_meshlet_bounds, (omdl_meshlet_count + final_meshlet_count) * sizeof(MeshletBounds));
         memcpy(&omdl_meshlet_bounds[omdl_meshlet_count], final_bounds, final_meshlet_count * sizeof(MeshletBounds));
+        omdl_meshlet_skins = realloc(omdl_meshlet_skins, (omdl_meshlet_count + final_meshlet_count) * sizeof(MeshletSkinData));
+        memcpy(&omdl_meshlet_skins[omdl_meshlet_count], final_skins, final_meshlet_count * sizeof(MeshletSkinData));
         omdl_meshlet_count += final_meshlet_count;
 
         omdl_meshlet_vertices = realloc(omdl_meshlet_vertices, (omdl_meshlet_vertex_count + final_ml_vertex_count) * sizeof(uint32_t));
@@ -803,6 +854,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     if (final_morphs) free(final_morphs);
     if (final_meshlets) free(final_meshlets);
     if (final_bounds) free(final_bounds);
+    if (final_skins) free(final_skins);
     if (final_meshlet_vertices) free(final_meshlet_vertices);
     if (final_meshlet_triangles) free(final_meshlet_triangles);
 
@@ -1130,7 +1182,8 @@ bool load_gltf(const char* filepath, Scene* scene) {
         omdl_vertex_count = 0; omdl_index_count = 0; omdl_morph_count = 0; omdl_mesh_count = 0;
         omdl_meshlet_count = 0; omdl_meshlet_vertex_count = 0; omdl_meshlet_triangle_count = 0;
         omdl_vertices = NULL; omdl_indices = NULL; omdl_morphs = NULL; omdl_metas = NULL;
-        omdl_meshlets = NULL; omdl_meshlet_bounds = NULL; omdl_meshlet_vertices = NULL; omdl_meshlet_triangles = NULL;
+        omdl_meshlets = NULL; omdl_meshlet_bounds = NULL; omdl_meshlet_skins = NULL;
+        omdl_meshlet_vertices = NULL; omdl_meshlet_triangles = NULL;
 
         load_gltf_textures(data, filepath);
     }
@@ -1159,7 +1212,7 @@ bool load_gltf(const char* filepath, Scene* scene) {
         uint32_t base_v  = omdl_vertex_count > 0             ? megaBufferAllocate(&context, omdl_vertices, omdl_vertex_count)                                   : UINT32_MAX;
         uint32_t base_i  = omdl_index_count > 0              ? megaIndexBufferAllocate(&context, omdl_indices, omdl_index_count)                                 : UINT32_MAX;
         uint32_t base_m  = omdl_morph_count > 0              ? megaMorphBufferAllocate(&context, omdl_morphs, omdl_morph_count)                                  : UINT32_MAX;
-        uint32_t base_ml   = omdl_meshlet_count > 0          ? megaMeshletBufferAllocate(&context, omdl_meshlets, omdl_meshlet_bounds, omdl_meshlet_count)       : UINT32_MAX;
+        uint32_t base_ml   = omdl_meshlet_count > 0          ? megaMeshletBufferAllocate(&context, omdl_meshlets, omdl_meshlet_bounds, omdl_meshlet_skins, omdl_meshlet_count)        : UINT32_MAX;
         uint32_t base_ml_v = omdl_meshlet_vertex_count > 0   ? megaMeshletVertexBufferAllocate(&context, omdl_meshlet_vertices, omdl_meshlet_vertex_count)       : UINT32_MAX;
         uint32_t base_ml_t = omdl_meshlet_triangle_count > 0 ? megaMeshletTriangleBufferAllocate(&context, omdl_meshlet_triangles, omdl_meshlet_triangle_count)  : UINT32_MAX;
         flushUploadStagingBuffer(&context);
@@ -1311,6 +1364,7 @@ bool load_gltf(const char* filepath, Scene* scene) {
             if (omdl_meshlet_count > 0) {
                 fwrite(omdl_meshlets, sizeof(Meshlet), omdl_meshlet_count, fout);
                 fwrite(omdl_meshlet_bounds, sizeof(MeshletBounds), omdl_meshlet_count, fout);
+                fwrite(omdl_meshlet_skins, sizeof(MeshletSkinData), omdl_meshlet_count, fout);
             }
             if (omdl_meshlet_vertex_count > 0) fwrite(omdl_meshlet_vertices, sizeof(uint32_t), omdl_meshlet_vertex_count, fout);
             if (omdl_meshlet_triangle_count > 0) fwrite(omdl_meshlet_triangles, sizeof(uint8_t), omdl_meshlet_triangle_count, fout);
@@ -1339,10 +1393,11 @@ bool load_gltf(const char* filepath, Scene* scene) {
         if (omdl_indices) free(omdl_indices);
         if (omdl_morphs) free(omdl_morphs);
         if (omdl_metas) free(omdl_metas);
-        if (omdl_meshlets) free(omdl_meshlets);
-        if (omdl_meshlet_bounds) free(omdl_meshlet_bounds);
-        if (omdl_meshlet_vertices) free(omdl_meshlet_vertices);
-        if (omdl_meshlet_triangles) free(omdl_meshlet_triangles);
+        if (omdl_meshlets) { free(omdl_meshlets); omdl_meshlets = NULL; }
+        if (omdl_meshlet_bounds) { free(omdl_meshlet_bounds); omdl_meshlet_bounds = NULL; }
+        if (omdl_meshlet_skins) { free(omdl_meshlet_skins); omdl_meshlet_skins = NULL; }
+        if (omdl_meshlet_vertices) { free(omdl_meshlet_vertices); omdl_meshlet_vertices = NULL; }
+        if (omdl_meshlet_triangles) { free(omdl_meshlet_triangles); omdl_meshlet_triangles = NULL; }
     } else {
         instance->gltf_data = (void*)omdl_cache_osg;
 

@@ -44,6 +44,17 @@ uint32_t megaMeshletBufferOffset = 0;
 VkBuffer megaMeshletBoundsBuffer = VK_NULL_HANDLE;
 VkDeviceMemory megaMeshletBoundsBufferMemory = VK_NULL_HANDLE;
 
+uint64_t megaMeshletSkinBufferAddr = 0;
+VkBuffer megaMeshletSkinBuffer = VK_NULL_HANDLE;
+VkDeviceMemory megaMeshletSkinBufferMemory = VK_NULL_HANDLE;
+
+uint64_t dynamicBoundsBufferAddr[MAX_FRAMES_IN_FLIGHT] = {0};
+VkBuffer dynamicBoundsBuffer[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+VkDeviceMemory dynamicBoundsBufferMemory[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+
+VkPipeline refitBoundsPipeline = VK_NULL_HANDLE;
+VkPipelineLayout refitBoundsPipelineLayout = VK_NULL_HANDLE;
+
 VkBuffer megaMeshletVertexBuffer = VK_NULL_HANDLE;
 VkDeviceMemory megaMeshletVertexMemory = VK_NULL_HANDLE;
 uint32_t megaMeshletVertexBufferSize = 0;
@@ -972,7 +983,41 @@ void createIndirectPipelineLayout(VulkanContext* ctx)
     (void)ctx;
 }
 
-void createComputeCullPipeline(VulkanContext* ctx) { (void)ctx; }
+#include "refit_bounds.comp.spv.h"
+
+void createComputeCullPipeline(VulkanContext* ctx) {
+    VkPushConstantRange pcRange = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset     = 0,
+        .size       = sizeof(PushConstants)
+    };
+
+    VkPipelineLayoutCreateInfo plci = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 0,
+        .pSetLayouts = NULL,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pcRange
+    };
+    vkCreatePipelineLayout(ctx->device, &plci, NULL, &refitBoundsPipelineLayout);
+
+    VkShaderModule compModule = createShaderModule(ctx->device, refit_bounds_comp_spv, sizeof(refit_bounds_comp_spv));
+
+    VkComputePipelineCreateInfo cpci = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = compModule,
+            .pName = "main"
+        },
+        .layout = refitBoundsPipelineLayout
+    };
+
+    vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &cpci, NULL, &refitBoundsPipeline);
+    vkDestroyShaderModule(ctx->device, compModule, NULL);
+}
+
 void createComputeCompactPipeline(VulkanContext* ctx) { (void)ctx; }
 
 static void fill_gpu_addresses(VulkanContext* ctx) {
@@ -983,6 +1028,8 @@ static void fill_gpu_addresses(VulkanContext* ctx) {
     pushConstants.morphWeightAddr     = morphWeightAddr[ctx->currentFrame];
     pushConstants.meshletBufferAddr   = megaMeshletBufferAddr;
     pushConstants.meshletBoundsAddr   = megaMeshletBoundsBufferAddr;
+    pushConstants.meshletSkinAddr     = megaMeshletSkinBufferAddr;
+    pushConstants.dynamicBoundsAddr   = dynamicBoundsBufferAddr[ctx->currentFrame];
     pushConstants.meshletVertexAddr   = megaMeshletVertexAddr;
     pushConstants.meshletTriangleAddr = megaMeshletTriangleAddr;
 }
@@ -1479,6 +1526,29 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     update_cascade_matrices(ctx); // MUST happen before updateFrustumUBO!
 
     uint32_t f = ctx->currentFrame;
+
+    // --- GPU MESHLET BOUNDS REFIT PASS ---
+    if (refitBoundsPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, refitBoundsPipeline);
+        fill_gpu_addresses(ctx);
+
+        for (uint32_t i = 0; i < scene.meshes.count; i++) {
+            Mesh* m = &scene.meshes.items[i];
+            if (!m->visible || m->meshletCount == 0 || m->jointOffset < 0) continue; // SKIPPED IF STATIC!
+
+            pushConstants.meshIndex = i;
+            vkCmdPushConstants(cmd, refitBoundsPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &pushConstants);
+            vkCmdDispatch(cmd, (m->meshletCount + 31) / 32, 1, 1);
+        }
+
+        // Memory barrier to guarantee compute writes finish before the Task shader reads
+        VkMemoryBarrier boundsBarrier = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+        };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT, 0, 1, &boundsBarrier, 0, NULL, 0, NULL);
+    }
     uint32_t f_shadow = ctx->currentFrame + MAX_FRAMES_IN_FLIGHT;
 
     // 1. Import Resources
@@ -1975,6 +2045,8 @@ void cleanup(VulkanContext* ctx)
     if (skyboxPipeline) { vkDestroyPipeline(ctx->device, skyboxPipeline, NULL); skyboxPipeline = VK_NULL_HANDLE; }
     if (skyboxPipelineLayout) { vkDestroyPipelineLayout(ctx->device, skyboxPipelineLayout, NULL); skyboxPipelineLayout = VK_NULL_HANDLE; }
     if (shadowPipeline) { vkDestroyPipeline(ctx->device, shadowPipeline, NULL); shadowPipeline = VK_NULL_HANDLE; }
+    if (refitBoundsPipeline) { vkDestroyPipeline(ctx->device, refitBoundsPipeline, NULL); refitBoundsPipeline = VK_NULL_HANDLE; }
+    if (refitBoundsPipelineLayout) { vkDestroyPipelineLayout(ctx->device, refitBoundsPipelineLayout, NULL); refitBoundsPipelineLayout = VK_NULL_HANDLE; }
 
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
@@ -2027,6 +2099,14 @@ void cleanup(VulkanContext* ctx)
 
     /* mega index buffer */
     CLEANUP_BUFFER(megaIndexBuffer, megaIndexBufferMemory);
+
+    /* meshlet skins and dynamic bounds (these are globals, not in ctx!) */
+    if (megaMeshletSkinBuffer) { vkDestroyBuffer(ctx->device, megaMeshletSkinBuffer, NULL); megaMeshletSkinBuffer = VK_NULL_HANDLE; }
+    if (megaMeshletSkinBufferMemory) { vkFreeMemory(ctx->device, megaMeshletSkinBufferMemory, NULL); megaMeshletSkinBufferMemory = VK_NULL_HANDLE; }
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (dynamicBoundsBuffer[i]) { vkDestroyBuffer(ctx->device, dynamicBoundsBuffer[i], NULL); dynamicBoundsBuffer[i] = VK_NULL_HANDLE; }
+        if (dynamicBoundsBufferMemory[i]) { vkFreeMemory(ctx->device, dynamicBoundsBufferMemory[i], NULL); dynamicBoundsBufferMemory[i] = VK_NULL_HANDLE; }
+    }
 
     /* morph buffers */
     CLEANUP_BUFFER(megaMorphBuffer, megaMorphBufferMemory);
@@ -2124,6 +2204,18 @@ void createMegaVertexBuffer(VulkanContext* ctx, VkDeviceSize size)
     VkBufferDeviceAddressInfo mlBoundsInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = megaMeshletBoundsBuffer };
     megaMeshletBoundsBufferAddr = vkGetBufferDeviceAddress(ctx->device, &mlBoundsInfo);
 
+    VkDeviceSize mlSkinSize = 32 * 1024 * 1024; // 32MB for Skins
+    createBuffer(ctx, mlSkinSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &megaMeshletSkinBuffer, &megaMeshletSkinBufferMemory);
+    VkBufferDeviceAddressInfo skinInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = megaMeshletSkinBuffer };
+    megaMeshletSkinBufferAddr = vkGetBufferDeviceAddress(ctx->device, &skinInfo);
+
+    VkDeviceSize dynamicBoundsSize = 32 * 1024 * 1024; // 32 MB explicitly defined for Dynamic Bounds
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        createBuffer(ctx, dynamicBoundsSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &dynamicBoundsBuffer[i], &dynamicBoundsBufferMemory[i]);
+        VkBufferDeviceAddressInfo dynInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = dynamicBoundsBuffer[i] };
+        dynamicBoundsBufferAddr[i] = vkGetBufferDeviceAddress(ctx->device, &dynInfo);
+    }
+
     megaMeshletVertexBufferSize = mlVertSize;
     megaMeshletVertexOffset = 0;
     createBuffer(ctx, mlVertSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &megaMeshletVertexBuffer, &megaMeshletVertexMemory);
@@ -2163,6 +2255,9 @@ void createUploadStagingBuffer(VulkanContext* ctx, VkDeviceSize size)
     ctx->pendingMeshletBoundsCopyCapacity  = 256;
     ctx->pendingMeshletBoundsCopyCount     = 0;
     ctx->pendingMeshletBoundsCopies        = malloc(256 * sizeof(VkBufferCopy));
+    ctx->pendingMeshletSkinCopyCapacity    = 256;
+    ctx->pendingMeshletSkinCopyCount       = 0;
+    ctx->pendingMeshletSkinCopies          = malloc(256 * sizeof(VkBufferCopy));
     ctx->pendingMeshletVertexCopyCapacity  = 256;
     ctx->pendingMeshletVertexCopyCount     = 0;
     ctx->pendingMeshletVertexCopies        = malloc(256 * sizeof(VkBufferCopy));
@@ -2183,6 +2278,7 @@ void destroyUploadStagingBuffer(VulkanContext* ctx)
     if (ctx->pendingIndexCopies)           { free(ctx->pendingIndexCopies);           ctx->pendingIndexCopies           = NULL; }
     if (ctx->pendingMeshletCopies)         { free(ctx->pendingMeshletCopies);         ctx->pendingMeshletCopies         = NULL; }
     if (ctx->pendingMeshletBoundsCopies)   { free(ctx->pendingMeshletBoundsCopies);   ctx->pendingMeshletBoundsCopies   = NULL; }
+    if (ctx->pendingMeshletSkinCopies)     { free(ctx->pendingMeshletSkinCopies);     ctx->pendingMeshletSkinCopies     = NULL; }
     if (ctx->pendingMeshletVertexCopies)   { free(ctx->pendingMeshletVertexCopies);   ctx->pendingMeshletVertexCopies   = NULL; }
     if (ctx->pendingMeshletTriangleCopies) { free(ctx->pendingMeshletTriangleCopies); ctx->pendingMeshletTriangleCopies = NULL; }
     ctx->uploadStagingSize            = 0;
@@ -2197,6 +2293,7 @@ void flushUploadStagingBuffer(VulkanContext* ctx)
 {
     bool any = ctx->pendingVertexCopyCount > 0 || ctx->pendingIndexCopyCount > 0 ||
                ctx->pendingMeshletCopyCount > 0 || ctx->pendingMeshletBoundsCopyCount > 0 ||
+               ctx->pendingMeshletSkinCopyCount > 0 ||
                ctx->pendingMeshletVertexCopyCount > 0 || ctx->pendingMeshletTriangleCopyCount > 0;
     if (!any) return;
 
@@ -2214,6 +2311,9 @@ void flushUploadStagingBuffer(VulkanContext* ctx)
     if (ctx->pendingMeshletBoundsCopyCount > 0)
         vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletBoundsBuffer,
                         ctx->pendingMeshletBoundsCopyCount, ctx->pendingMeshletBoundsCopies);
+    if (ctx->pendingMeshletSkinCopyCount > 0)
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletSkinBuffer,
+                        ctx->pendingMeshletSkinCopyCount, ctx->pendingMeshletSkinCopies);
     if (ctx->pendingMeshletVertexCopyCount > 0)
         vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletVertexBuffer,
                         ctx->pendingMeshletVertexCopyCount, ctx->pendingMeshletVertexCopies);
@@ -2229,6 +2329,7 @@ void flushUploadStagingBuffer(VulkanContext* ctx)
     ctx->pendingIndexCopyCount           = 0;
     ctx->pendingMeshletCopyCount         = 0;
     ctx->pendingMeshletBoundsCopyCount   = 0;
+    ctx->pendingMeshletSkinCopyCount     = 0;
     ctx->pendingMeshletVertexCopyCount   = 0;
     ctx->pendingMeshletTriangleCopyCount = 0;
     ctx->uploadStagingOffset             = 0;
@@ -2369,10 +2470,12 @@ uint32_t megaMeshletBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t
 {
     VkDeviceSize mlUploadSize = count * sizeof(Meshlet);
     VkDeviceSize boundsUploadSize = count * sizeof(MeshletBounds);
-    VkDeviceSize totalUploadSize = mlUploadSize + boundsUploadSize;
+    VkDeviceSize skinUploadSize = count * sizeof(MeshletSkinData);
+    VkDeviceSize totalUploadSize = mlUploadSize + boundsUploadSize + skinUploadSize;
 
     VkDeviceSize dstOffsetML = megaMeshletBufferOffset * sizeof(Meshlet);
     VkDeviceSize dstOffsetBounds = megaMeshletBufferOffset * sizeof(MeshletBounds);
+    VkDeviceSize dstOffsetSkin = megaMeshletBufferOffset * sizeof(MeshletSkinData);
 
     if (dstOffsetML + mlUploadSize > megaMeshletBufferSize) return UINT32_MAX;
 
@@ -2381,6 +2484,7 @@ uint32_t megaMeshletBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t
     if (ctx->uploadStagingBuffer) {
         fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, 1, mlUploadSize, f);
         fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset + mlUploadSize, 1, boundsUploadSize, f);
+        fread((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset + mlUploadSize + boundsUploadSize, 1, skinUploadSize, f);
 
         VkCommandBuffer cmd = beginSingleTimeCommands(ctx->device, ctx->commandPool);
         VkBufferCopy regionML = { .srcOffset = ctx->uploadStagingOffset, .dstOffset = dstOffsetML, .size = mlUploadSize };
@@ -2388,6 +2492,9 @@ uint32_t megaMeshletBufferAllocateFromFile(VulkanContext* ctx, FILE* f, uint32_t
 
         VkBufferCopy regionBounds = { .srcOffset = ctx->uploadStagingOffset + mlUploadSize, .dstOffset = dstOffsetBounds, .size = boundsUploadSize };
         vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletBoundsBuffer, 1, &regionBounds);
+
+        VkBufferCopy regionSkin = { .srcOffset = ctx->uploadStagingOffset + mlUploadSize + boundsUploadSize, .dstOffset = dstOffsetSkin, .size = skinUploadSize };
+        vkCmdCopyBuffer(cmd, ctx->uploadStagingBuffer, megaMeshletSkinBuffer, 1, &regionSkin);
 
         endSingleTimeCommands(ctx->device, ctx->commandPool, ctx->graphicsQueue, cmd);
         ctx->uploadStagingOffset += totalUploadSize;
@@ -2444,13 +2551,17 @@ uint32_t megaMeshletTriangleBufferAllocateFromFile(VulkanContext* ctx, FILE* f, 
     return baseOffset;
 }
 
-uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, MeshletBounds* bounds, uint32_t count) {
+uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, MeshletBounds* bounds, MeshletSkinData* skins, uint32_t count) {
     VkDeviceSize mlSize     = count * sizeof(Meshlet);
     VkDeviceSize boundsSize = count * sizeof(MeshletBounds);
+    VkDeviceSize skinSize   = count * sizeof(MeshletSkinData);
+
     VkDeviceSize dstOffsetML     = megaMeshletBufferOffset * sizeof(Meshlet);
     VkDeviceSize dstOffsetBounds = megaMeshletBufferOffset * sizeof(MeshletBounds);
+    VkDeviceSize dstOffsetSkin   = megaMeshletBufferOffset * sizeof(MeshletSkinData);
+
     if (dstOffsetML + mlSize > megaMeshletBufferSize) { fprintf(stderr, "megaMeshletBuffer overflow!\n"); return UINT32_MAX; }
-    if (ctx->uploadStagingOffset + mlSize + boundsSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
+    if (ctx->uploadStagingOffset + mlSize + boundsSize + skinSize > ctx->uploadStagingSize) flushUploadStagingBuffer(ctx);
 
     memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, meshlets, mlSize);
     if (ctx->pendingMeshletCopyCount == ctx->pendingMeshletCopyCapacity) {
@@ -2467,6 +2578,15 @@ uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, Meshle
     }
     ctx->pendingMeshletBoundsCopies[ctx->pendingMeshletBoundsCopyCount++] = (VkBufferCopy){ ctx->uploadStagingOffset, dstOffsetBounds, boundsSize };
     ctx->uploadStagingOffset += boundsSize;
+
+    // AAA Batched Upload: Queue skins into the pending copy arrays
+    memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, skins, skinSize);
+    if (ctx->pendingMeshletSkinCopyCount == ctx->pendingMeshletSkinCopyCapacity) {
+        ctx->pendingMeshletSkinCopyCapacity *= 2;
+        ctx->pendingMeshletSkinCopies = realloc(ctx->pendingMeshletSkinCopies, ctx->pendingMeshletSkinCopyCapacity * sizeof(VkBufferCopy));
+    }
+    ctx->pendingMeshletSkinCopies[ctx->pendingMeshletSkinCopyCount++] = (VkBufferCopy){ ctx->uploadStagingOffset, dstOffsetSkin, skinSize };
+    ctx->uploadStagingOffset += skinSize;
 
     uint32_t base = megaMeshletBufferOffset;
     megaMeshletBufferOffset += count;

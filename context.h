@@ -142,6 +142,9 @@ typedef struct {
     uint32_t         pendingMeshletCopyCount;
     uint32_t         pendingMeshletCopyCapacity;
     VkBufferCopy*    pendingMeshletBoundsCopies;
+    uint32_t         pendingMeshletSkinCopyCapacity;
+    uint32_t         pendingMeshletSkinCopyCount;
+    VkBufferCopy*    pendingMeshletSkinCopies;
     uint32_t         pendingMeshletBoundsCopyCount;
     uint32_t         pendingMeshletBoundsCopyCapacity;
     VkBufferCopy*    pendingMeshletVertexCopies;

@@ -102,7 +102,9 @@ layout(push_constant) uniform PC {
     MorphBuffer  morphData;
     WeightBuffer weightData;
     MeshletBuffer meshletData;
-    DummyBuffer  boundsData;
+    DummyBuffer  staticBounds;
+    DummyBuffer  skinData;
+    DummyBuffer  dynamicBounds;
     MLVertBuffer meshletVertexData;
     MLTriBuffer  meshletTriangleData;
 } pc;

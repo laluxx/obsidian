@@ -1,0 +1,138 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct MeshletBounds {
+    float center[3]; float radius;
+    float cone_apex[3]; float cone_axis[3]; float cone_cutoff;
+};
+
+struct MeshletSkinData {
+    uint joints[4];
+    float weights[4];
+};
+
+struct PackedJoint { vec4 row0; vec4 row1; vec4 row2; };
+
+struct MeshData {
+    mat4  model;
+    int   albedoIndex;
+    int   normalMapIndex;
+    int   metallicRoughIndex;
+    int   aoIndex;
+    int   emissiveIndex;
+    int   isUnlit;
+    int   alphaMode;
+    float alphaCutoff;
+    vec4  baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    float emissiveStrength;
+    int   displacementIndex;
+    vec3  emissiveFactor;
+    float displacementScale;
+    vec4  aabbMin;
+    vec4  aabbMax;
+    int   jointOffset;
+    int   morphDeltaOffset;
+    int   morphWeightOffset;
+    int   morphCount;
+    int   meshletOffset;
+    int   meshletCount;
+    int   meshletVertexOffset;
+    int   meshletTriangleOffset;
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    int   isVisible;
+    int   isWireframe;
+    int   vertexOffset;
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer { MeshData meshes[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer StaticBoundsBuffer { MeshletBounds bounds[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer SkinBuffer { MeshletSkinData skins[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer JointBuffer { PackedJoint joints[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer DynamicBoundsBuffer { MeshletBounds bounds[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DummyBuffer { uint dummy[]; };
+
+layout(push_constant) uniform PC {
+    int          ambientOcclusionEnabled;
+    int          iblEnabled;
+    int          meshIndex;
+    int          cascadeIndex;
+    MeshBuffer   meshData;
+    DummyBuffer  vertexBufferAddr;
+    JointBuffer  jointData;
+    DummyBuffer  morphBufferAddr;
+    DummyBuffer  morphWeightAddr;
+    DummyBuffer  meshletData;
+    StaticBoundsBuffer staticBounds;
+    SkinBuffer   skinData;
+    DynamicBoundsBuffer dynamicBounds;
+    DummyBuffer  meshletVertexAddr;
+    DummyBuffer  meshletTriangleAddr;
+} pc;
+
+
+mat4 unpackJoint(PackedJoint j) {
+    return mat4(
+        vec4(j.row0.x, j.row1.x, j.row2.x, 0.0),
+        vec4(j.row0.y, j.row1.y, j.row2.y, 0.0),
+        vec4(j.row0.z, j.row1.z, j.row2.z, 0.0),
+        vec4(j.row0.w, j.row1.w, j.row2.w, 1.0)
+    );
+}
+
+void main() {
+    uint meshletIdx = gl_GlobalInvocationID.x;
+    MeshData m = pc.meshData.meshes[pc.meshIndex];
+    if (meshletIdx >= m.meshletCount) return;
+
+    uint globalIdx = m.meshletOffset + meshletIdx;
+    MeshletBounds b = pc.staticBounds.bounds[globalIdx];
+    MeshletSkinData skin = pc.skinData.skins[globalIdx];
+
+    mat4 skinMat = mat4(1.0);
+    if (m.jointOffset >= 0) {
+        skinMat =
+            skin.weights[0] * unpackJoint(pc.jointData.joints[m.jointOffset + skin.joints[0]]) +
+            skin.weights[1] * unpackJoint(pc.jointData.joints[m.jointOffset + skin.joints[1]]) +
+            skin.weights[2] * unpackJoint(pc.jointData.joints[m.jointOffset + skin.joints[2]]) +
+            skin.weights[3] * unpackJoint(pc.jointData.joints[m.jointOffset + skin.joints[3]]);
+    }
+
+    vec3 center = vec3(b.center[0], b.center[1], b.center[2]);
+    vec3 apex = vec3(b.cone_apex[0], b.cone_apex[1], b.cone_apex[2]);
+    vec3 axis = vec3(b.cone_axis[0], b.cone_axis[1], b.cone_axis[2]);
+
+    vec3 newCenter = (skinMat * vec4(center, 1.0)).xyz;
+    vec3 newApex = (skinMat * vec4(apex, 1.0)).xyz;
+    vec3 newAxis = normalize(mat3(skinMat) * axis);
+
+    float scaleX = length(skinMat[0].xyz);
+    float scaleY = length(skinMat[1].xyz);
+    float scaleZ = length(skinMat[2].xyz);
+    float maxScale = max(scaleX, max(scaleY, scaleZ));
+
+    MeshletBounds dyn;
+    dyn.center[0] = newCenter.x; dyn.center[1] = newCenter.y; dyn.center[2] = newCenter.z;
+    dyn.radius = b.radius * maxScale;
+    dyn.cone_apex[0] = newApex.x; dyn.cone_apex[1] = newApex.y; dyn.cone_apex[2] = newApex.z;
+    dyn.cone_axis[0] = newAxis.x; dyn.cone_axis[1] = newAxis.y; dyn.cone_axis[2] = newAxis.z;
+    dyn.cone_cutoff = b.cone_cutoff;
+
+    pc.dynamicBounds.bounds[globalIdx] = dyn;
+}
