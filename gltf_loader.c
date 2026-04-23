@@ -10,8 +10,8 @@
 static int32_t gltf_texture_indices[MAX_TEXTURES];
 static size_t gltf_texture_count = 0;
 
-// Bumped magic to force rebuild of OMDL files since OmdlNode now has a name field!
-#define OMDL_MAGIC 0x4C444D50 // 'OMDP'
+// Bumped magic to force rebuild of OMDL files since embedded textures are now extracted to cache
+#define OMDL_MAGIC 0x4C444D51 // 'OMDQ'
 
 typedef struct {
     uint32_t magic;
@@ -138,12 +138,39 @@ bool load_gltf_textures(cgltf_data* data, const char* base_path) {
         }
         else if (img->buffer_view) {
             char virtual_filename[1024];
-            snprintf(virtual_filename, sizeof(virtual_filename), "%s_embedded_tex_%zu.png", base_path, i);
+            const char* home = getenv("HOME");
+            if (!home) home = ".";
+
+            char tdir[512];
+            snprintf(tdir, sizeof(tdir), "%s/.cache", home); mkdir(tdir, 0777);
+            snprintf(tdir, sizeof(tdir), "%s/.cache/obsidian", home); mkdir(tdir, 0777);
+            snprintf(tdir, sizeof(tdir), "%s/.cache/obsidian/textures", home); mkdir(tdir, 0777);
+
+            char safe_name[256];
+            strncpy(safe_name, base_path, sizeof(safe_name) - 1);
+            safe_name[sizeof(safe_name) - 1] = '\0';
+            for (int k = 0; safe_name[k]; k++) {
+                if (safe_name[k] == '/' || safe_name[k] == '\\' || safe_name[k] == '.') safe_name[k] = '_';
+            }
+
+            snprintf(virtual_filename, sizeof(virtual_filename), "%s/.cache/obsidian/textures/%s_embedded_%zu.png", home, safe_name, i);
             strcpy(gltf_texture_paths[i], virtual_filename);
 
             cgltf_buffer_view* view = img->buffer_view;
             unsigned char* buffer_data = (unsigned char*)view->buffer->data + view->offset;
-            tex_id = texture_pool_add_embedded(&context, virtual_filename, buffer_data, view->size);
+
+            FILE* f = fopen(virtual_filename, "rb");
+            if (f) {
+                fclose(f);
+            } else {
+                f = fopen(virtual_filename, "wb");
+                if (f) {
+                    fwrite(buffer_data, 1, view->size, f);
+                    fclose(f);
+                }
+            }
+
+            tex_id = texture_pool_add(&context, virtual_filename);
         }
         else {
             gltf_texture_indices[i] = -1; continue;

@@ -11,6 +11,7 @@ typedef struct {
     Color bg_deepest;
     Color text;
     Color text_dim;
+    Color selection;
     Color border;
     Color accent;
     Color red;

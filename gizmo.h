@@ -71,3 +71,4 @@ int  gizmo_pick_mesh(double mouse_x, double mouse_y);
 
 // Convenience: cycle gizmo mode (translate → rotate → scale → …)
 void gizmo_cycle_mode(void);
+void gizmo_render_overlay(void);

@@ -142,6 +142,12 @@ static vec3   s_rot_v_prev;
 static mat4   s_drag_start_local;
 static mat4   s_drag_start_bone_override;
 
+#define MAX_GLTF_MESHES 256
+static mat4 s_gltf_initial_models[MAX_GLTF_MESHES];
+static mat4 s_gltf_initial_locals[MAX_GLTF_MESHES];
+static int s_gltf_mesh_start = -1;
+static int s_gltf_mesh_count = 0;
+
 extern bool editor_show_bones;
 extern void* editor_selected_bone;
 extern void inspector_select_bone(void* bone);
@@ -849,9 +855,26 @@ void gizmo_init(void) {
 void gizmo_cycle_mode(void) {
     gizmo.mode = (GizmoMode)((gizmo.mode + 1) % GIZMO_MODE_COUNT);
     const char* names[] = {"Translate", "Rotate", "Scale"};
-    printf("[Gizmo] Mode: %s\n", names[gizmo.mode]);
 }
 
+bool gizmo_get_y0_intersection(double mx, double my, vec3 out_pos) {
+    vec3 ro, rd;
+    screen_to_ray(mx, my, ro, rd);
+    if (fabsf(rd[1]) < 1e-5f) return false;
+    float t = -ro[1] / rd[1];
+    if (t < 0.0f) return false;
+
+    out_pos[0] = ro[0] + rd[0] * t;
+    out_pos[1] = 0.0f;
+    out_pos[2] = ro[2] + rd[2] * t;
+
+    if (glfwGetKey(context.window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+        glfwGetKey(context.window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) {
+        out_pos[0] = roundf(out_pos[0]);
+        out_pos[2] = roundf(out_pos[2]);
+    }
+    return true;
+}
 extern float renderer_read_depth_at(VulkanContext* ctx, uint32_t x, uint32_t y);
 
 int gizmo_pick_mesh(double mouse_x, double mouse_y) {

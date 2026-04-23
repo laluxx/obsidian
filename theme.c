@@ -75,6 +75,7 @@ void initThemes() {
         .cursor                = hexToColor("#E3E3E3"),
         .text                  = hexToColor("#E3E3E3"),
         .text_dim              = hexToColor("#C4C7C5"),
+        .selection             = hexToColor("#C4C7C5"),
         .border                = hexToColor("#484845"),
         .accent                = hexToColor("#C6613F"),
         .fringe_fg             = hexToColor("#E3E3E3"),

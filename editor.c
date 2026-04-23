@@ -136,6 +136,8 @@ static bool s_file_drag_active = false;
 static FileItem* s_file_drag_item = NULL;
 static float s_file_drag_start_x = 0.0f;
 static float s_file_drag_start_y = 0.0f;
+static bool s_placement_active = false;
+static int s_placement_mesh_idx = -1;
 
 // --- Search & Incremental Caching State ---
 static bool  s_is_searching = false;
@@ -361,6 +363,10 @@ static void on_color_picked(float r, float g, float b, float a, void* user) {
     markMeshesSSBODirty(&context);
 }
 
+static inline bool ui_hovered(float x, float y, float w, float h) {
+    return s_ui_mx >= x && s_ui_mx <= x + w && s_ui_my >= y && s_ui_my <= y + h;
+}
+
 bool editor_wants_mouse(void) {
     if (s_grab_active || s_grab_just_finished) return true;
 
@@ -374,8 +380,7 @@ bool editor_wants_mouse(void) {
         float h = editor.font->ascent - editor.font->descent + 32.0f;
         if (s_message.active || s_message.y > -(h + 5.0f)) {
             float w = measure_text_width(editor.font, s_message.text, 1.0f) + 32.0f;
-            if (s_ui_mx >= s_message.x && s_ui_mx <= s_message.x + w &&
-                s_ui_my >= s_message.y && s_ui_my <= s_message.y + h) return true;
+            if (ui_hovered(s_message.x, s_message.y, w, h)) return true;
             if (s_message.is_dragging) return true;
         }
     }
@@ -386,9 +391,7 @@ bool editor_wants_mouse(void) {
         if (p->t < 0.0005f) continue;
         float x, y, w, h;
         panel_get_rect(p, &x, &y, &w, &h);
-        if (s_ui_mx >= x && s_ui_mx <= x + w && s_ui_my >= y && s_ui_my <= y + h) {
-            return true; // Hovering an open panel
-        }
+        if (ui_hovered(x, y, w, h)) return true; // Hovering an open panel
     }
     return false;
 }
@@ -537,8 +540,7 @@ void editor_mouse_button(int button, int action) {
                 s_file_drag_active = false;
                 s_ui_active_id = NULL;
 
-                float dist = sqrtf(powf((float)s_ui_mx - s_file_drag_start_x, 2.0f) + powf((float)s_ui_my - s_file_drag_start_y, 2.0f));
-                if (dist > 5.0f && s_file_drag_item) {
+                if (!s_placement_active && s_file_drag_item) {
                     bool over_panel = false;
                     for (int i = 0; i < PANEL_COUNT; i++) {
                         Panel* p = &editor.panels[i];
@@ -549,21 +551,19 @@ void editor_mouse_button(int button, int action) {
                             over_panel = true; break;
                         }
                     }
-                    if (!over_panel) {
-                        if (s_file_drag_item->type == FILE_ITEM_DIR) {
-                            message(MSG_WARNING, "Cannot load a folder!");
-                        } else {
-                            const char* ext = strrchr(s_file_drag_item->name, '.');
-                            if (ext && (strcasecmp(ext, ".gltf") == 0 || strcasecmp(ext, ".glb") == 0)) {
-                                extern bool load_gltf(const char*, Scene*);
-                                load_gltf(s_file_drag_item->full_path, &scene);
-                            } else {
-                                message(MSG_ERROR, "Unsupported format!");
-                            }
+                    if (!over_panel && s_file_drag_item->type == FILE_ITEM_DIR) {
+                        message(MSG_WARNING, "Cannot load a folder!");
+                    } else if (!over_panel) {
+                        const char* ext = strrchr(s_file_drag_item->name, '.');
+                        if (!ext || (strcasecmp(ext, ".gltf") != 0 && strcasecmp(ext, ".glb") != 0)) {
+                            message(MSG_ERROR, "Unsupported format!");
                         }
                     }
                 }
+
                 s_file_drag_item = NULL;
+                s_placement_active = false;
+                s_placement_mesh_idx = -1;
             }
 
             if (s_message.is_dragging) {
@@ -670,58 +670,50 @@ static void panel_get_rect(Panel* p,
     }
 }
 
-///  Panel Chrome
+/// Panel Chrome
 
-static void panel_draw_bg(Panel* p, float x, float y, float w, float h) {
-    vec4 radii = {0.0f, 0.0f, 0.0f, 0.0f};
-    switch (p->side) {
-        case PANEL_BOTTOM: radii[0] = PANEL_RADIUS; radii[1] = PANEL_RADIUS; break;
-        case PANEL_TOP:    radii[2] = PANEL_RADIUS; radii[3] = PANEL_RADIUS; break;
-        case PANEL_LEFT:   radii[1] = PANEL_RADIUS; radii[2] = PANEL_RADIUS; break;
-        case PANEL_RIGHT:  radii[0] = PANEL_RADIUS; radii[3] = PANEL_RADIUS; break;
+static inline void panel_get_radii(PanelSide side, vec4 radii) {
+    radii[0] = radii[1] = radii[2] = radii[3] = 0.0f;
+    switch (side) {
+        case PANEL_BOTTOM: radii[0] = radii[1] = PANEL_RADIUS; break;
+        case PANEL_TOP:    radii[2] = radii[3] = PANEL_RADIUS; break;
+        case PANEL_LEFT:   radii[1] = radii[2] = PANEL_RADIUS; break;
+        case PANEL_RIGHT:  radii[0] = radii[3] = PANEL_RADIUS; break;
         default: break;
     }
+}
+
+static void panel_draw_bg(Panel* p, float x, float y, float w, float h) {
+    vec4 radii; panel_get_radii(p->side, radii);
     exQuad2D((vec2){x, y}, (vec2){w, h}, radii, 0.0f, CT.bg, CT.bg);
 
     if (p->side == PANEL_TOP) {
-        Color bar = CT.bg_alt;
-        float bar_h = TITLE_H;
-        exQuad2D((vec2){x, y}, (vec2){w, bar_h}, (vec4){0.0f, 0.0f, radii[2], radii[3]}, 0.0f, bar, bar);
+        exQuad2D((vec2){x, y}, (vec2){w, TITLE_H}, (vec4){0.0f, 0.0f, radii[2], radii[3]}, 0.0f, CT.bg_alt, CT.bg_alt);
     }
 }
 
 static void panel_draw_titlebar(Panel* p, float x, float y, float w, float h) {
-    vec4 radii = {0.0f, 0.0f, 0.0f, 0.0f};
-    switch (p->side) {
-        case PANEL_BOTTOM: radii[0] = PANEL_RADIUS; radii[1] = PANEL_RADIUS; break;
-        case PANEL_TOP:    radii[2] = PANEL_RADIUS; radii[3] = PANEL_RADIUS; break;
-        case PANEL_LEFT:   radii[1] = PANEL_RADIUS; radii[2] = PANEL_RADIUS; break;
-        case PANEL_RIGHT:  radii[0] = PANEL_RADIUS; radii[3] = PANEL_RADIUS; break;
-        default: break;
-    }
-
-    Color bar = CT.bg_alt;
-    float bar_h = TITLE_H;
+    vec4 radii; panel_get_radii(p->side, radii);
     float tx = x + PAD;
     float ty;
 
     switch (p->side) {
         case PANEL_TOP:
-            ty = y + bar_h  * 0.5f;
+            ty = y + TITLE_H * 0.5f;
             break;
         default:
-            exQuad2D((vec2){x, y + h - bar_h}, (vec2){w, bar_h}, (vec4){radii[0], radii[1], 0.0f, 0.0f}, 0.0f, bar, bar);
-            ty = y + h - bar_h * 0.5f;
+            exQuad2D((vec2){x, y + h - TITLE_H}, (vec2){w, TITLE_H}, (vec4){radii[0], radii[1], 0.0f, 0.0f}, 0.0f, CT.bg_alt, CT.bg_alt);
+            ty = y + h - TITLE_H * 0.5f;
             break;
     }
 
     if (p->side == PANEL_BOTTOM && p->t > 0.0f) {
         if (g_anim_editor.visible) {
             extern void anim_editor_draw_titlebar(float x, float y, float w, float h, float mx, float my);
-            anim_editor_draw_titlebar(x, y + h - bar_h, w, bar_h, (float)s_ui_mx, (float)s_ui_my);
+            anim_editor_draw_titlebar(x, y + h - TITLE_H, w, TITLE_H, (float)s_ui_mx, (float)s_ui_my);
         } else {
             extern void text_editor_draw_titlebar(float x, float y, float w, float h, float mx, float my);
-            text_editor_draw_titlebar(x, y + h - bar_h, w, bar_h, (float)s_ui_mx, (float)s_ui_my);
+            text_editor_draw_titlebar(x, y + h - TITLE_H, w, TITLE_H, (float)s_ui_mx, (float)s_ui_my);
         }
     } else if (p->title && p->title[0] != '\0') {
         text(editor.font, p->title, tx, ty, CT.text);
@@ -834,6 +826,19 @@ static bool field_toggle(float cx, float row, float col2_x, float cw, const char
     return changed;
 }
 
+static bool ui_drag_float(void* id, float* val, float speed, bool clamp_val, float min_v, float max_v) {
+    if (s_ui_active_id != id) return false;
+    float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
+    GLFWwindow* win = glfwGetCurrentContext();
+    if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
+        delta *= 0.1f;
+    }
+    *val += delta;
+    if (clamp_val) *val = clampf(*val, min_v, max_v);
+    s_ui_drag_start_x = (float)s_ui_mx;
+    return true;
+}
+
 static bool field_vec3(float cx, float row, float col2_x, float cw,
                        const char* label, float* v, const char* unit, float speed, int32_t icon_id) {
     if (!editor.font) return false;
@@ -862,17 +867,7 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
             s_ui_active_id = id;
             s_ui_drag_start_x = (float)s_ui_mx;
         }
-
-        if (icon_id < 0 && s_ui_active_id == id) {
-            float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
-            GLFWwindow* win = glfwGetCurrentContext();
-            if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
-                delta *= 0.1f;
-            }
-            v[i] += delta;
-            s_ui_drag_start_x = (float)s_ui_mx;
-            changed = true;
-        }
+        if (icon_id < 0 && ui_drag_float(id, &v[i], speed, false, 0.0f, 0.0f)) changed = true;
 
         Color label_col = ((icon_id < 0) && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
 
@@ -885,8 +880,7 @@ static bool field_vec3(float cx, float row, float col2_x, float cw,
         text(editor.font, num, num_x, row, CT.text);
 
         if (unit) {
-            float unit_x = num_x + 58.0f;
-            text(editor.font, unit, unit_x, row, CT.text_dim);
+            text(editor.font, unit, num_x + 58.0f, row, CT.text_dim);
         }
     }
     return changed;
@@ -912,9 +906,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
 
     if (icon_id < 0 && swatch_hovered && s_ui_mclicked) {
         float sh = (float)context.swapChainExtent.height;
-        float anchor_x = swatch_x - 10.0f; // Open to the left of the swatch to keep it on-screen
-        float anchor_y = sh - (box_y + 2.0f + swatch_size * 0.5f);
-        colorpicker_open(&s_color_picker, anchor_x, anchor_y, c, c, on_color_picked, NULL);
+        colorpicker_open(&s_color_picker, swatch_x - 10.0f, sh - (box_y + 2.0f + swatch_size * 0.5f), c, c, on_color_picked, NULL);
     }
 
     float box_x = swatch_x + swatch_size + 8.0f;
@@ -936,17 +928,7 @@ static bool field_vec4_color(float cx, float row, float col2_x, float cw,
             s_ui_active_id = id;
             s_ui_drag_start_x = (float)s_ui_mx;
         }
-
-        if (icon_id < 0 && s_ui_active_id == id) {
-            float delta = ((float)s_ui_mx - s_ui_drag_start_x) * 0.005f;
-            GLFWwindow* win = glfwGetCurrentContext();
-            if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
-                delta *= 0.1f;
-            }
-            c[i] = clampf(c[i] + delta, 0.0f, 1.0f);
-            s_ui_drag_start_x = (float)s_ui_mx;
-            changed = true;
-        }
+        if (icon_id < 0 && ui_drag_float(id, &c[i], 0.005f, true, 0.0f, 1.0f)) changed = true;
 
         Color label_col = ((icon_id < 0) && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? axis_colors_active[i] : axis_colors[i];
 
@@ -975,20 +957,7 @@ static bool field_float(float cx, float row, float col2_x, float cw,
         s_ui_active_id = id;
         s_ui_drag_start_x = (float)s_ui_mx;
     }
-
-    if (icon_id < 0 && s_ui_active_id == id) {
-        float delta = ((float)s_ui_mx - s_ui_drag_start_x) * speed;
-        GLFWwindow* win = glfwGetCurrentContext();
-        if (win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
-            delta *= 0.1f;
-        }
-        *val += delta;
-        if (clamp_val) {
-            *val = clampf(*val, min_v, max_v);
-        }
-        s_ui_drag_start_x = (float)s_ui_mx;
-        changed = true;
-    }
+    if (icon_id < 0 && ui_drag_float(id, val, speed, clamp_val, min_v, max_v)) changed = true;
 
     Color label_col = ((icon_id < 0) && (s_ui_active_id == id || (hovered && s_ui_active_id == NULL))) ? CT.text : CT.text_dim;
     text(editor.font, label, cx, row, label_col);
@@ -999,16 +968,14 @@ static bool field_float(float cx, float row, float col2_x, float cw,
     float text_w = measure_text_width(editor.font, num, 1.0f);
 
     float box_x = col2_x;
-    float box_w = text_w + 16.0f; // Exactly 8px padding on left and right!
+    float box_w = text_w + 16.0f;
     float box_h = editor.font->ascent - editor.font->descent + 6.0f;
     float box_y = row - editor.font->descent - 3.0f;
 
     exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h}, (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, CT.bg_deep, CT.bg_deep);
-
     text(editor.font, num, box_x + 8.0f, row, CT.text);
     return changed;
 }
-
 
 static void field_text(float cx, float row, float col2_x, float cw,
                        const char* label, const char* value, int32_t icon_id) {
@@ -1236,15 +1203,8 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
 
             if (s_proxy_mesh_idx != s->selected_mesh_index || (!s_color_picker.visible && s_ui_active_id == NULL)) {
                 s_proxy_mesh_idx = s->selected_mesh_index;
-                s_proxy_emissive[0] = m->emissiveFactor[0];
-                s_proxy_emissive[1] = m->emissiveFactor[1];
-                s_proxy_emissive[2] = m->emissiveFactor[2];
-                s_proxy_emissive[3] = 1.0f;
-
-                s_proxy_attenuation[0] = m->attenuationColor[0];
-                s_proxy_attenuation[1] = m->attenuationColor[1];
-                s_proxy_attenuation[2] = m->attenuationColor[2];
-                s_proxy_attenuation[3] = 1.0f;
+                memcpy(s_proxy_emissive, m->emissiveFactor, 3 * sizeof(float)); s_proxy_emissive[3] = 1.0f;
+                memcpy(s_proxy_attenuation, m->attenuationColor, 3 * sizeof(float)); s_proxy_attenuation[3] = 1.0f;
             }
 
             bool mat_changed = false;
@@ -1252,10 +1212,8 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
             row -= lh + 6.0f;
 
             mat_changed |= field_vec4_color(cx, row, col2, cw, "Emissive", s_proxy_emissive, -1);
-            if (m->emissiveFactor[0] != s_proxy_emissive[0] || m->emissiveFactor[1] != s_proxy_emissive[1] || m->emissiveFactor[2] != s_proxy_emissive[2]) {
-                m->emissiveFactor[0] = s_proxy_emissive[0];
-                m->emissiveFactor[1] = s_proxy_emissive[1];
-                m->emissiveFactor[2] = s_proxy_emissive[2];
+            if (memcmp(m->emissiveFactor, s_proxy_emissive, 3 * sizeof(float)) != 0) {
+                memcpy(m->emissiveFactor, s_proxy_emissive, 3 * sizeof(float));
                 mat_changed = true;
             }
             row -= lh + 6.0f;
@@ -1279,12 +1237,11 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
             row -= lh + 6.0f;
 
             mat_changed |= field_vec4_color(cx, row, col2_mat, cw, "Atten. Color", s_proxy_attenuation, -1);
-            if (m->attenuationColor[0] != s_proxy_attenuation[0] || m->attenuationColor[1] != s_proxy_attenuation[1] || m->attenuationColor[2] != s_proxy_attenuation[2]) {
-                m->attenuationColor[0] = s_proxy_attenuation[0];
-                m->attenuationColor[1] = s_proxy_attenuation[1];
-                m->attenuationColor[2] = s_proxy_attenuation[2];
+            if (memcmp(m->attenuationColor, s_proxy_attenuation, 3 * sizeof(float)) != 0) {
+                memcpy(m->attenuationColor, s_proxy_attenuation, 3 * sizeof(float));
                 mat_changed = true;
             }
+
             row -= lh + 6.0f;
 
             mat_changed |= field_float(cx, row, col2_mat, cw, "Atten. Distance", &m->attenuationDistance, 0.1f, true, 0.0f, 1e6f, -1);
@@ -2655,9 +2612,9 @@ static void toggle_left(void)   { editor_toggle_panel(PANEL_LEFT);   }
 // Fast, portable case-insensitive substring search
 static bool str_contains_ci(const char* haystack, const char* needle) {
     if (!*needle) return true;
+    char nc = (*needle >= 'A' && *needle <= 'Z') ? *needle + 32 : *needle;
     for (const char* h = haystack; *h; h++) {
         char hc = (*h >= 'A' && *h <= 'Z') ? *h + 32 : *h;
-        char nc = (*needle >= 'A' && *needle <= 'Z') ? *needle + 32 : *needle;
         if (hc == nc) {
             const char* h1 = h + 1;
             const char* n1 = needle + 1;
@@ -3055,6 +3012,46 @@ void editor_update(void) {
     editor.last_time = now;
     if (dt > EDITOR_MAX_DT) dt = EDITOR_MAX_DT;
     s_ui_dt = dt;
+
+    if (s_file_drag_active && s_file_drag_item) {
+        bool over_panel = false;
+        for (int i = 0; i < PANEL_COUNT; i++) {
+            Panel* p = &editor.panels[i];
+            if (p->t < 0.0005f) continue;
+            float px, py, pw, ph;
+            panel_get_rect(p, &px, &py, &pw, &ph);
+            if (s_ui_mx >= px && s_ui_mx <= px + pw && s_ui_my >= py && s_ui_my <= py + ph) {
+                over_panel = true; break;
+            }
+        }
+
+        if (!over_panel) {
+            if (!s_placement_active) {
+                const char* ext = strrchr(s_file_drag_item->name, '.');
+                if (ext && (strcasecmp(ext, ".gltf") == 0 || strcasecmp(ext, ".glb") == 0)) {
+                    extern bool load_gltf(const char*, Scene*);
+                    if (load_gltf(s_file_drag_item->full_path, &scene)) {
+                        s_placement_mesh_idx = scene.gltf_instances[scene.gltf_instance_count - 1].mesh_start_index;
+                        s_placement_active = true;
+                        inspector_select_mesh(s_placement_mesh_idx);
+                    }
+                }
+            }
+
+            if (s_placement_active && s_placement_mesh_idx >= 0) {
+                extern bool gizmo_get_y0_intersection(double mx, double my, vec3 out_pos);
+                vec3 target_pos;
+                if (gizmo_get_y0_intersection(s_ui_mx, s_ui_my, target_pos)) {
+                    Mesh* m = &scene.meshes.items[s_placement_mesh_idx];
+                    m->local_transform[3][0] = target_pos[0];
+                    m->local_transform[3][1] = 0.0f;
+                    m->local_transform[3][2] = target_pos[2];
+                    glm_mat4_copy(m->local_transform, m->model);
+                    markMeshesSSBODirty(&context);
+                }
+            }
+        }
+    }
 
     if (s_grab_active) {
         apply_grab_update();
