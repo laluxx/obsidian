@@ -1,0 +1,29 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inTexture;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform PC {
+    vec2 invSize;
+} pc;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    vec2 outSize = 1.0 / pc.invSize;
+    if (pos.x >= int(outSize.x) || pos.y >= int(outSize.y)) return;
+
+    ivec2 inPos = pos * 2;
+    ivec2 inSize = textureSize(inTexture, 0);
+
+    // AAA Math Fix: Manual 4-tap max using texelFetch.
+    // This perfectly handles NPOT (Non-Power-Of-Two) resolutions by clamping to the valid edge.
+    // Bypassing the hardware sampler guarantees we never drop or blur a single pixel!
+    float d0 = texelFetch(inTexture, min(inPos + ivec2(0, 0), inSize - 1), 0).r;
+    float d1 = texelFetch(inTexture, min(inPos + ivec2(1, 0), inSize - 1), 0).r;
+    float d2 = texelFetch(inTexture, min(inPos + ivec2(0, 1), inSize - 1), 0).r;
+    float d3 = texelFetch(inTexture, min(inPos + ivec2(1, 1), inSize - 1), 0).r;
+
+    float maxDepth = max(max(d0, d1), max(d2, d3));
+    imageStore(outImage, pos, vec4(maxDepth, 0.0, 0.0, 0.0));
+}

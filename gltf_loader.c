@@ -620,6 +620,11 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
     }
 
     if (index_count > 0 && indices != NULL) {
+        // AAA Optimization: Spatially sort triangles before any other optimization.
+        // This guarantees that triangles physically near each other in 3D space
+        // are packed together in the index buffer, slashing meshlet bounding sphere radiuses.
+        meshopt_spatialSortTriangles(indices, indices, index_count, &final_vertices[0].pos[0], final_vertex_count, sizeof(Vertex));
+
         meshopt_optimizeVertexCache(indices, indices, index_count, final_vertex_count);
         meshopt_optimizeOverdraw(indices, indices, index_count, &final_vertices[0].pos[0], final_vertex_count, sizeof(Vertex), 1.05f);
         meshopt_optimizeVertexFetch(final_vertices, indices, index_count, final_vertices, final_vertex_count, sizeof(Vertex));
@@ -653,7 +658,7 @@ static Mesh create_mesh_from_primitive(cgltf_primitive* prim, cgltf_data* data, 
             mo_meshlets, final_meshlet_vertices, final_meshlet_triangles,
             final_indices, final_index_count,
             &final_vertices[0].pos[0], final_vertex_count, sizeof(Vertex),
-            64, 124, 0.0f
+            64, 124, 0.7f // AAA Optimization: Cone Weight. Groups triangles with identical normals to weaponize Task Shader backface culling.
             );
 
         for (size_t i = 0; i < final_meshlet_count; i++) {

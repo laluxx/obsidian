@@ -46,9 +46,9 @@ typedef struct {
     VkDescriptorPool     descriptorPool2D;
 
     // ── pipeline layouts ─────────────────────────────────────────────
-    VkPipelineLayout     pipelineLayout;           // 3D solid + line
-    VkPipelineLayout     pipelineLayoutTextured3D; // 3D textured + SDF3D
-    VkPipelineLayout pipelineLayoutIndirect;
+    VkPipelineLayout      pipelineLayout;           // 3D solid + line
+    VkPipelineLayout      pipelineLayoutTextured3D; // 3D textured + SDF3D
+    VkPipelineLayout      pipelineLayoutIndirect;
     VkPipeline            computeCullPipeline;
     VkPipelineLayout      computeCullPipelineLayout;
     VkDescriptorSetLayout computeCullSetLayout;
@@ -60,9 +60,9 @@ typedef struct {
     VkDescriptorSetLayout computeCompactSetLayout;
     VkDescriptorPool      computeCompactPool;
     VkDescriptorSet       computeCompactSets[MAX_FRAMES_IN_FLIGHT];
-    VkBuffer         frustumUBOBuffer[4];
-    VkDeviceMemory   frustumUBOMemory[4];
-    void* frustumUBOMapped[4];
+    VkBuffer              frustumUBOBuffer[4];
+    VkDeviceMemory        frustumUBOMemory[4];
+    void*                 frustumUBOMapped[4];
 
     VkPipelineLayout     pipelineLayout2D;         // 2D color
     VkPipelineLayout     pipelineLayoutTextured2D; // 2D textured + SDF2D
@@ -205,7 +205,7 @@ typedef struct {
     VkDescriptorSet       lightingSets[MAX_FRAMES_IN_FLIGHT];
     VkBuffer              lightingUBO[MAX_FRAMES_IN_FLIGHT];
     VkDeviceMemory        lightingUBOMemory[MAX_FRAMES_IN_FLIGHT];
-    void* lightingUBOMapped[MAX_FRAMES_IN_FLIGHT];
+    void*                 lightingUBOMapped[MAX_FRAMES_IN_FLIGHT];
     /* LightingData is defined in renderer.h — use a raw byte buffer here
        to break the circular dependency. Cast to LightingData* at use sites. */
     _Alignas(16) uint8_t  lightingDataRaw[1024];  // expanded for shadow matrices

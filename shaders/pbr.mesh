@@ -69,6 +69,25 @@ struct Meshlet {
 
 layout(set = 1, binding = 0) uniform sampler2D textures[];
 
+struct DirLight { vec4 direction; vec4 color; };
+struct PointLight { vec4 position; vec4 color; };
+layout(set = 3, binding = 0) uniform LightingUBO {
+    DirLight   sun;
+    PointLight pointLights[8];
+    int        pointLightCount;
+    float      ambientIntensity;
+    int        iblEnabled;
+    int        _pad;
+    vec4       cameraPos;
+    mat4       cascadeSpace[4];
+    vec4       cascadeSplits;
+    mat4       cullSpace;
+    vec4       cullCameraPos;
+    mat4       prev_vp;
+    int        freezeCulling;
+    int        _pad2[3];
+} lighting;
+
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer { MeshData meshes[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer MeshletBuffer { Meshlet meshlets[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer { float data[]; };
@@ -196,7 +215,8 @@ void main() {
 
         vec3 B = cross(N, T) * inTangent.w;
 
-        gl_MeshVerticesEXT[i].gl_Position = ubo.vp * worldPos;
+        gl_MeshVerticesEXT[i].gl_Position = pc.cascadeIndex >= 0 ? (lighting.cascadeSpace[pc.cascadeIndex] * worldPos) : (ubo.vp * worldPos);
+        outWorldPos[i] = worldPos.xyz;
         outWorldPos[i] = worldPos.xyz;
         outTexCoord[i] = inTexCoord;
         outColor[i] = inColor;

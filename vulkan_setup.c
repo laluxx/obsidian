@@ -55,6 +55,19 @@ VkDeviceMemory dynamicBoundsBufferMemory[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE
 VkPipeline refitBoundsPipeline = VK_NULL_HANDLE;
 VkPipelineLayout refitBoundsPipelineLayout = VK_NULL_HANDLE;
 
+// HZB Globals
+VkImage hzbImage[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+VkDeviceMemory hzbMemory[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+VkImageView hzbView[MAX_FRAMES_IN_FLIGHT] = {VK_NULL_HANDLE};
+VkImageView hzbMipViews[MAX_FRAMES_IN_FLIGHT][16] = {{VK_NULL_HANDLE}};
+VkSampler hzbSampler = VK_NULL_HANDLE;
+uint32_t hzbMipCount = 1;
+VkDescriptorPool hzbDescriptorPool = VK_NULL_HANDLE;
+VkDescriptorSetLayout hzbSetLayout = VK_NULL_HANDLE;
+VkDescriptorSet hzbSets[MAX_FRAMES_IN_FLIGHT][16] = {{VK_NULL_HANDLE}};
+VkPipeline hzbReducePipeline = VK_NULL_HANDLE;
+VkPipelineLayout hzbReducePipelineLayout = VK_NULL_HANDLE;
+
 VkBuffer megaMeshletVertexBuffer = VK_NULL_HANDLE;
 VkDeviceMemory megaMeshletVertexMemory = VK_NULL_HANDLE;
 uint32_t megaMeshletVertexBufferSize = 0;
@@ -435,6 +448,7 @@ void createLogicalDevice(VulkanContext* ctx)
         .runtimeDescriptorArray                       = VK_TRUE,
         .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE,
         .shaderSampledImageArrayNonUniformIndexing    = VK_TRUE,
+        .samplerFilterMinmax                          = VK_TRUE, //  Optimization: Hardware MAX reduction for HZB!
     };
 
     VkPhysicalDeviceVulkan13Features features13 = {
@@ -442,7 +456,7 @@ void createLogicalDevice(VulkanContext* ctx)
         .pNext                  = &features12,
         .dynamicRendering       = VK_TRUE,
         .shaderDemoteToHelperInvocation = VK_TRUE,
-        .maintenance4           = VK_TRUE // AAA: Enabled natively in Vulkan 1.3!
+        .maintenance4           = VK_TRUE // : Enabled natively in Vulkan 1.3!
     };
 
     VkPhysicalDeviceMeshShaderFeaturesEXT meshFeatures = {
@@ -507,7 +521,7 @@ void createSwapChain(VulkanContext* ctx)
         .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         .imageExtent      = ext,
         .imageArrayLayers = 1,
-        // AAA FIX: Allow Vulkan to copy FROM the swapchain for our screen-space refraction!
+        //  FIX: Allow Vulkan to copy FROM the swapchain for our screen-space refraction!
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform     = caps.currentTransform,
@@ -809,7 +823,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
                                                      STAGE(VK_SHADER_STAGE_MESH_BIT_EXT, msPBR),
                                                      STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsPBR) };
 
-    // AAA: Legacy pipeline for primitives that don't have pre-calculated Meshlets!
+    // : Legacy pipeline for primitives that don't have pre-calculated Meshlets!
     VkPipelineShaderStageCreateInfo ssPBR_Legacy[2] = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vsPBR),
                                                         STAGE(VK_SHADER_STAGE_FRAGMENT_BIT, fsPBR) };
     VkPipelineShaderStageCreateInfo ss2DColor[2] = { STAGE(VK_SHADER_STAGE_VERTEX_BIT,   vs2D),
@@ -846,7 +860,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
         .depthAttachmentFormat = ctx->depthFormat,
     };
 
-    // AAA: Dedicated un-culled rasterizer for the Skybox (since we are inside it!)
+    // : Dedicated un-culled rasterizer for the Skybox (since we are inside it!)
     VkPipelineRasterizationStateCreateInfo rastSkybox = makeRasterizer(1.0f);
     rastSkybox.cullMode = VK_CULL_MODE_NONE;
 
@@ -878,7 +892,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pVertexInputState   = &viEmpty, .pInputAssemblyState = &iaLine,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastLW, .pMultisampleState = &kMultisampling,
-            .pColorBlendState    = &blend,  .pDepthStencilState= &depth2D,
+            .pColorBlendState    = &blend,  .pDepthStencilState= &depth3D,
             .pDynamicState       = &kDynamicStateLine,
             .layout              = ctx->pipelineLayout,
         },
@@ -911,8 +925,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
         {
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &shadowRenderingCI,
-            .stageCount          = 2, .pStages                = ssShadowMesh, // AAA: Use the Mesh Shaders!
-            .pVertexInputState   = NULL, .pInputAssemblyState = NULL,         // AAA: Mesh Shaders skip input assembly
+            .stageCount          = 2, .pStages                = ssShadowMesh, // : Use the Mesh Shaders!
+            .pVertexInputState   = NULL, .pInputAssemblyState = NULL,         // : Mesh Shaders skip input assembly
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastShadow, .pMultisampleState  = &kMultisampling,
             .pColorBlendState    = NULL, .pDepthStencilState = &depth3D,
@@ -955,7 +969,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
 
     /* One PBR pipeline serves all 3D draw paths */
     ctx->graphicsPipeline           = pipelines[0];
-    ctx->graphicsPipelineTextured3D = pipelines[6]; // AAA: Immediate mode uses the legacy pipeline!
+    ctx->graphicsPipelineTextured3D = pipelines[6]; // : Immediate mode uses the legacy pipeline!
     ctx->graphicsPipelineLine       = pipelines[1];
     pipelineIndirectSolid           = pipelines[0];
     pipelineIndirectTextured        = pipelines[0];
@@ -984,8 +998,20 @@ void createIndirectPipelineLayout(VulkanContext* ctx)
 }
 
 #include "refit_bounds.comp.spv.h"
+#include "hzb_reduce.comp.spv.h"
 
 void createComputeCullPipeline(VulkanContext* ctx) {
+    // --- HZB Reduce Pipeline ---
+    VkPushConstantRange hzbPcRange = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = sizeof(float) * 2 };
+    VkPipelineLayoutCreateInfo hzbPlci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &hzbSetLayout, .pushConstantRangeCount = 1, .pPushConstantRanges = &hzbPcRange };
+    vkCreatePipelineLayout(ctx->device, &hzbPlci, NULL, &hzbReducePipelineLayout);
+
+    VkShaderModule hzbModule = createShaderModule(ctx->device, hzb_reduce_comp_spv, sizeof(hzb_reduce_comp_spv));
+    VkComputePipelineCreateInfo hzbCpci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = hzbModule, .pName = "main" }, .layout = hzbReducePipelineLayout };
+    vkCreateComputePipelines(ctx->device, VK_NULL_HANDLE, 1, &hzbCpci, NULL, &hzbReducePipeline);
+    vkDestroyShaderModule(ctx->device, hzbModule, NULL);
+
+    // --- Refit Bounds Pipeline ---
     VkPushConstantRange pcRange = {
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         .offset     = 0,
@@ -1200,7 +1226,7 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
     };
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
 
-    pushConstants.cascadeIndex = -1; // AAA CRITICAL FIX: Reset from shadow pass!
+    pushConstants.cascadeIndex = -1; //  CRITICAL FIX: Reset from shadow pass!
     pushConstants.meshIndex    = -1;
     fill_gpu_addresses(ctx);
 
@@ -1218,6 +1244,23 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
             uint32_t taskGroups = (m->meshletCount + 31) / 32;
             pfnCmdDrawMeshTasksEXT(cmd, taskGroups, 1, 1);
         }
+    }
+
+    // --- Immediate Mode / Legacy Primitives (Sphere, Cube, etc.) ---
+    if (ctx->indirectDrawCount > 0) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphicsPipelineTextured3D);
+        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        pushConstants.cascadeIndex = -1;
+        pushConstants.meshIndex = -1; // Use indirect instance ID
+        fill_gpu_addresses(ctx); // Inherently binds the megaVertexBufferAddr containing the dynamic uploads
+
+        vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+
+        VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+        VkDeviceSize offset = (ctx->currentFrame * drawSize); // Start from 0 to include non-meshlet scene meshes!
+
+        vkCmdDrawIndexedIndirect(cmd, ctx->indirectBuffer, offset, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
     }
 
     if (skyboxEnabled && iblSkyboxView != VK_NULL_HANDLE) {
@@ -1362,7 +1405,8 @@ void createDepthResources(VulkanContext* ctx)
         .arrayLayers   = 1,
         .samples       = VK_SAMPLE_COUNT_1_BIT,
         .tiling        = VK_IMAGE_TILING_OPTIMAL,
-        .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        //  Optimization: Allow the Compute Shader to read Mip 0 of the depth buffer for HZB Generation!
+        .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
     };
@@ -1395,7 +1439,7 @@ void createDepthResources(VulkanContext* ctx)
         fprintf(stderr, "Failed to create depth image view\n"); exit(EXIT_FAILURE);
     }
 
-    // AAA Screen-Space Transmission Buffer (Multi-Buffered to prevent temporal race conditions!)
+    //  Screen-Space Transmission Buffer (Multi-Buffered to prevent temporal race conditions!)
     if (transmissionSampler == VK_NULL_HANDLE) {
         VkSamplerCreateInfo tSampCI = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
         vkCreateSampler(ctx->device, &tSampCI, NULL, &transmissionSampler);
@@ -1416,6 +1460,74 @@ void createDepthResources(VulkanContext* ctx)
         if (ctx->lightingSets[i] != VK_NULL_HANDLE) {
             VkDescriptorImageInfo dInfo = { .sampler = transmissionSampler, .imageView = transmissionView[i], .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[i], .dstBinding = 6, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dInfo };
+            vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        }
+    }
+
+    // ---  HZB RESOURCE ALLOCATION ---
+    uint32_t hzbBaseW = ctx->swapChainExtent.width > 1 ? ctx->swapChainExtent.width / 2 : 1;
+    uint32_t hzbBaseH = ctx->swapChainExtent.height > 1 ? ctx->swapChainExtent.height / 2 : 1;
+
+    hzbMipCount = (uint32_t)floor(log2(hzbBaseW > hzbBaseH ? hzbBaseW : hzbBaseH)) + 1;
+    if (hzbMipCount > 16) hzbMipCount = 16;
+
+    if (hzbSampler == VK_NULL_HANDLE) {
+        VkSamplerReductionModeCreateInfoEXT redInfo = { .sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO_EXT, .reductionMode = VK_SAMPLER_REDUCTION_MODE_MAX };
+        VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = &redInfo, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = 16.0f };
+        vkCreateSampler(ctx->device, &sci, NULL, &hzbSampler);
+    }
+
+    if (hzbSetLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding b[2] = {
+            { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT },
+            { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT }
+        };
+        VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = b };
+        vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &hzbSetLayout);
+
+        VkDescriptorPoolSize ps[2] = { {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 32} };
+        VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 32, .poolSizeCount = 2, .pPoolSizes = ps };
+        vkCreateDescriptorPool(ctx->device, &pci, NULL, &hzbDescriptorPool);
+    }
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        //  Fix: Base extent is strictly Half-Resolution so the 2x2 Compute Shader downsample mathematically aligns with Mip 0!
+        VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32_SFLOAT, .extent = {hzbBaseW, hzbBaseH, 1}, .mipLevels = hzbMipCount, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        vkCreateImage(ctx->device, &ici, NULL, &hzbImage[i]);
+
+        VkMemoryRequirements req; vkGetImageMemoryRequirements(ctx->device, hzbImage[i], &req);
+        VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = findMemoryType(ctx->physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+        vkAllocateMemory(ctx->device, &ai, NULL, &hzbMemory[i]);
+        vkBindImageMemory(ctx->device, hzbImage[i], hzbMemory[i], 0);
+
+        VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = hzbImage[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R32_SFLOAT, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, hzbMipCount, 0, 1} };
+        vkCreateImageView(ctx->device, &vci, NULL, &hzbView[i]);
+
+        for (uint32_t m = 0; m < hzbMipCount; m++) {
+            vci.subresourceRange.baseMipLevel = m;
+            vci.subresourceRange.levelCount = 1;
+            vkCreateImageView(ctx->device, &vci, NULL, &hzbMipViews[i][m]);
+
+            VkDescriptorSetAllocateInfo dsai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = hzbDescriptorPool, .descriptorSetCount = 1, .pSetLayouts = &hzbSetLayout };
+            vkAllocateDescriptorSets(ctx->device, &dsai, &hzbSets[i][m]);
+
+            VkDescriptorImageInfo dImgSamp = { .sampler = hzbSampler, .imageView = (m == 0) ? ctx->depthImageView : hzbMipViews[i][m-1], .imageLayout = (m == 0) ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorImageInfo dImgStor = { .imageView = hzbMipViews[i][m], .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+
+            VkWriteDescriptorSet w[2] = {
+                { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = hzbSets[i][m], .dstBinding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dImgSamp },
+                { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = hzbSets[i][m], .dstBinding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .pImageInfo = &dImgStor }
+            };
+            vkUpdateDescriptorSets(ctx->device, 2, w, 0, NULL);
+        }
+
+        // We bind the CURRENT frame's HZB to the NEXT frame's lighting set!
+        // This inherently prevents cyclical logic loops and lets the Task Shader cull using
+        // the completely finalized depth map of the previous frame.
+        if (ctx->lightingSets[i] != VK_NULL_HANDLE) {
+            uint32_t nextFrame = (i + 1) % MAX_FRAMES_IN_FLIGHT;
+            VkDescriptorImageInfo hzbInfo = { .sampler = hzbSampler, .imageView = hzbView[i], .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[nextFrame], .dstBinding = 7, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &hzbInfo };
             vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
         }
     }
@@ -1461,6 +1573,11 @@ void createUniformBuffer(VulkanContext* ctx)
 
 void updateUniformBuffer(VulkanContext* ctx)
 {
+    //  Optimization: Capture prev_vp from the PREVIOUS frame's UBO mapped data before we do anything else
+    uint32_t prevFrame = (ctx->currentFrame + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+    UniformBufferObject* prev_ubo = (UniformBufferObject*)ctx->uboMapped[prevFrame];
+    glm_mat4_copy(prev_ubo->vp, CTX_LIGHTING(ctx)->prev_vp);
+
     UniformBufferObject ubo;
     glm_mat4_copy(camera.view_matrix,       ubo.view);
     glm_mat4_copy(camera.projection_matrix, ubo.proj);
@@ -1582,7 +1699,7 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     // 5. Execute the Graph!
     rg_execute(ctx->renderGraph, cmd);
 
-    // 6. AAA SCREEN-SPACE TRANSMISSION COPY, TRANSMISSION PASS & TRANSPARENT PASS
+    // 6.  SCREEN-SPACE TRANSMISSION COPY, TRANSMISSION PASS & TRANSPARENT PASS
     // Always do the screen copy — compact.comp may have put transmission meshes in
     // stream 1 even if indirectDrawCount == opaqueMeshCount from the CPU side.
     // The copy is cheap (single blit) and the draw calls are guarded by indirect counts.
@@ -1678,7 +1795,7 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
 
-        // AAA CRITICAL FIX: line_renderer_draw (executed in the main pass) corrupted the global
+        //  CRITICAL FIX: line_renderer_draw (executed in the main pass) corrupted the global
         // pushConstants state (setting meshIndex > 0 and pointing to the line vertex buffer).
         // We MUST restore the state to use indirect instances and the mega buffer before drawing glass!
         pushConstants.cascadeIndex = -1;
@@ -1712,13 +1829,14 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
         // Draws directly over everything else in line-mode with standard depth testing
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineWireframe);
         vkCmdSetLineWidth(cmd, 1.0f); // REQUIRED: state was invalidated by previous pipeline binds!
+        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32); //  FIX: Restore Input Assembly state for legacy pipeline
         vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, (VkDeviceSize)(3 * sStride) * sizeof(VkDrawIndexedIndirectCommand),
                                       ctx->drawCountBuffer, 3 * 4, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
 
         vkCmdEndRendering(cmd);
     }
 
-    // 7. AAA 2D UI PASS (Always draws last, OVER the glass!)
+    // 7.  2D UI PASS (Always draws last, OVER the glass!)
     VkRenderingAttachmentInfo uiColorAtt = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = ctx->swapChainImageViews[imageIndex], .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
     VkRenderingAttachmentInfo uiDepthAtt = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = ctx->depthImageView, .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
     VkRenderingInfo uiRenderInfo = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { {0,0}, ctx->swapChainExtent }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &uiColorAtt, .pDepthAttachment = &uiDepthAtt };
@@ -1739,6 +1857,43 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
     };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                          0, 0, NULL, 0, NULL, 1, &presentBarrier);
+
+    // 8.  HZB DOWNSAMPLE PASS (Runs asynchronously at the very end of the frame)
+    if (hzbReducePipeline != VK_NULL_HANDLE) {
+        // Transition main depth buffer to read-only for Mip 0 sampling
+        VkImageMemoryBarrier depthBar = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = ctx->depthImage, .subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }, .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &depthBar);
+
+        // Transition entire HZB image to GENERAL for compute writes
+        VkImageMemoryBarrier hzbBar = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = hzbImage[ctx->currentFrame], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, hzbMipCount, 0, 1 }, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &hzbBar);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hzbReducePipeline);
+
+        uint32_t hzbBaseW = ctx->swapChainExtent.width > 1 ? ctx->swapChainExtent.width / 2 : 1;
+        uint32_t hzbBaseH = ctx->swapChainExtent.height > 1 ? ctx->swapChainExtent.height / 2 : 1;
+        uint32_t mipW = hzbBaseW;
+        uint32_t mipH = hzbBaseH;
+
+        for (uint32_t m = 0; m < hzbMipCount; m++) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hzbReducePipelineLayout, 0, 1, &hzbSets[ctx->currentFrame][m], 0, NULL);
+
+            float invSize[2] = { 1.0f / (float)mipW, 1.0f / (float)mipH };
+            vkCmdPushConstants(cmd, hzbReducePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(float)*2, invSize);
+            vkCmdDispatch(cmd, (mipW + 15) / 16, (mipH + 15) / 16, 1);
+
+            // Wait for this mip to finish writing before the next mip reads from it
+            VkImageMemoryBarrier mipSync = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = hzbImage[ctx->currentFrame], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, m, 1, 0, 1 }, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &mipSync);
+
+            if (mipW > 1) mipW /= 2;
+            if (mipH > 1) mipH /= 2;
+        }
+
+        // Revert depthImage so it's ready for the next frame's clear and render pass
+        depthBar.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; depthBar.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; depthBar.srcAccessMask = VK_ACCESS_SHADER_READ_BIT; depthBar.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1, &depthBar);
+    }
 
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         fprintf(stderr, "Failed to record command buffer\n"); exit(EXIT_FAILURE);
@@ -1876,6 +2031,16 @@ void cleanupSwapChainResources(VulkanContext* ctx, VkSwapchainKHR oldSwapchain)
         free(ctx->swapChainImageViews);
         ctx->swapChainImageViews = NULL;
     }
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (hzbView[i]) { vkDestroyImageView(ctx->device, hzbView[i], NULL); hzbView[i] = VK_NULL_HANDLE; }
+        if (hzbImage[i]) { vkDestroyImage(ctx->device, hzbImage[i], NULL); hzbImage[i] = VK_NULL_HANDLE; }
+        if (hzbMemory[i]) { vkFreeMemory(ctx->device, hzbMemory[i], NULL); hzbMemory[i] = VK_NULL_HANDLE; }
+        for (uint32_t m = 0; m < 16; m++) {
+            if (hzbMipViews[i][m]) { vkDestroyImageView(ctx->device, hzbMipViews[i][m], NULL); hzbMipViews[i][m] = VK_NULL_HANDLE; }
+        }
+    }
+    if (hzbDescriptorPool) { vkResetDescriptorPool(ctx->device, hzbDescriptorPool, 0); } // Stop the out of memory crash on resize!
+
     if (ctx->depthImageView   != VK_NULL_HANDLE) { vkDestroyImageView(ctx->device, ctx->depthImageView,  NULL); ctx->depthImageView   = VK_NULL_HANDLE; }
     if (ctx->depthImage       != VK_NULL_HANDLE) { vkDestroyImage    (ctx->device, ctx->depthImage,      NULL); ctx->depthImage       = VK_NULL_HANDLE; }
     if (ctx->depthImageMemory != VK_NULL_HANDLE) { vkFreeMemory      (ctx->device, ctx->depthImageMemory,NULL); ctx->depthImageMemory = VK_NULL_HANDLE; }
@@ -1931,7 +2096,7 @@ void recreateSwapChain(VulkanContext* ctx)
         .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         .imageExtent      = ext,
         .imageArrayLayers = 1,
-        // AAA FIX: Allow Vulkan to copy FROM the swapchain for our screen-space refraction!
+        //  FIX: Allow Vulkan to copy FROM the swapchain for our screen-space refraction!
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform     = caps.currentTransform,
@@ -2047,6 +2212,12 @@ void cleanup(VulkanContext* ctx)
     if (shadowPipeline) { vkDestroyPipeline(ctx->device, shadowPipeline, NULL); shadowPipeline = VK_NULL_HANDLE; }
     if (refitBoundsPipeline) { vkDestroyPipeline(ctx->device, refitBoundsPipeline, NULL); refitBoundsPipeline = VK_NULL_HANDLE; }
     if (refitBoundsPipelineLayout) { vkDestroyPipelineLayout(ctx->device, refitBoundsPipelineLayout, NULL); refitBoundsPipelineLayout = VK_NULL_HANDLE; }
+
+    if (hzbReducePipeline) { vkDestroyPipeline(ctx->device, hzbReducePipeline, NULL); hzbReducePipeline = VK_NULL_HANDLE; }
+    if (hzbReducePipelineLayout) { vkDestroyPipelineLayout(ctx->device, hzbReducePipelineLayout, NULL); hzbReducePipelineLayout = VK_NULL_HANDLE; }
+    if (hzbDescriptorPool) { vkDestroyDescriptorPool(ctx->device, hzbDescriptorPool, NULL); hzbDescriptorPool = VK_NULL_HANDLE; }
+    if (hzbSetLayout) { vkDestroyDescriptorSetLayout(ctx->device, hzbSetLayout, NULL); hzbSetLayout = VK_NULL_HANDLE; }
+    if (hzbSampler) { vkDestroySampler(ctx->device, hzbSampler, NULL); hzbSampler = VK_NULL_HANDLE; }
 
 #undef DESTROY_PIPELINE
 #undef DESTROY_LAYOUT
@@ -2579,7 +2750,7 @@ uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, Meshle
     ctx->pendingMeshletBoundsCopies[ctx->pendingMeshletBoundsCopyCount++] = (VkBufferCopy){ ctx->uploadStagingOffset, dstOffsetBounds, boundsSize };
     ctx->uploadStagingOffset += boundsSize;
 
-    // AAA Batched Upload: Queue skins into the pending copy arrays
+    //  Batched Upload: Queue skins into the pending copy arrays
     memcpy((uint8_t*)ctx->uploadStagingMapped + ctx->uploadStagingOffset, skins, skinSize);
     if (ctx->pendingMeshletSkinCopyCount == ctx->pendingMeshletSkinCopyCapacity) {
         ctx->pendingMeshletSkinCopyCapacity *= 2;
@@ -2870,18 +3041,19 @@ void bindlessRegisterTexture(VulkanContext* ctx, uint32_t slot,
 
 void createLightingDescriptors(VulkanContext* ctx)
 {
-    VkDescriptorSetLayoutBinding b[7] = {
+    VkDescriptorSetLayoutBinding b[8] = {
         { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
         { .binding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
-        { .binding = 6, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
+        { .binding = 6, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding = 7, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT } //  HZB Map
     };
-    VkDescriptorBindingFlagsEXT flags[7] = { 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT };
-    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT flagsInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 7, .pBindingFlags = flags };
-    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &flagsInfo, .bindingCount = 7, .pBindings = b };
+    VkDescriptorBindingFlagsEXT flags[8] = { 0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT };
+    VkDescriptorSetLayoutBindingFlagsCreateInfoEXT flagsInfo = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 8, .pBindingFlags = flags };
+    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &flagsInfo, .bindingCount = 8, .pBindings = b };
     vkCreateDescriptorSetLayout(ctx->device, &lci, NULL, &ctx->lightingSetLayout);
 
     VkDescriptorPoolSize ps[2] = {
@@ -2939,7 +3111,7 @@ void createLightingDescriptors(VulkanContext* ctx)
         }
     }
 
-    // AAA FIX: If depth resources (transmission) were created before lighting, map Binding 6 now!
+    //  FIX: If depth resources (transmission) were created before lighting, map Binding 6 now!
     if (transmissionView[0] != VK_NULL_HANDLE) {
         for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
             VkDescriptorImageInfo dInfo = { .sampler = transmissionSampler, .imageView = transmissionView[f], .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -2947,6 +3119,17 @@ void createLightingDescriptors(VulkanContext* ctx)
             vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
         }
     }
+
+    //  FIX: Ensure HZB is mapped to Binding 7 on startup
+    if (hzbView[0] != VK_NULL_HANDLE) {
+        for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+            uint32_t prevFrame = (f + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+            VkDescriptorImageInfo dInfo = { .sampler = hzbSampler, .imageView = hzbView[prevFrame], .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx->lightingSets[f], .dstBinding = 7, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &dInfo };
+            vkUpdateDescriptorSets(ctx->device, 1, &w, 0, NULL);
+        }
+    }
+
     fprintf(stdout, "Lighting UBO descriptors created\n");
 }
 
@@ -2981,7 +3164,7 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
            words * MAX_FRAMES_IN_FLIGHT * sizeof(uint64_t));
 
     // ── CREATE GLOBAL JOINT SSBO ──
-    // AAA Packing: Store 3 vec4s (48 bytes) instead of mat4 (64 bytes). Saves 25% memory!
+    //  Packing: Store 3 vec4s (48 bytes) instead of mat4 (64 bytes). Saves 25% memory!
     VkDeviceSize jointSize = 16384 * 48;
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         createBuffer(ctx, jointSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &jointSSBO[i], &jointSSBOMemory[i]);
@@ -3116,7 +3299,7 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
         // regardless of whether it's a dynamic morph target or a static mega-buffer mesh.
         // Otherwise, non-indexed glTF primitives evaluate to 0 and become completely invisible.
         cmds[i].indexCount    = (m->indexCount == 0) ? m->vertexCount : m->indexCount;
-        cmds[i].instanceCount = 1;
+        cmds[i].instanceCount = (m->megaBaseMeshlet != UINT32_MAX) ? 0 : 1;
         cmds[i].firstIndex    = (m->megaBaseIndex == UINT32_MAX) ? 0 : m->megaBaseIndex;
 
         if (m->megaBaseVertex != UINT32_MAX) {
@@ -3125,12 +3308,9 @@ void updateMeshSSBOAndIndirect(VulkanContext* ctx, Meshes* meshes)
             cmds[i].vertexOffset  = (int32_t)(ctx->megaVertexBufferOffset + (ctx->currentFrame * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex);
         }
 
-        // AAA DOD ARCHITECTURE: The firstInstance points to the completely STATIC SSBO slot!
+        // DOD ARCHITECTURE: The firstInstance points to the completely STATIC SSBO slot!
         cmds[i].firstInstance = mesh_idx;
     }
-
-    // We completely removed markMeshesSSBODirty(ctx); here.
-    // The SSBO is now completely static. It only updates when meshes are actively added/removed!
 }
 
 /* Call once per frame from beginFrame - uploads SSBO only to currentFrame if dirty */

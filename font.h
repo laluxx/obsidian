@@ -60,9 +60,9 @@ typedef struct {
 
 void init_free_type(void);
 Font *load_font(const char *fontPath, int fontSize);
+Font *load_font_from_memory(const unsigned char *font_data, size_t data_size, int fontSize);
 void destroy_font(Font* font);
 
-// UPDATED SIGNATURE - now takes scale parameter
 void text(Font* font, const char* text, float x, float y, Color color);
 void text_with_size(Font* font, const char* text, float x, float y, Color color, float size);
 void text3D(Font* font, const char* text_str, vec3 position, float size, Color color);
@@ -72,7 +72,6 @@ float font_height(Font* font);
 float font_width(Font* font);
 float character_width(Font* font, uint32_t codepoint);
 
-// Internal: Get or load a character
 Character* font_get_character(Font* font, uint32_t codepoint);
 void font_flush_updates(Font* font);
 bool save_font_atlas_png(Font* font, const char* filename);

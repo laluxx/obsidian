@@ -1,13 +1,13 @@
 CC = gcc
 CFLAGS = -std=c23 -Wall -Wextra -g -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
-LDFLAGS = -fuse-ld=mold -lvulkan -lglfw -lX11 -lcglm -lm -lminiz -lmeshoptimizer $(shell pkg-config --libs freetype2 guile-3.0)
+LDFLAGS = -fuse-ld=mold -lvulkan -lglfw -lX11 -lcglm -lm -lminiz -lmeshoptimizer $(LIBRARIES) -Wl,-rpath,vendor/joltc/build/lib -ljoltc $(shell pkg-config --libs freetype2 guile-3.0)
 
 GLSLANG = glslangValidator
 XXD = xxd
 
 # Paths
-INCLUDES = -I/usr/include -I. -I$(SHADER_DIR)
-LIBRARIES = -L/usr/lib/x86_64-linux-gnu
+INCLUDES = -I/usr/include -I. -I$(SHADER_DIR) -Ieditor -Ivendor -Ivendor/joltc/include
+LIBRARIES = -L/usr/lib/x86_64-linux-gnu -Lvendor/joltc/build/lib
 INSTALL_DIR = /usr
 
 # Project settings
@@ -15,12 +15,12 @@ LIB_NAME = libobsidian
 EXECUTABLE = obsidian
 
 # Source files
-LIB_SOURCES = $(filter-out main.c, $(wildcard *.c))
+LIB_SOURCES = $(filter-out main.c, $(wildcard *.c editor/*.c vendor/*.c))
 LIB_OBJECTS = $(LIB_SOURCES:.c=.o)
 MAIN_OBJECT = main.o
 ALL_OBJECTS = $(LIB_OBJECTS) $(MAIN_OBJECT)
 
-HEADERS = $(wildcard *.h)
+HEADERS = $(wildcard *.h editor/*.h vendor/*.h)
 
 # Shaders
 SHADER_DIR = shaders
@@ -32,11 +32,16 @@ SHADER_MESHS = $(wildcard $(SHADER_DIR)/*.mesh)
 SHADER_SPVS = $(SHADER_VERTS:.vert=.vert.spv) $(SHADER_FRAGS:.frag=.frag.spv) $(SHADER_COMPS:.comp=.comp.spv) $(SHADER_TASKS:.task=.task.spv) $(SHADER_MESHS:.mesh=.mesh.spv)
 SPV_HEADERS = $(SHADER_SPVS:.spv=.spv.h)
 
+# Fonts
+FONT_DIR = assets/fonts
+FONT_TTFS = $(wildcard $(FONT_DIR)/*.ttf)
+FONT_HEADERS = $(FONT_TTFS:.ttf=.h)
+
 # Default target - build executable directly
 all:
 	@$(MAKE) -j$$(nproc) internal_build
 
-internal_build: $(SPV_HEADERS) $(EXECUTABLE)
+internal_build: $(SPV_HEADERS) $(FONT_HEADERS) $(EXECUTABLE)
 
 # Compile shaders to SPIR-V
 $(SHADER_DIR)/%.vert.spv: $(SHADER_DIR)/%.vert
@@ -50,6 +55,9 @@ $(SHADER_DIR)/%.task.spv: $(SHADER_DIR)/%.task
 $(SHADER_DIR)/%.mesh.spv: $(SHADER_DIR)/%.mesh
 	$(GLSLANG) -V --target-env vulkan1.3 $< -o $@
 # Convert SPIR-V to C header
+$(FONT_DIR)/%.h: $(FONT_DIR)/%.ttf
+	$(XXD) -i -n $(subst /,_,$(subst .,_,$(subst -,_,$(notdir $<)))) $< > $@
+
 $(SHADER_DIR)/%.spv.h: $(SHADER_DIR)/%.spv
 	$(XXD) -i -n $(subst /,_,$(subst .,_,$(notdir $<))) $< > $@
 
@@ -92,7 +100,7 @@ uninstall:
 	ldconfig
 
 clean:
-	rm -f $(ALL_OBJECTS) $(SHADER_SPVS) $(SPV_HEADERS)
+	rm -f $(ALL_OBJECTS) $(SHADER_SPVS) $(SPV_HEADERS) $(FONT_HEADERS)
 	rm -f $(LIB_NAME).a $(LIB_NAME).so $(EXECUTABLE)
 # Clean everything including shaders
 distclean: clean

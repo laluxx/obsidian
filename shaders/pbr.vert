@@ -89,6 +89,8 @@ layout(push_constant) uniform PC {
     WeightBuffer weightData;
     DummyBuffer  meshletData;
     DummyBuffer  boundsData;
+    DummyBuffer  meshletSkinData;
+    DummyBuffer  dynamicBoundsData;
     DummyBuffer  meshletVertexAddr;
     DummyBuffer  meshletTriangleAddr;
 } pc;

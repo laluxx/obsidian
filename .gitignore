@@ -1,3 +1,9 @@
+**/joltc/build/
+**/joltc/lib/
+**/joltc/bin/
+
 *.o
 *.so
 *.a
+obsidian
+assets/fonts/*.h

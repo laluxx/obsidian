@@ -38,6 +38,7 @@ typedef struct {
     vec4             cascadeSplits;
     mat4             cullSpace;   // Used for frozen/active frustum culling
     vec4             cullCameraPos; // Used for cone culling
+    mat4             prev_vp;     // AAA Optimization: HZB Reprojection
     int              freezeCulling; // 1 = frozen, 0 = active
     int              _pad2[3];
 } LightingData;
@@ -301,6 +302,13 @@ typedef struct {
     vec3  attenuationColor;
     float attenuationDistance;
     float dispersion;
+
+    // Physics
+    int collider_type;   // 0 = None, 1 = Box, 2 = Sphere
+    float mass;          // 0.0 = Static, > 0.0 = Dynamic
+    float friction;
+    float restitution;
+    uint32_t physics_body_id;
 } Mesh;
 
 typedef struct {

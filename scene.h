@@ -95,6 +95,7 @@ typedef struct {
     int32_t  mesh_index;      // Index into scene.meshes.items, -1 = group node
     bool     expanded;        // UI state: is this node expanded in the tree?
     bool     visible;         // UI state: is this node visible in viewport?
+    bool     selected_group;
 } SceneNode;
 
 typedef struct {
@@ -114,7 +115,6 @@ typedef struct {
 extern Scene scene;
 void scene_init(Scene *s);
 void scene_cleanup(Scene *s);
-void print_scene_meshes();
 
 /// Scene tree API
 

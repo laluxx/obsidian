@@ -28,9 +28,12 @@ layout(set = 3, binding = 0) uniform LightingUBO {
     vec4       cascadeSplits;
     mat4       cullSpace;
     vec4       cullCameraPos;
+    mat4       prev_vp;
     int        freezeCulling;
     int        _pad2[3];
 } lighting;
+
+layout(set = 3, binding = 7) uniform sampler2D hzbMap;
 
 struct MeshData {
     mat4  model;
@@ -139,7 +142,7 @@ void main() {
     if (meshletIdx < m.meshletCount) {
         uint globalMeshletIdx = m.meshletOffset + meshletIdx;
 
-        // AAA Phase 3: Zero-Cost Hardware Branching!
+        //  Phase 3: Zero-Cost Hardware Branching!
         // Read from dynamic buffer if skinned, otherwise static!
         MeshletBounds b = (m.jointOffset >= 0)
                         ? pc.dynamicBounds.bounds[globalMeshletIdx]
@@ -170,6 +173,59 @@ void main() {
             vec3 worldAxis = normalize(mat3(m.model) * axis);
             vec3 viewDir = normalize(worldApex - lighting.cullCameraPos.xyz);
             if (dot(viewDir, worldAxis) >= b.cone_cutoff) accept = false;
+        }
+
+        // Hierarchical Z-Buffer (HZB) Occlusion Culling
+        if (accept && pc.cascadeIndex < 0 && lighting.freezeCulling == 0) {
+            vec4 prevCenter = lighting.prev_vp * vec4(worldCenter, 1.0);
+
+            // Only cull if the sphere is strictly in front of the camera
+            if (prevCenter.w > 0.0) {
+                vec3 ndc = prevCenter.xyz / prevCenter.w;
+
+                //  Math Fix: Account for BOTH X and Y projection matrix aspect ratios!
+                vec2 ndcRadius = vec2(worldRadius * ubo.proj[0][0], worldRadius * abs(ubo.proj[1][1])) / prevCenter.w;
+
+                vec2 minUV = clamp((ndc.xy - ndcRadius) * 0.5 + 0.5, 0.0, 1.0);
+                vec2 maxUV = clamp((ndc.xy + ndcRadius) * 0.5 + 0.5, 0.0, 1.0);
+
+                // Ensure proper min/max ordering in case of inverted Y coordinate systems
+                vec2 uv0 = min(minUV, maxUV);
+                vec2 uv1 = max(minUV, maxUV);
+
+                // Calculate the exact Mip Level where our bounding box is roughly 2x2 texels
+                vec2 size = (uv1 - uv0) * vec2(textureSize(hzbMap, 0));
+                //  Math Fix: Use floor() to guarantee the AABB is between 1 and 2 texels wide.
+                float lod = clamp(floor(log2(max(max(size.x, size.y), 1.0))), 0.0, 12.0);
+
+                // 4-Tap Max Depth using Vulkan's hardware MAX reduction sampler.
+                // Because we used floor(), sampling the 4 corners guarantees a footprint that massively overcovers the AABB!
+                float d0 = textureLod(hzbMap, vec2(uv0.x, uv0.y), lod).r;
+                float d1 = textureLod(hzbMap, vec2(uv1.x, uv0.y), lod).r;
+                float d2 = textureLod(hzbMap, vec2(uv0.x, uv1.y), lod).r;
+                float d3 = textureLod(hzbMap, vec2(uv1.x, uv1.y), lod).r;
+                float maxDepth = max(max(d0, d1), max(d2, d3));
+
+                //  Math Fix: Calculate the absolute nearest point on the sphere securely.
+                // We use cullCameraPos (the previous camera) to match prev_vp precisely.
+                vec3 dirToCam = lighting.cullCameraPos.xyz - worldCenter;
+                float distToCam = length(dirToCam);
+
+                // Clamp the push distance to 99% of the distance to the camera to PREVENT the point from passing behind the near plane!
+                vec3 nearestWorld = worldCenter + (dirToCam / distToCam) * min(worldRadius, distToCam * 0.99);
+                vec4 nearestClip = lighting.prev_vp * vec4(nearestWorld, 1.0);
+
+                // Only evaluate depth if the projected point is strictly in front of the camera lens (w > 0)
+                if (nearestClip.w > 0.0) {
+                    float nearestZ = nearestClip.z / nearestClip.w;
+
+                    // In standard Vulkan Depth, 1.0 is FAR, 0.0 is NEAR.
+                    // If our NEAREST point is FURTHER than the FARTHEST background depth... KILL IT.
+                    if (nearestZ > maxDepth) {
+                        accept = false;
+                    }
+                }
+            }
         }
     }
 

@@ -16,6 +16,9 @@ typedef struct {
     Color accent;
     Color red;
     Color blue;
+    Color bound;
+    Color collision;
+    Color gltf;
     Color x;
     Color y;
     Color z;
@@ -32,6 +35,8 @@ typedef struct {
     Color fs_selected;
     Color fs_tree;
     Color fs_tree_dimmed;
+    Color gizmo_sphere;
+    Color gizmo_sphere_active;
     Color gizmo_outer_circle;
     Color gizmo_outer_circle_bright;
     Color cursor;

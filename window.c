@@ -9,12 +9,27 @@
 #include <stdio.h>
 #include "font.h"
 #include "audio.h"
-
+#include "easing.h"
+#include "editor.h"
+#include "gizmo.h"
+#include "keychords.h"
+#include "vertico.h"
+#include "add_menu.h"
+#include "physics.h"
 
 float delta_time;
 float last_frame = 0.0f;
 
 static int current_cursor_mode = GLFW_CURSOR_NORMAL;
+
+extern vec3 orbitPivot;
+extern float orbitDistance;
+
+static void open_add_menu_at_cursor(void) {
+    double mx, my;
+    getCursorPos(context.window, &mx, &my);
+    add_menu_open(mx, my);
+}
 
 GLFWwindow* initWindow(int width, int height, const char* title) {
     if (!glfwInit()) {
@@ -145,6 +160,28 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
     printf("MAX supported line width: %f\n", maxLineWidth);
 
     initThemes();
+    ease_init();
+    editor_init();
+    gizmo_init();
+    vertico_init();
+    add_menu_init();
+    physics_init();
+
+
+    keychord_bind(&keymap, "A",         open_add_menu_at_cursor,   "Open Add Menu",         PRESS);
+    keychord_bind(&keymap, "<left>",    camera_snap_left,          "Camera snap left",      PRESS);
+    keychord_bind(&keymap, "<right>",   camera_snap_right,         "Camera snap right",     PRESS);
+    keychord_bind(&keymap, "<up>",      camera_snap_up,            "Camera snap up",        PRESS);
+    keychord_bind(&keymap, "<down>",    camera_snap_down,          "Camera snap down",      PRESS);
+    keychord_bind(&keymap, "TAB",       toggle_skybox,             "Toggle the skybox",     PRESS);
+    keychord_bind(&keymap, "t",         toggle_ibl_lighting,       "Toggle IBL lighting",   PRESS);
+    keychord_bind(&keymap, "l",         toggle_shadows,            "Toggle shadows",        PRESS);
+
+    keychord_bind(&keymap, "C-h c",     vertico_show_keybindings,  "Help keybindings",      PRESS);
+
+    keychord_bind(&keymap, "C-g",       keymap_reset_state,        "Reset Keymap",          PRESS);
+    keychord_bind(&keymap, "C-t",       toggle_culling_freeze,     "Toggle culling freeze", PRESS);
+    keymap_print_bindings(&keymap);
 
     return context.window;
 }
@@ -174,6 +211,8 @@ void beginFrame() {
 
     animate_scene(&scene, current_frame);
 
+    physics_step(delta_time);
+
     camera_process_keyboard(&camera, context.window, delta_time);
     camera_update(&camera);
 
@@ -195,6 +234,12 @@ void beginFrame() {
 
     flushMeshSSBO(&context, &scene.meshes);
     updateUniformBuffer(&context);
+
+    camera_update_animations(&camera, delta_time);
+    editor_update();
+    editor_render();
+    add_menu_render();
+    gizmo_render(editor.inspector.selected_mesh_index);
 }
 
 void endFrame() {
@@ -367,13 +412,11 @@ void setWindowResizeIncrements(int char_width, int char_height, int min_width, i
 #endif
 }
 
-
 void toggle_editor_mode() {
     camera.active = !camera.active;
 
     if (camera.active) {
         disableCursor();
-
         if (camera.use_look_at) {
             camera_disable_orbit_mode(&camera);
             printf("Entered FPS mode - orbit disabled, angles synced\n");
@@ -386,7 +429,83 @@ void toggle_editor_mode() {
     }
 }
 
+extern bool is_framing;
+
+extern vec3 frame_start_pos;
+extern vec3 frame_target_pos;
+extern float frame_anim_time;
+extern const float FRAME_ANIM_DURATION;
+
+void editor_frame_selected(void) {
+    if (camera.active) return; // Only frame in editor mode
+
+    vec3 target_center = {0.0f, 0.0f, 0.0f};
+    float target_dist = 10.0f;
+
+    if (editor.inspector.selected_mesh_index >= 0 && editor.inspector.selected_mesh_index < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[editor.inspector.selected_mesh_index];
+
+        vec3 local_center;
+        glm_vec3_add(m->aabbMin, m->aabbMax, local_center);
+        glm_vec3_scale(local_center, 0.5f, local_center);
+
+        vec4 lc4 = {local_center[0], local_center[1], local_center[2], 1.0f};
+        vec4 wc4;
+        glm_mat4_mulv(m->model, lc4, wc4);
+        glm_vec3_copy(wc4, target_center);
+
+        vec3 extents;
+        glm_vec3_sub(m->aabbMax, m->aabbMin, extents);
+        float scale = glm_vec3_norm((vec3){m->model[0][0], m->model[0][1], m->model[0][2]});
+        target_dist = glm_vec3_norm(extents) * scale * 1.2f;
+        if (target_dist < 2.0f) target_dist = 2.0f;
+    }
+
+    glm_vec3_copy(camera.position, frame_start_pos);
+    glm_vec3_copy(camera.front, frame_target_pos);
+    glm_vec3_scale(frame_target_pos, -target_dist, frame_target_pos);
+    glm_vec3_add(target_center, frame_target_pos, frame_target_pos);
+
+    glm_vec3_copy(target_center, orbitPivot);
+    orbitDistance = target_dist;
+
+    is_framing = true;
+    frame_anim_time = 0.0f;
+}
+
+extern vec3 frame_start_pos;
+extern vec3 frame_target_pos;
+extern float frame_anim_time;
+extern const float FRAME_ANIM_DURATION;
+
+extern bool is_zooming;
+extern vec3 zoom_start_pos;
+extern vec3 zoom_target_pos;
+extern float zoom_anim_time;
+extern const float ZOOM_ANIM_DURATION;
+
 void process_editor_movement(Camera* cam, float deltaTime) {
+    if (is_framing) {
+        is_zooming = false;
+        frame_anim_time += deltaTime;
+        float t = frame_anim_time / FRAME_ANIM_DURATION;
+        if (t >= 1.0f) {
+            t = 1.0f;
+            is_framing = false;
+        }
+        float ease_t = ease_expo_out(t);
+        glm_vec3_lerp(frame_start_pos, frame_target_pos, ease_t, cam->position);
+    } else if (is_zooming) {
+        zoom_anim_time += deltaTime;
+        float t = zoom_anim_time / ZOOM_ANIM_DURATION;
+        if (t >= 1.0f) {
+            t = 1.0f;
+            is_zooming = false;
+        }
+        float ease_t = ease_quart_out(t);
+        glm_vec3_lerp(zoom_start_pos, zoom_target_pos, ease_t, cam->position);
+    }
+
     if (!isMouseButtonDown(MOUSE_BUTTON_RIGHT)) return;
 
     float speed = 5.0f * deltaTime;

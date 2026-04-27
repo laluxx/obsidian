@@ -19,6 +19,7 @@ typedef void (*ScrollCallback)(double xOffset, double deltaY);
 typedef void (*WindowResizeCallback)(int width, int height);
 typedef void (*WindowFocusCallback)(int focused);
 typedef void (*WindowPosCallback)(int xpos, int ypos);
+typedef void (*DropCallback)(int count, const char** paths);
 
 
 extern TextCallback currentTextCallback;
@@ -39,6 +40,7 @@ void registerScrollCallback(ScrollCallback callback);
 void registerWindowResizeCallback(WindowResizeCallback callback);
 void registerWindowFocusCallback(WindowFocusCallback callback);
 void registerWindowPosCallback(WindowPosCallback callback);
+void registerDropCallback(DropCallback callback);
 
 
 void internal_char_callback(GLFWwindow* window, unsigned int codepoint);
@@ -49,6 +51,7 @@ void internal_scroll_callback(GLFWwindow* window, double xOffset, double yOffset
 void internal_window_resize_callback(GLFWwindow* window, int width, int height);
 void internal_window_focus_callback(GLFWwindow* window, int focused);
 void internal_window_pos_callback(GLFWwindow* window, int xpos, int ypos);
+void internal_drop_callback(GLFWwindow* window, int count, const char** paths);
 
 
 void init_input();

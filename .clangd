@@ -1,5 +1,10 @@
 CompileFlags:
-  Add: 
+  Add:
+    - "-I."
+    - "-I.."
+    - "-I../vendor/"
     - "-I/usr/include/freetype2"
     - "-I/usr/include/guile/3.0"
     - "-Ishaders/"
+    - "-Ieditor/"
+    - "-Ivendor/"

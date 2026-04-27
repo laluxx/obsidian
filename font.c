@@ -292,9 +292,25 @@ Font* load_font(const char* fontPath, int fontSize) {
         return NULL;
     }
 
-#ifdef DEBUG
     printf("[LOADED FONT] %s %i (Normal)\n", fontPath, fontSize);
-#endif
+    FT_Set_Pixel_Sizes(face, 0, fontSize);
+
+    Font* font = create_font_internal(face, fontSize);
+    if (font) {
+        font->display_size = fontSize;
+    }
+    return font;
+}
+
+Font* load_font_from_memory(const unsigned char* font_data, size_t data_size, int fontSize) {
+    FT_Face face;
+    // Load the font directly from the compiled-in byte array
+    if (FT_New_Memory_Face(ft, font_data, (FT_Long)data_size, 0, &face)) {
+        fprintf(stderr, "Failed to load embedded font from memory\n");
+        return NULL;
+    }
+
+    printf("[LOADED FONT] (Embedded Memory) %i (Normal)\n", fontSize);
     FT_Set_Pixel_Sizes(face, 0, fontSize);
 
     Font* font = create_font_internal(face, fontSize);

@@ -1,55 +1,6 @@
 #+TITLE: Obsidian Engine TODO
 
-# TODO
-List of everything flagged across the last commits:
-
-* Cache System (all subsystems) [0/5]
-- [ ] No cache invalidation — no mtime check, no version header, no magic version bump. A source file change silently loads stale data everywhere (.ogeom, .otex, .oibl, .omat, .orgb)
-- [ ] Path sanitization collision — `./assets/foo/bar.gltf` and `./assets/foo_bar.gltf` produce the same cache key (affects geometry, texture, material caches)
-- [ ] `get_texture_cache_path` uses a static buffer — calling it twice in the same scope (as done in `load_texture` for both the .dds and .otex paths) silently clobbers the first result
-- [ ] `get_pipeline_cache_path`, `get_texture_cache_path` etc. should respect `XDG_CACHE_HOME` before falling back to `~/.cache`
-- [ ] `mkdir` calls use `0777` — prefer `0755` to be explicit about intent (umask will handle it anyway but it's clearer)
-
-* Geometry Cache (.ogeom) [0/3]
-- [ ] `fread` return values in `create_mesh_from_primitive` cache hit path are unchecked — truncated file produces partial reads with no error
-- [ ] `mesh.vertexCount` and `mesh.indexCount` are never set on the cache hit path due to brace restructuring — they stay 0 silently
-- [ ] Indentation regression in the `fwrite` morph block in `gltf_loader.c`
-
-* Mega Buffer [0/1]
-- [ ] `megaMorphBufferAllocateFromFile` issues an immediate `beginSingleTimeCommands`/`endSingleTimeCommands` per mesh instead of using a `pendingMorphCopies` deferred batch list like the vertex and index variants do — serializes a GPU submit per morphed mesh on cache hit path
-
-* Texture Cache (.otex / .dds) [0/3]
-- [ ] JIT BC3 compressor only generates a single mip level — first-load DDS has `dwMipMapCount=1`, causing aliasing on surfaces in motion until cache is cleared
-- [ ] DXGI format numbers are hardcoded as magic integers (`98`, `99`, `83`, etc.) — needs comments mapping them to `DXGI_FORMAT_*` names
-- [ ] `fread` return value unchecked in the .otex cache hit path
-
-* *Vulkan Pipeline Cache* [0/1]
-- [ ] Pipeline cache header not validated before feeding to `vkCreatePipelineCache` — should check vendor ID, device ID, and UUID to handle GPU/driver switches safely rather than relying on driver robustness
-
-* Rope / Text Editor [0/2]
-- [ ] Fixed `tmp[4096]` / `tmp[16384]` buffers in `kill_line`, `kill_word`, `kill_region` — silently truncate on large regions
-- [ ] Undo stack eviction uses `memmove` over the full 512-entry array — fine now but worth noting for future scaling
-
-* Editor / Camera [0/3]
-- [ ] `camera.active = false` set in both `camera_init` and `window.c` — one is redundant, should be removed
-- [ ] Removal of `M-b/f/p/n` camera snap bindings should have a comment explaining they were ceded to the text editor keymap
-- [ ] Magic constant `(16384 + 4096)` appears multiple times across files with no named constant — should be `#define MAX_INDIRECT_COMMANDS`
-
-* IBL Cache (.oibl) [0/3]
-- [ ] IBL dimensions (1024, 32, 128, 512) are hardcoded in three places — size calculations, region structs, and `create_ibl_image` calls. A named constant struct would make resolution changes safe
-- [ ] Cache hit path allocates and holds a ~100MB `HOST_VISIBLE` staging buffer for the full duration of the upload — relevant if `loadIBL` is ever called at runtime for environment switching
-- [ ] `fread` return value unchecked on the IBL cache hit path
-
-* Material Cache (.omat) [0/1]
-- [ ] If textures are added to a material directory after first scan, the OMAT cache hit returns stale paths forever
-
-* General / Housekeeping [0/3]
-- [ ] `static char cache_path[512]` declared mid-function in `load_gltf` after a `fclose` — mixed declarations and code, will warn or error depending on compiler flags. Should move to top of function or be extracted like `get_pipeline_cache_path`
-- [ ] Indentation regression in `editor_update` — image viewer block got extra-indented
-- [ ] `int w, h, ch;` at column 0 in `load_texture` — paste artifact, present since the .otex commit and still unresolved
-
-
-Check quad utilization
+LATER Check quad utilization
 
 #E07E3D - Folder
 #372E2F - H1
@@ -67,11 +18,14 @@ missing
 #312D49 - H1
 #2D2B42 - H2
 
+* Mega Buffer [0/1]
+- [ ] `megaMorphBufferAllocateFromFile` issues an immediate `beginSingleTimeCommands`/`endSingleTimeCommands` per mesh instead of using a `pendingMorphCopies` deferred batch list like the vertex and index variants do — serializes a GPU submit per morphed mesh on cache hit path
 
-* TODO Editor [2/5]
-- [ ] Drag and drop for the FileSystem also show a green rounded quad when it's cached
+* TODO Editor [4/6]
+- [ ] show a green rounded quad when a gltf/image/anything is cached
 - [ ] When moving position/rotation/scale from the inspector also show the guide lines
-- [ ] When hovering the message don't make it disapper and lerp the border color to CT.border
+- [X] Drag and drop for the FileSystem
+- [X] When hovering the message don't make it disapper and lerp the border color to CT.border
 - [X] Mesh picking and highlighting.
 - [X] Inspector (runtime property editor) - Click mesh, edit PBR properties live with sliders. Ray vs AABB, writes directly into mapped SSBO memory, zero sync needed.
 
@@ -88,61 +42,15 @@ missing
 - [ ] Parallax Occlusion Mapping - Togglable per material.
 - [ ] GPU IK
 
-* TODO Performance [2/8]
-- [ ] Mesh shaders
-- [ ] Serialize IBLs, Materials, GLTFs and Pipelines on quit so it restarts istantly
+* TODO Performance [5/8]
+- [X] Mesh shaders
+- [X] Serialize IBLs, Materials, GLTFs and Pipelines on quit so it restarts istantly
 - [ ] As I get closer to a texture the FPS drops drastically (Investigate mipmap generation, texture cache thrashing, or lack of anisotropic filtering limits).
 - [ ] Hi-Z occlusion culling - Build a hierarchical depth buffer each frame, test mesh AABBs against it in the cull compute shader to reject occluded meshes before they hit the rasterizer.
-- [ ] GPU Compute Animator - Move rigid node hierarchy and keyframe interpolation entirely to a Compute Shader to eliminate CPU bottlenecks.
+- [X] GPU Compute Animator - Move rigid node hierarchy and keyframe interpolation entirely to a Compute Shader to eliminate CPU bottlenecks.
 - [ ] Split MeshGPUData SSBO - Separate static material data (textures, PBR factors) from dynamic transform data (`model`, `normalMatrix`) to save PCIe bandwidth during animations.
 - [X] Hardware Skinning - Compute bone matrices and deform vertices in the vertex shader for skeletal meshes.
 - [X] Unify immediate renderer into mega buffer - Dynamic geometry uses a resetting region; static meshes sit permanently behind it.
-
-* TODO Gltf 2.0 [7/18]
-- [X] Static meshes (Box, Corset, Avocado, Sponza).
-- [X] PBR materials (albedo, normal, metallic/roughness, AO, emissive).
-- [X] Morph targets (MorphStressTest).
-- [X] Alpha mask / blend.
-- [X] Unlit materials (UnlitTest).
-- [X] Multiple texture coordinates (TextureCoordinateTest).
-- [X] Embedded and external textures.
-- [ ] Fix MetalRoughSpheres (Check metallic/roughness parsing or missing default factors).
-- [ ] Fix AlphaBlendModeTest (Implement depth sorting for translucent meshes).
-- [ ] Fix BoxAnimated / Fox (Animation channels: translation, rotation, scale interpolation).
-- [ ] Fix AnimatedMorphSphere (Combine morph target weight animation with standard node transforms).
-- [ ] Fix CesiumMan / RiggedFigure (Skeletal animation / joints / weights parsing).
-- [ ] Fix MaterialsVariantsShoe (KHR_materials_variants support).
-- [ ] Fix CarbonFibre / MosquitoInAmber (Advanced PBR extensions: Clearcoat, Transmission, Volume, IOR, Specular).
-- [ ] KHR_texture_transform (UV scaling/offset).
-- [ ] KHR_lights_punctual (Parse lights defined in the glTF file).
-- [ ] Parse Cameras defined in the glTF file.
-- [ ] Sparse accessors support.
-# TODO Make sure those are right and add them all..
-
-
-# TODO 
-#+begin_src txt
-Transforming the pre-computed local bounds using bone matrices is brilliant, but it introduces a specific data challenge we need to solve first.
-Here is the candor: meshoptimizer does not calculate bone influences for meshlets. It only gives us the spatial bounds (center, radius, cone_apex, cone_axis). To transform a meshlet's cone and sphere on the GPU, the compute shader needs to know which bones affect that specific meshlet and with what weights.
-
-To build your architecture, we have to execute a three-phase plan. Here is the roadmap to make your idea a reality:
-Phase 1: The Cooker (gltf_loader.c)
-
-We need to modify the OMDL generation. After meshopt_computeMeshletBounds generates the spatial bounds, we must loop through all the vertices belonging to that specific meshlet, accumulate their bone weights, and determine the dominant bones (up to 4) and their averaged weights for the entire meshlet.
-We then append this data into a new struct (e.g., MeshletSkinData) and upload it to a new Mega Buffer alongside the bounds.
-
-Phase 2: The Compute Pass (refit_bounds.comp)
-We write your proposed Compute Shader. It will dispatch just before the main drawing pass.
-    Input: Static MeshletBounds, MeshletSkinData, and the current frame's JointBuffer.
-    Logic: For each meshlet, read its 4 dominant bones, fetch the joint matrices, blend them using the meshlet's average weights, and apply that resulting matrix to the static center, cone_apex, and cone_axis.
-    Output: A dynamically updated DynamicBoundsBuffer for the current frame.
-
-Phase 3: The Task Shader (pbr.task)
-We revert the Task Shader back to its hyper-efficient spatial culling logic, but instead of reading from the static pc.boundsData, we point it to the new DynamicBoundsBuffer.
-This gives you the exact ~0.1ms overhead you are aiming for, keeps the Task Shader strictly focused on culling rather than math, and guarantees zero holes in the mesh.
-If you are ready to build this, we need to start with Phase 1. Shall we modify gltf_loader.c to extract and pack the average bone influences for each meshlet?
-#+end_src
-
 
 
 as you can see i heavily optimized everything What do you think are the next big wins in perfomance, i want to optimize EVERYTHING LIKE A MANIAC i really want to go in the rabbithole and squeeze every possible frame out of this engine it has to spend 0 time in the CPU it has to be AAA level it has to be super fast i want to focus on optimizations, NOTE that i also value ALOT refactors and removing lines count from a file what do you think we should do next ?
@@ -152,13 +60,9 @@ When you want me to modify code say EXACTLY find this in this file: and replace 
 
 
 
+TODO Descriptor Set Massacre to fully eliminate UBOs and delete hundreds of lines of C code!
 
-
-Target 2: The Descriptor Set Massacre to fully eliminate UBOs and delete hundreds of lines of C code!
-
-The Benefit for YOU:
-
-    Simplified GPU Culling: In your cull.comp shader, you are currently writing out VkDrawIndexedIndirectCommand. With PVP, you can stop storing vertexOffset entirely. The shader just needs firstIndex and the base address of the vertex buffer (which you already pass as meshSSBOAddr via push constants!).
+Simplified GPU Culling: In your cull.comp shader, you are currently writing out VkDrawIndexedIndirectCommand. With PVP, you can stop storing vertexOffset entirely. The shader just needs firstIndex and the base address of the vertex buffer (which you already pass as meshSSBOAddr via push constants!).
 
     Attribute Compression: Your Vertex struct (shown in fill3DVertexInput) uses 64 bytes per vertex (pos=12, color=16, normal=12, uv=8, tangent=16).
         With PVP, you can switch to f16vec2 for UVs and u8vec4 for Normals/Tangents.
@@ -167,10 +71,4 @@ The Benefit for YOU:
 
 
 
-
-
-;; TODO
-
-- Meshlet culling in the cull shader
-cull.comp operates per-mesh AABB. Splitting meshes into meshlets (64-triangle clusters) and culling per-meshlet gives you ~4-8x more culling granularity. Combined with VK_EXT_mesh_shader this is the path to truly AAA draw call budgets.
 
