@@ -366,13 +366,19 @@ void emit_draw_with_slot(uint32_t firstVertex, uint32_t count, int slot);
 
 void begin_frame(void);
 
-// Primitives
+// Primitives — spawn a persistent Mesh into the scene hierarchy
+void plane(vec3 origin, vec2 size, Color color);
+void cube(vec3 origin, float size, Color color);
+void circle(vec3 origin, float radius, Color color);
+void cylinder(vec3 origin, float height, float radius, Color color);
+void cone(vec3 origin, float height, float radius, Color color);
+void uv_sphere(vec3 origin, float radius, int lats, int lons, Color color);
+void torus(vec3 origin, float major_radius, float minor_radius, int major_segs, int minor_segs, Color color);
+
+// Low-level immediate helpers used internally
 void vertex_with_normal(vec3 pos, Color color, vec3 normal);
 void vertex(vec3 pos, vec4 color);
 void triangle(vec3 a, vec3 b, vec3 c, Color color);
-void plane(vec3 origin, vec2 size, Color color);
-void cube(vec3 origin, float size, Color color);
-void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color);
 void bone(vec3 start, vec3 end, Color color);
 
 

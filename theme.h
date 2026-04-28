@@ -17,6 +17,7 @@ typedef struct {
     Color red;
     Color blue;
     Color bound;
+    Color wireframe;
     Color collision;
     Color gltf;
     Color x;

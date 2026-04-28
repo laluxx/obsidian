@@ -97,6 +97,8 @@ int main() {
     // Variables for delta time
     double lastFrameTime = glfwGetTime();
 
+    cube((vec3){0.0f, 0.0f, 10.0f}, 3.0f, WHITE);
+
     while (!windowShouldClose()) {
         double currentFrameTime = glfwGetTime();
         lastFrameTime = currentFrameTime;

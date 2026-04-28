@@ -1,13 +1,15 @@
 CC = gcc
 CFLAGS = -std=c23 -Wall -Wextra -g -fPIC $(shell pkg-config --cflags freetype2 guile-3.0)
-LDFLAGS = -fuse-ld=mold -lvulkan -lglfw -lX11 -lcglm -lm -lminiz -lmeshoptimizer $(LIBRARIES) -Wl,-rpath,vendor/joltc/build/lib -ljoltc $(shell pkg-config --libs freetype2 guile-3.0)
+JOLT_STATIC = vendor/joltc/build/lib/libJolt.a
+JOLTC_STATIC = vendor/joltc/build/lib/libjoltc.a
+LDFLAGS = -fuse-ld=mold -lvulkan -lglfw -lX11 -lcglm -lm -lminiz -lmeshoptimizer $(LIBRARIES) $(JOLTC_STATIC) $(JOLT_STATIC) -lstdc++ $(shell pkg-config --libs freetype2 guile-3.0)
 
 GLSLANG = glslangValidator
 XXD = xxd
 
 # Paths
 INCLUDES = -I/usr/include -I. -I$(SHADER_DIR) -Ieditor -Ivendor -Ivendor/joltc/include
-LIBRARIES = -L/usr/lib/x86_64-linux-gnu -Lvendor/joltc/build/lib
+LIBRARIES = -L/usr/lib/x86_64-linux-gnu
 INSTALL_DIR = /usr
 
 # Project settings
@@ -41,7 +43,12 @@ FONT_HEADERS = $(FONT_TTFS:.ttf=.h)
 all:
 	@$(MAKE) -j$$(nproc) internal_build
 
-internal_build: $(SPV_HEADERS) $(FONT_HEADERS) $(EXECUTABLE)
+internal_build: $(SPV_HEADERS) $(FONT_HEADERS) $(JOLTC_STATIC) $(EXECUTABLE)
+
+# Build joltc static library from vendor source
+$(JOLTC_STATIC) $(JOLT_STATIC):
+	cmake -S vendor/joltc -B vendor/joltc/build -DCMAKE_BUILD_TYPE=Release -DJPH_BUILD_SHARED=OFF -DJPH_SAMPLES=OFF -DJPH_TESTS=OFF
+	cmake --build vendor/joltc/build --parallel $$(nproc)
 
 # Compile shaders to SPIR-V
 $(SHADER_DIR)/%.vert.spv: $(SHADER_DIR)/%.vert
@@ -66,7 +73,7 @@ $(SHADER_DIR)/%.spv.h: $(SHADER_DIR)/%.spv
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Build executable by linking all objects directly
-$(EXECUTABLE): $(ALL_OBJECTS)
+$(EXECUTABLE): $(ALL_OBJECTS) $(JOLTC_STATIC)
 	$(CC) $(ALL_OBJECTS) -o $@ $(LDFLAGS)
 
 # Static library (optional, for distribution)
@@ -102,6 +109,7 @@ uninstall:
 clean:
 	rm -f $(ALL_OBJECTS) $(SHADER_SPVS) $(SPV_HEADERS) $(FONT_HEADERS)
 	rm -f $(LIB_NAME).a $(LIB_NAME).so $(EXECUTABLE)
+	rm -rf vendor/joltc/build
 # Clean everything including shaders
 distclean: clean
 	rm -f $(SHADER_DIR)/*.spv $(SHADER_DIR)/*.spv.h

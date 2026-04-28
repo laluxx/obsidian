@@ -1,4 +1,5 @@
 #include "add_menu.h"
+#include "renderer.h"
 #include "editor.h"
 #include "theme.h"
 #include <stdio.h>
@@ -87,274 +88,13 @@ extern uint32_t megaMeshletVertexBufferAllocate(VulkanContext* ctx, uint32_t* ve
 extern uint32_t megaMeshletTriangleBufferAllocate(VulkanContext* ctx, uint8_t* triangles, uint32_t count);
 extern void flushUploadStagingBuffer(VulkanContext* ctx);
 
-static void spawn_mesh(const char* name) {
-    Mesh m;
-    memset(&m, 0, sizeof(Mesh));
-
-    m.megaBaseVertex = UINT32_MAX;
-    m.megaBaseIndex = UINT32_MAX;
-    m.dynamicBaseVertex = UINT32_MAX;
-    m.megaBaseMeshlet = UINT32_MAX;
-    m.megaBaseMeshletVertex = UINT32_MAX;
-    m.megaBaseMeshletTriangle = UINT32_MAX;
-
-    glm_mat4_identity(m.local_transform);
-    glm_mat4_identity(m.model);
-
-    glm_vec3_copy((vec3){-1.0f, -1.0f, -1.0f}, m.aabbMin);
-    glm_vec3_copy((vec3){ 1.0f,  1.0f,  1.0f}, m.aabbMax);
-
-    m.name = strdup(name);
-    m.visible = true;
-    m.alpha_mode = 0; // Opaque
-    m.baseColorFactor[0] = 1.0f; m.baseColorFactor[1] = 1.0f;
-    m.baseColorFactor[2] = 1.0f; m.baseColorFactor[3] = 1.0f;
-    m.roughnessFactor = 0.5f;
-    m.metallicFactor = 0.0f;
-    m.emissiveStrength = 1.0f;
-
-    m.textureIndex = -1;
-    m.normalMapIndex = -1;
-    m.metallicRoughIndex = -1;
-    m.aoIndex = -1;
-    m.emissiveIndex = -1;
-    m.transmissionIndex = -1;
-    m.thicknessIndex = -1;
-    m.jointOffset = -1;
-
-    m.ior = 1.5f;
-    m.attenuationDistance = 100000.0f;
-    m.attenuationColor[0] = 1.0f;
-    m.attenuationColor[1] = 1.0f;
-    m.attenuationColor[2] = 1.0f;
-
-    Vertex verts[1024];
-    memset(verts, 0, sizeof(verts));
-    uint32_t indices[6144];
-    uint32_t v_count = 0, i_count = 0;
-
-    if (strcmp(name, "Plane") == 0) {
-        verts[0] = (Vertex){ .pos={-1,0, 1}, .normal={0,1,0}, .texCoord={0,1}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        verts[1] = (Vertex){ .pos={ 1,0, 1}, .normal={0,1,0}, .texCoord={1,1}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        verts[2] = (Vertex){ .pos={ 1,0,-1}, .normal={0,1,0}, .texCoord={1,0}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        verts[3] = (Vertex){ .pos={-1,0,-1}, .normal={0,1,0}, .texCoord={0,0}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        uint32_t ind[] = {0, 1, 2, 0, 2, 3};
-        memcpy(indices, ind, sizeof(ind));
-        v_count = 4; i_count = 6;
-    } else if (strcmp(name, "Cube") == 0) {
-        vec3 norms[6] = {{0,0,1}, {0,0,-1}, {-1,0,0}, {1,0,0}, {0,1,0}, {0,-1,0}};
-        vec4 tangs[6] = {{1,0,0,1}, {-1,0,0,1}, {0,0,1,1}, {0,0,-1,1}, {1,0,0,1}, {1,0,0,1}};
-        vec3 pos[6][4] = {
-            {{-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}},
-            {{ 1,-1,-1}, {-1,-1,-1}, {-1, 1,-1}, { 1, 1,-1}},
-            {{-1,-1,-1}, {-1,-1, 1}, {-1, 1, 1}, {-1, 1,-1}},
-            {{ 1,-1, 1}, { 1,-1,-1}, { 1, 1,-1}, { 1, 1, 1}},
-            {{-1, 1, 1}, { 1, 1, 1}, { 1, 1,-1}, {-1, 1,-1}},
-            {{-1,-1,-1}, { 1,-1,-1}, { 1,-1, 1}, {-1,-1, 1}}
-        };
-        vec2 uvs[4] = {{0,1}, {1,1}, {1,0}, {0,0}};
-        for (int f = 0; f < 6; f++) {
-            for (int v = 0; v < 4; v++) {
-                verts[v_count] = (Vertex){ .color={1,1,1,1} };
-                glm_vec3_copy(pos[f][v], verts[v_count].pos);
-                glm_vec3_copy(norms[f], verts[v_count].normal);
-                glm_vec2_copy(uvs[v], verts[v_count].texCoord);
-                glm_vec4_copy(tangs[f], verts[v_count].tangent);
-                v_count++;
-            }
-            indices[i_count++] = f*4 + 0; indices[i_count++] = f*4 + 1; indices[i_count++] = f*4 + 2;
-            indices[i_count++] = f*4 + 0; indices[i_count++] = f*4 + 2; indices[i_count++] = f*4 + 3;
-        }
-    } else if (strcmp(name, "Circle") == 0) {
-        int segs = 32;
-        verts[0] = (Vertex){ .pos={0,0,0}, .normal={0,1,0}, .texCoord={0.5f,0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        v_count = 1;
-        for(int i=0; i<=segs; i++) {
-            float a = (float)i / segs * 6.2831853f;
-            float px = cosf(a), pz = sinf(a);
-            verts[v_count] = (Vertex){ .pos={px, 0, pz}, .normal={0,1,0}, .texCoord={(px+1.0f)*0.5f, (pz+1.0f)*0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-            v_count++;
-        }
-        for(int i=1; i<=segs; i++) {
-            indices[i_count++] = 0; indices[i_count++] = i + 1; indices[i_count++] = i;
-        }
-    } else if (strcmp(name, "Cylinder") == 0) {
-        int segs = 32;
-        for(int i=0; i<=segs; i++) {
-            float u = (float)i / segs;
-            float a = u * 6.2831853f;
-            float px = cosf(a), pz = sinf(a);
-            verts[v_count] = (Vertex){ .pos={px, -1, pz}, .normal={px,0,pz}, .texCoord={u, 1}, .color={1,1,1,1}, .tangent={-pz,0,px,1} };
-            verts[v_count+1] = (Vertex){ .pos={px,  1, pz}, .normal={px,0,pz}, .texCoord={u, 0}, .color={1,1,1,1}, .tangent={-pz,0,px,1} };
-            v_count += 2;
-        }
-        for(int i=0; i<segs; i++) {
-            uint32_t b = i * 2;
-            indices[i_count++] = b; indices[i_count++] = b+1; indices[i_count++] = b+2;
-            indices[i_count++] = b+1; indices[i_count++] = b+3; indices[i_count++] = b+2;
-        }
-        uint32_t t_center = v_count;
-        verts[v_count++] = (Vertex){ .pos={0,1,0}, .normal={0,1,0}, .texCoord={0.5f,0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        for(int i=0; i<=segs; i++) {
-            float a = (float)i / segs * 6.2831853f;
-            float px = cosf(a), pz = sinf(a);
-            verts[v_count++] = (Vertex){ .pos={px, 1, pz}, .normal={0,1,0}, .texCoord={(px+1)*0.5f, (pz+1)*0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        }
-        for(int i=0; i<segs; i++) {
-            indices[i_count++] = t_center; indices[i_count++] = t_center + 2 + i; indices[i_count++] = t_center + 1 + i;
-        }
-        uint32_t b_center = v_count;
-        verts[v_count++] = (Vertex){ .pos={0,-1,0}, .normal={0,-1,0}, .texCoord={0.5f,0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        for(int i=0; i<=segs; i++) {
-            float a = (float)i / segs * 6.2831853f;
-            float px = cosf(a), pz = sinf(a);
-            verts[v_count++] = (Vertex){ .pos={px, -1, pz}, .normal={0,-1,0}, .texCoord={(px+1)*0.5f, (1-pz)*0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        }
-        for(int i=0; i<segs; i++) {
-            indices[i_count++] = b_center; indices[i_count++] = b_center + 1 + i; indices[i_count++] = b_center + 2 + i;
-        }
-    } else if (strcmp(name, "Cone") == 0) {
-        int segs = 32;
-        for(int i=0; i<=segs; i++) {
-            float u = (float)i / segs;
-            float a = u * 6.2831853f;
-            float px = cosf(a), pz = sinf(a);
-            vec3 n = {px, 0.5f, pz}; glm_vec3_normalize(n);
-            verts[v_count] = (Vertex){ .pos={px, -1, pz}, .normal={n[0],n[1],n[2]}, .texCoord={u, 1}, .color={1,1,1,1}, .tangent={-pz,0,px,1} };
-            verts[v_count+1] = (Vertex){ .pos={0, 1, 0}, .normal={n[0],n[1],n[2]}, .texCoord={u, 0}, .color={1,1,1,1}, .tangent={-pz,0,px,1} };
-            v_count += 2;
-        }
-        for(int i=0; i<segs; i++) {
-            uint32_t b = i * 2;
-            indices[i_count++] = b; indices[i_count++] = b+1; indices[i_count++] = b+2;
-        }
-        uint32_t b_center = v_count;
-        verts[v_count++] = (Vertex){ .pos={0,-1,0}, .normal={0,-1,0}, .texCoord={0.5f,0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        for(int i=0; i<=segs; i++) {
-            float a = (float)i / segs * 6.2831853f;
-            float px = cosf(a), pz = sinf(a);
-            verts[v_count++] = (Vertex){ .pos={px, -1, pz}, .normal={0,-1,0}, .texCoord={(px+1)*0.5f, (1-pz)*0.5f}, .color={1,1,1,1}, .tangent={1,0,0,1} };
-        }
-        for(int i=0; i<segs; i++) {
-            indices[i_count++] = b_center; indices[i_count++] = b_center + 2 + i; indices[i_count++] = b_center + 1 + i;
-        }
-    } else if (strcmp(name, "UV Sphere") == 0 || strcmp(name, "Ico Sphere") == 0) {
-        int lats = 12, lons = 12;
-        for(int i=0; i<=lats; i++) {
-            float v = (float)i / lats;
-            float phi = v * 3.14159265f;
-            for(int j=0; j<=lons; j++) {
-                float u = (float)j / lons;
-                float theta = u * 6.2831853f;
-                float px = sinf(phi) * cosf(theta);
-                float py = cosf(phi);
-                float pz = sinf(phi) * sinf(theta);
-                verts[v_count] = (Vertex){ .pos={px,py,pz}, .normal={px,py,pz}, .texCoord={u, v}, .color={1,1,1,1}, .tangent={-sinf(theta),0,cosf(theta),1} };
-                v_count++;
-            }
-        }
-        for(int i=0; i<lats; i++) {
-            for(int j=0; j<lons; j++) {
-                uint32_t p0 = i*(lons+1) + j;
-                uint32_t p1 = p0 + 1;
-                uint32_t p2 = (i+1)*(lons+1) + j;
-                uint32_t p3 = p2 + 1;
-                indices[i_count++] = p0; indices[i_count++] = p1; indices[i_count++] = p2;
-                indices[i_count++] = p1; indices[i_count++] = p3; indices[i_count++] = p2;
-            }
-        }
-    } else if (strcmp(name, "Torus") == 0) {
-        int segs1 = 16, segs2 = 12;
-        for(int i=0; i<=segs1; i++) {
-            float u = (float)i / segs1;
-            float a1 = u * 6.2831853f;
-            float cos1 = cosf(a1), sin1 = sinf(a1);
-            for(int j=0; j<=segs2; j++) {
-                float v = (float)j / segs2;
-                float a2 = v * 6.2831853f;
-                float cos2 = cosf(a2), sin2 = sinf(a2);
-                float r = 1.0f + 0.3f * cos2;
-                float px = r * cos1, py = 0.3f * sin2, pz = r * sin1;
-                float nx = cos2 * cos1, ny = sin2, nz = cos2 * sin1;
-                verts[v_count] = (Vertex){ .pos={px,py,pz}, .normal={nx,ny,nz}, .texCoord={u, v}, .color={1,1,1,1}, .tangent={-sin1,0,cos1,1} };
-                v_count++;
-            }
-        }
-        for(int i=0; i<segs1; i++) {
-            for(int j=0; j<segs2; j++) {
-                uint32_t p0 = i*(segs2+1) + j;
-                uint32_t p1 = p0 + 1;
-                uint32_t p2 = (i+1)*(segs2+1) + j;
-                uint32_t p3 = p2 + 1;
-                indices[i_count++] = p0; indices[i_count++] = p1; indices[i_count++] = p2;
-                indices[i_count++] = p1; indices[i_count++] = p3; indices[i_count++] = p2;
-            }
-        }
-    }
-
-    // Default tangents for shader compatibility
-    for(uint32_t i=0; i<v_count; i++) {
-        if (verts[i].tangent[3] == 0.0f) {
-            verts[i].tangent[0] = 1.0f; verts[i].tangent[3] = 1.0f;
-        }
-    }
-
-    // We no longer generate fake meshlets for spawned primitives!
-    // They will seamlessly fall back to the legacy pipeline (pbr.vert),
-    // which is perfectly designed for dynamic modeling and geometry editing.
-    m.megaBaseMeshlet = UINT32_MAX;
-    m.megaBaseMeshletVertex = UINT32_MAX;
-    m.megaBaseMeshletTriangle = UINT32_MAX;
-    m.meshletCount = 0;
-
-    m.megaBaseVertex = megaBufferAllocate(&context, verts, v_count);
-    m.megaBaseIndex = megaIndexBufferAllocate(&context, indices, i_count);
-    m.vertexCount = v_count;
-    m.indexCount = i_count;
-
-    // CRITICAL: Force the CPU staging buffer to actually DMA copy to the GPU VRAM instantly!
-    flushUploadStagingBuffer(&context);
-
-    int new_idx = (int)scene.meshes.count;
-
-    // Initialize root if missing
-    if (scene.tree.count == 0) {
-        memset(&scene.tree.nodes[0], 0, sizeof(SceneNode));
-        strcpy((char*)scene.tree.nodes[0].name, "World");
-        scene.tree.nodes[0].first_child = -1;
-        scene.tree.nodes[0].next_sibling = -1;
-        scene.tree.nodes[0].parent = -1;
-        scene.tree.nodes[0].visible = true;
-        scene.tree.nodes[0].expanded = true;
-        scene.tree.count = 1;
-        scene.tree.root = 0;
-    }
-
-    // Use the official API to attach the node safely
-    int node_idx = scene_tree_add_node(&scene.tree, name, 0, new_idx);
-    m.node = (void*)(uintptr_t)node_idx;
-
-    meshes_add(&scene.meshes, m);
-
-    // Add a Material child node so the inspector can isolate material view,
-    // identical to what the GLTF loader does for every mesh it imports.
-    scene_tree_add_node(&scene.tree, "Material", node_idx, new_idx);
-
-    // Auto-select in the inspector to update SSBO/indirect buffers cleanly
-    inspector_select_mesh(new_idx);
-    markMeshesSSBODirty(&context);
-
-    extern bool scene_topology_dirty;
-    scene_topology_dirty = true;
-}
-
-static void action_plane    () { spawn_mesh("Plane"     ); }
-static void action_cube     () { spawn_mesh("Cube"      ); }
-static void action_circle   () { spawn_mesh("Circle"    ); }
-static void action_uvsphere () { spawn_mesh("UV Sphere" ); }
-static void action_icosphere() { spawn_mesh("Ico Sphere"); }
-static void action_cylinder () { spawn_mesh("Cylinder"  ); }
-static void action_cone     () { spawn_mesh("Cone"      ); }
+static void action_plane    () { plane    ((vec3){0,0,0}, (vec2){2,2},          (Color){1,1,1,1}); }
+static void action_cube     () { cube     ((vec3){0,0,0}, 2.0f,                 (Color){1,1,1,1}); }
+static void action_circle   () { circle   ((vec3){0,0,0}, 1.0f,                 (Color){1,1,1,1}); }
+static void action_uvsphere () { uv_sphere((vec3){0,0,0}, 1.0f, 12, 12,         (Color){1,1,1,1}); }
+static void action_icosphere() { uv_sphere((vec3){0,0,0}, 1.0f, 12, 12,         (Color){1,1,1,1}); }
+static void action_cylinder () { cylinder ((vec3){0,0,0}, 2.0f, 1.0f,           (Color){1,1,1,1}); }
+static void action_cone     () { cone     ((vec3){0,0,0}, 2.0f, 1.0f,           (Color){1,1,1,1}); }
 
 extern void physics_rebuild_mesh(Mesh* m);
 
@@ -396,6 +136,7 @@ void regenerate_active_primitive(void) {
     if (m->megaBaseIndex != UINT32_MAX && m->megaBaseIndex + m->indexCount == context.megaIndexBufferOffset) {
         context.megaIndexBufferOffset -= m->indexCount;
     }
+
     if (adjust_state.type == ADJUST_PRIMITIVE_TORUS) {
         int segs1 = adjust_state.torus_major_segs;
         int segs2 = adjust_state.torus_minor_segs;
@@ -465,7 +206,7 @@ void regenerate_active_primitive(void) {
 }
 
 static void action_torus() {
-    spawn_mesh("Torus");
+    torus((vec3){0,0,0}, 1.0f, 0.3f, 16, 12, (Color){1,1,1,1});
 
     adjust_state.active = true;
     adjust_state.type = ADJUST_PRIMITIVE_TORUS;

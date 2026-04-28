@@ -792,6 +792,7 @@ void createGraphicsPipelines(VulkanContext* ctx)
 
     VkPipelineRasterizationStateCreateInfo rastWireframe = makeRasterizer(1.0f);
     rastWireframe.polygonMode = VK_POLYGON_MODE_LINE;
+    rastWireframe.depthBiasEnable = VK_TRUE; // Push lines forward to prevent z-fighting with the surface
     VkPipelineColorBlendStateCreateInfo    blend  = makeColorBlend(&kBlendAlpha);
     VkPipelineDepthStencilStateCreateInfo  depth3D = makeDepth(true,  true);
     VkPipelineDepthStencilStateCreateInfo  depth2D = makeDepth(false, false);
@@ -941,8 +942,18 @@ void createGraphicsPipelines(VulkanContext* ctx)
             .pVertexInputState   = &viEmpty, .pInputAssemblyState = &ia3D,
             .pViewportState      = &kViewportState,
             .pRasterizationState = &rastWireframe, .pMultisampleState  = &kMultisampling,
-            .pColorBlendState    = &blend, .pDepthStencilState = &depth3D,
-            .pDynamicState       = &kDynamicStateLine, // Allows dynamic line width!
+            .pColorBlendState    = &blend,
+            // Depth TEST on so wireframe respects real geometry occlusion.
+            // Depth WRITE off so wireframe edges never contaminate the depth buffer
+            // or the HZB, which would cause the occlusion culler to kill valid
+            // meshlets on the next frame wherever wireframe edges wrote depth.
+            .pDepthStencilState  = &(VkPipelineDepthStencilStateCreateInfo){
+                .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                .depthTestEnable  = VK_TRUE,
+                .depthWriteEnable = VK_FALSE,
+                .depthCompareOp   = VK_COMPARE_OP_LESS,
+            },
+            .pDynamicState       = &kDynamicStateLine,
             .layout              = ctx->pipelineLayout,
         },
         /* 6: Legacy 3D PBR Solid (For Immediate Mode / Gizmos) */
@@ -1233,7 +1244,7 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
     if (scene.meshes.count > 0 && pfnCmdDrawMeshTasksEXT) {
             for (uint32_t i = 0; i < scene.meshes.count; i++) {
                 Mesh* m = &scene.meshes.items[i];
-                if (!m->visible || m->meshletCount == 0 || m->alpha_mode == 2 || m->transmissionFactor > 0.0f) continue;
+                if (!m->visible || m->meshletCount == 0 || m->alpha_mode == 2 || m->transmissionFactor > 0.0f || m->wireframe) continue;
                 if (m->megaBaseMeshlet == UINT32_MAX) continue;
                 if (m->megaBaseVertex  == UINT32_MAX) continue;
 
@@ -1815,6 +1826,7 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
 
                     if (stream == 1 && !isTransmission) continue;
                     if (stream == 2 && !isBlend) continue;
+                    if (m->wireframe) continue;
 
                     pushConstants.meshIndex = i;
                     vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
@@ -1826,12 +1838,53 @@ void recordCommandBuffer(VulkanContext* ctx, uint32_t imageIndex)
         }
 
         // --- Stream 3: Wireframe Pass ---
-        // Draws directly over everything else in line-mode with standard depth testing
+        // Uses the legacy vertex pipeline (pbr.vert) with polygon mode LINE.
+        // Mesh shaders do not support polygon mode overrides, so this path is
+        // intentionally kept on the traditional vertex pipeline.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineWireframe);
-        vkCmdSetLineWidth(cmd, 1.0f); // REQUIRED: state was invalidated by previous pipeline binds!
-        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32); //  FIX: Restore Input Assembly state for legacy pipeline
-        vkCmdDrawIndexedIndirectCount(cmd, ctx->indirectBuffer, (VkDeviceSize)(3 * sStride) * sizeof(VkDrawIndexedIndirectCommand),
-                                      ctx->drawCountBuffer, 3 * 4, ctx->indirectDrawCount, sizeof(VkDrawIndexedIndirectCommand));
+        vkCmdSetLineWidth(cmd, 1.0f);
+        // Negative depth bias floats wireframe lines in front of the surface,
+        // eliminating z-fighting without modifying actual depth writes (which are OFF).
+        vkCmdSetDepthBias(cmd, -1.0f, 0.0f, -1.0f);
+        vkCmdBindIndexBuffer(cmd, ctx->megaIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        // Re-bind descriptor sets: the graphicsPipelineWireframe uses pipelineLayout
+        // (same as the main 3D layout) but the previous skybox/transmission bind may
+        // have used a different layout, corrupting the binding state.
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, gltfSets, 0, NULL);
+
+        for (uint32_t i = 0; i < scene.meshes.count; i++) {
+            Mesh* m = &scene.meshes.items[i];
+            if (!m->visible || !m->wireframe) continue;
+
+            // PVP wireframe: indices in the mega index buffer are LOCAL (0-based within
+            // the mesh's vertex block), not absolute mega-buffer addresses.
+            // vertexOffset = megaBaseVertex shifts every fetched index into the correct
+            // absolute slot: gl_VertexIndex = localIndex + megaBaseVertex.
+            //
+            // For dynamic/non-indexed meshes: use the pre-filled linear identity
+            // index buffer at firstIndex=0 with vertexOffset=megaBaseVertex,
+            // giving gl_VertexIndex = k + megaBaseVertex = absolute vertex address.
+            uint32_t index_count = (m->indexCount  > 0) ? m->indexCount  : m->vertexCount;
+            uint32_t first_index = (m->megaBaseIndex != UINT32_MAX) ? m->megaBaseIndex : 0;
+            int32_t  vert_offset = (int32_t)(
+                (m->megaBaseVertex != UINT32_MAX)
+                    ? m->megaBaseVertex
+                    : (ctx->megaVertexBufferOffset + (ctx->currentFrame * MAX_DYNAMIC_VERTICES) + m->dynamicBaseVertex));
+
+            pushConstants.meshIndex    = (int)i;
+            pushConstants.cascadeIndex = -1;
+            fill_gpu_addresses(ctx);
+            vkCmdPushConstants(cmd, ctx->pipelineLayout,
+                               VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT |
+                               VK_SHADER_STAGE_VERTEX_BIT   | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstants), &pushConstants);
+
+            // firstInstance = i so pbr.vert gl_BaseInstanceARB fallback also works
+            vkCmdDrawIndexed(cmd, index_count, 1, first_index, vert_offset, i);
+
+        }
+
 
         vkCmdEndRendering(cmd);
     }

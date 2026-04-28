@@ -1079,24 +1079,181 @@ void triangle(vec3 a, vec3 b, vec3 c, Color color) {
     emit_draw(first, 3, identity);
 }
 
+// ─── Shared internals for scene primitive spawning ────────────────────────────
+
+extern uint32_t megaBufferAllocate(VulkanContext* ctx, Vertex* vertices, uint32_t vertexCount);
+extern uint32_t megaIndexBufferAllocate(VulkanContext* ctx, uint32_t* indices, uint32_t indexCount);
+extern uint32_t megaMeshletBufferAllocate(VulkanContext* ctx, Meshlet* meshlets, MeshletBounds* bounds, MeshletSkinData* skins, uint32_t count);
+extern uint32_t megaMeshletVertexBufferAllocate(VulkanContext* ctx, uint32_t* verts, uint32_t count);
+extern uint32_t megaMeshletTriangleBufferAllocate(VulkanContext* ctx, uint8_t* tris, uint32_t count);
+extern void flushUploadStagingBuffer(VulkanContext* ctx);
+extern void markMeshesSSBODirty(VulkanContext* ctx);
+extern void inspector_select_mesh(int index);
+extern bool scene_topology_dirty;
+extern Scene scene;
+
+static void primitive_build_meshlets(Vertex* verts, uint32_t v_count,
+                                     uint32_t* indices, uint32_t i_count,
+                                     Mesh* m)
+{
+    uint32_t tri_count = i_count / 3;
+    uint32_t max_ml    = (tri_count + 123) / 124 + 1;
+    Meshlet*         ml_arr  = calloc(max_ml,           sizeof(Meshlet));
+    MeshletBounds*   mb_arr  = calloc(max_ml,           sizeof(MeshletBounds));
+    MeshletSkinData* ms_arr  = calloc(max_ml,           sizeof(MeshletSkinData));
+    uint32_t*        mlv_arr = calloc(max_ml * 64,      sizeof(uint32_t));
+    uint8_t*         mlt_arr = calloc(max_ml * 124 * 3, sizeof(uint8_t));
+
+    uint32_t ml_count=0, mlv_total=0, mlt_total=0, tri_cursor=0;
+
+    while (tri_cursor < tri_count) {
+        Meshlet* ml = &ml_arr[ml_count];
+        ml->vertex_offset=mlv_total; ml->triangle_offset=mlt_total;
+        ml->vertex_count=0; ml->triangle_count=0;
+
+        uint8_t  local_used[4096];
+        uint32_t local_idx [4096];
+        memset(local_used, 0, v_count);
+        memset(local_idx,  0, v_count * sizeof(uint32_t));
+
+        while (tri_cursor < tri_count && ml->triangle_count < 124) {
+            uint32_t i0=indices[tri_cursor*3+0];
+            uint32_t i1=indices[tri_cursor*3+1];
+            uint32_t i2=indices[tri_cursor*3+2];
+            int nv = (!local_used[i0]) + (!local_used[i1]) + (!local_used[i2]);
+            if (ml->vertex_count + nv > 64) break;
+            if (!local_used[i0]) { local_used[i0]=1; local_idx[i0]=ml->vertex_count; mlv_arr[mlv_total+ml->vertex_count]=i0; ml->vertex_count++; }
+            if (!local_used[i1]) { local_used[i1]=1; local_idx[i1]=ml->vertex_count; mlv_arr[mlv_total+ml->vertex_count]=i1; ml->vertex_count++; }
+            if (!local_used[i2]) { local_used[i2]=1; local_idx[i2]=ml->vertex_count; mlv_arr[mlv_total+ml->vertex_count]=i2; ml->vertex_count++; }
+            mlt_arr[mlt_total+ml->triangle_count*3+0]=(uint8_t)local_idx[i0];
+            mlt_arr[mlt_total+ml->triangle_count*3+1]=(uint8_t)local_idx[i1];
+            mlt_arr[mlt_total+ml->triangle_count*3+2]=(uint8_t)local_idx[i2];
+            ml->triangle_count++; tri_cursor++;
+        }
+
+        float cx=0,cy=0,cz=0;
+        for (uint32_t vi=0; vi<ml->vertex_count; vi++) {
+            uint32_t gi=mlv_arr[mlv_total+vi];
+            cx+=verts[gi].pos[0]; cy+=verts[gi].pos[1]; cz+=verts[gi].pos[2];
+        }
+        float inv=1.0f/(float)ml->vertex_count;
+        cx*=inv; cy*=inv; cz*=inv;
+        float radius=0.0f;
+        for (uint32_t vi=0; vi<ml->vertex_count; vi++) {
+            uint32_t gi=mlv_arr[mlv_total+vi];
+            float dx=verts[gi].pos[0]-cx, dy=verts[gi].pos[1]-cy, dz=verts[gi].pos[2]-cz;
+            float d=sqrtf(dx*dx+dy*dy+dz*dz);
+            if (d>radius) radius=d;
+        }
+        MeshletBounds* mb=&mb_arr[ml_count];
+        mb->center[0]=cx; mb->center[1]=cy; mb->center[2]=cz;
+        mb->radius=radius; mb->cone_cutoff=1.0f;
+        memset(&ms_arr[ml_count],0,sizeof(MeshletSkinData));
+        mlv_total+=ml->vertex_count;
+        mlt_total+=ml->triangle_count*3;
+        ml_count++;
+    }
+
+    m->megaBaseMeshlet         = megaMeshletBufferAllocate(&context, ml_arr, mb_arr, ms_arr, ml_count);
+    m->megaBaseMeshletVertex   = megaMeshletVertexBufferAllocate(&context, mlv_arr, mlv_total);
+    m->megaBaseMeshletTriangle = megaMeshletTriangleBufferAllocate(&context, mlt_arr, mlt_total);
+    m->meshletCount            = ml_count;
+
+    free(ml_arr); free(mb_arr); free(ms_arr); free(mlv_arr); free(mlt_arr);
+}
+
+static void primitive_init_mesh(Mesh* m, const char* name, vec3 origin, Color color) {
+    memset(m, 0, sizeof(Mesh));
+    m->megaBaseVertex          = UINT32_MAX;
+    m->megaBaseIndex           = UINT32_MAX;
+    m->dynamicBaseVertex       = UINT32_MAX;
+    m->megaBaseMeshlet         = UINT32_MAX;
+    m->megaBaseMeshletVertex   = UINT32_MAX;
+    m->megaBaseMeshletTriangle = UINT32_MAX;
+    glm_mat4_identity(m->local_transform);
+    glm_mat4_identity(m->model);
+    glm_translate(m->model, origin);
+    glm_translate(m->local_transform, origin);
+    glm_vec3_copy((vec3){-1,-1,-1}, m->aabbMin);
+    glm_vec3_copy((vec3){ 1, 1, 1}, m->aabbMax);
+    m->name             = strdup(name);
+    m->visible          = true;
+    m->alpha_mode       = 0;
+    m->baseColorFactor[0]=color.r; m->baseColorFactor[1]=color.g;
+    m->baseColorFactor[2]=color.b; m->baseColorFactor[3]=color.a;
+    m->roughnessFactor  = 0.5f;
+    m->metallicFactor   = 0.0f;
+    m->emissiveStrength = 1.0f;
+    m->textureIndex     = -1;
+    m->normalMapIndex   = -1;
+    m->metallicRoughIndex=-1;
+    m->aoIndex          = -1;
+    m->emissiveIndex    = -1;
+    m->transmissionIndex= -1;
+    m->thicknessIndex   = -1;
+    m->jointOffset      = -1;
+    m->ior              = 1.5f;
+    m->attenuationDistance=100000.0f;
+    m->attenuationColor[0]=1.0f; m->attenuationColor[1]=1.0f; m->attenuationColor[2]=1.0f;
+}
+
+static void primitive_commit(Mesh* m, const char* name,
+                              Vertex* verts, uint32_t v_count,
+                              uint32_t* indices, uint32_t i_count)
+{
+    for (uint32_t i=0; i<v_count; i++) {
+        if (verts[i].tangent[3]==0.0f) { verts[i].tangent[0]=1.0f; verts[i].tangent[3]=1.0f; }
+    }
+
+    m->megaBaseVertex = megaBufferAllocate(&context, verts, v_count);
+    m->megaBaseIndex  = megaIndexBufferAllocate(&context, indices, i_count);
+    m->vertexCount    = v_count;
+    m->indexCount     = i_count;
+
+    primitive_build_meshlets(verts, v_count, indices, i_count, m);
+
+    flushUploadStagingBuffer(&context);
+    flushUploadStagingBuffer(&context);
+
+    if (scene.tree.count == 0) {
+        memset(&scene.tree.nodes[0], 0, sizeof(SceneNode));
+        strcpy((char*)scene.tree.nodes[0].name, "World");
+        scene.tree.nodes[0].first_child  = -1;
+        scene.tree.nodes[0].next_sibling = -1;
+        scene.tree.nodes[0].parent       = -1;
+        scene.tree.nodes[0].visible      = true;
+        scene.tree.nodes[0].expanded     = true;
+        scene.tree.count = 1;
+        scene.tree.root  = 0;
+    }
+
+    int new_idx  = (int)scene.meshes.count;
+    int node_idx = scene_tree_add_node(&scene.tree, name, 0, new_idx);
+    m->node = (void*)(uintptr_t)node_idx;
+
+    meshes_add(&scene.meshes, *m);
+    scene_tree_add_node(&scene.tree, "Material", node_idx, -1);
+
+    inspector_select_mesh(new_idx);
+    markMeshesSSBODirty(&context);
+    scene_topology_dirty = true;
+}
+
+// ─── Public primitive API ─────────────────────────────────────────────────────
+
 void plane(vec3 origin, vec2 size, Color color) {
-    uint32_t first = vertex_count;
-    float w = size[0] / 2.0f;
-    float h = size[1] / 2.0f;
-    vec3 a, b, c, d;
-    glm_vec3_add(origin, (vec3){-w, 0.0f, -h}, a);
-    glm_vec3_add(origin, (vec3){+w, 0.0f, -h}, b);
-    glm_vec3_add(origin, (vec3){+w, 0.0f, +h}, c);
-    glm_vec3_add(origin, (vec3){-w, 0.0f, +h}, d);
-    vec3 normal = {0.0f, 1.0f, 0.0f};
-    vertex_with_normal(a, color, normal);
-    vertex_with_normal(c, color, normal);
-    vertex_with_normal(b, color, normal);
-    vertex_with_normal(a, color, normal);
-    vertex_with_normal(d, color, normal);
-    vertex_with_normal(c, color, normal);
-    mat4 identity; glm_mat4_identity(identity);
-    emit_draw(first, 6, identity);
+    Mesh m;
+    primitive_init_mesh(&m, "Plane", origin, color);
+
+    float w=size[0]*0.5f, h=size[1]*0.5f;
+    Vertex verts[4] = {
+        { .pos={-w,0, h}, .normal={0,1,0}, .texCoord={0,1}, .color={color.r,color.g,color.b,color.a}, .tangent={1,0,0,1} },
+        { .pos={ w,0, h}, .normal={0,1,0}, .texCoord={1,1}, .color={color.r,color.g,color.b,color.a}, .tangent={1,0,0,1} },
+        { .pos={ w,0,-h}, .normal={0,1,0}, .texCoord={1,0}, .color={color.r,color.g,color.b,color.a}, .tangent={1,0,0,1} },
+        { .pos={-w,0,-h}, .normal={0,1,0}, .texCoord={0,0}, .color={color.r,color.g,color.b,color.a}, .tangent={1,0,0,1} },
+    };
+    uint32_t indices[] = {0,1,2, 0,2,3};
+    primitive_commit(&m, "Plane", verts, 4, indices, 6);
 }
 
 //    h-------g
@@ -1106,77 +1263,219 @@ void plane(vec3 origin, vec2 size, Color color) {
 //  | e-----|-f
 //  |/      |/
 //  a-------b
-
 void cube(vec3 origin, float size, Color color) {
-    uint32_t first = vertex_count;
-    float s = size / 2.0f;
+    Mesh m;
+    primitive_init_mesh(&m, "Cube", origin, color);
 
-    /* Each face is emitted with correct UVs and tangents for PBR.
-       vertex_full(pos, color, normal, uv, tangent)
-       Tangent w=+1 means bitangent = cross(normal, tangent).        */
+    vec4 c = {color.r, color.g, color.b, color.a};
+    vec3 norms[6] = {{0,0,1},{0,0,-1},{-1,0,0},{1,0,0},{0,1,0},{0,-1,0}};
+    vec4 tangs[6] = {{1,0,0,1},{-1,0,0,1},{0,0,1,1},{0,0,-1,1},{1,0,0,1},{1,0,0,1}};
+    float s = size * 0.5f;
+    vec3 pos[6][4] = {
+        {{-s,-s, s},{ s,-s, s},{ s, s, s},{-s, s, s}},
+        {{ s,-s,-s},{-s,-s,-s},{-s, s,-s},{ s, s,-s}},
+        {{-s,-s,-s},{-s,-s, s},{-s, s, s},{-s, s,-s}},
+        {{ s,-s, s},{ s,-s,-s},{ s, s,-s},{ s, s, s}},
+        {{-s, s, s},{ s, s, s},{ s, s,-s},{-s, s,-s}},
+        {{-s,-s,-s},{ s,-s,-s},{ s,-s, s},{-s,-s, s}}
+    };
+    vec2 uvs[4] = {{0,1},{1,1},{1,0},{0,0}};
+    Vertex verts[24];
+    uint32_t indices[36];
+    uint32_t v=0, idx=0;
+    for (int f=0; f<6; f++) {
+        for (int i=0; i<4; i++) {
+            verts[v] = (Vertex){.color={c[0],c[1],c[2],c[3]}};
+            glm_vec3_copy(pos[f][i], verts[v].pos);
+            glm_vec3_copy(norms[f],  verts[v].normal);
+            glm_vec2_copy(uvs[i],    verts[v].texCoord);
+            glm_vec4_copy(tangs[f],  verts[v].tangent);
+            v++;
+        }
+        indices[idx++]=f*4+0; indices[idx++]=f*4+1; indices[idx++]=f*4+2;
+        indices[idx++]=f*4+0; indices[idx++]=f*4+2; indices[idx++]=f*4+3;
+    }
+    primitive_commit(&m, "Cube", verts, 24, indices, 36);
+}
 
-    /* Front face (Z-) — tangent points +X */
-    vec3 nf = {0.0f, 0.0f, -1.0f};
-    vec4 tf = {1.0f, 0.0f, 0.0f, 1.0f};
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nf, (vec2){0.0f,1.0f}, tf);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nf, (vec2){1.0f,0.0f}, tf);
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nf, (vec2){1.0f,1.0f}, tf);
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nf, (vec2){0.0f,1.0f}, tf);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nf, (vec2){0.0f,0.0f}, tf);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nf, (vec2){1.0f,0.0f}, tf);
+void circle(vec3 origin, float radius, Color color) {
+    Mesh m;
+    primitive_init_mesh(&m, "Circle", origin, color);
 
-    /* Back face (Z+) — tangent points -X */
-    vec3 nb = {0.0f, 0.0f, 1.0f};
-    vec4 tb = {-1.0f, 0.0f, 0.0f, 1.0f};
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nb, (vec2){0.0f,1.0f}, tb);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nb, (vec2){1.0f,0.0f}, tb);
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nb, (vec2){1.0f,1.0f}, tb);
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nb, (vec2){0.0f,1.0f}, tb);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nb, (vec2){0.0f,0.0f}, tb);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nb, (vec2){1.0f,0.0f}, tb);
+    int segs = 32;
+    uint32_t v_count = segs + 2;
+    uint32_t i_count = segs * 3;
+    Vertex*   verts   = calloc(v_count, sizeof(Vertex));
+    uint32_t* indices = calloc(i_count, sizeof(uint32_t));
 
-    /* Left face (X-) — tangent points -Z */
-    vec3 nl = {-1.0f, 0.0f, 0.0f};
-    vec4 tl = {0.0f, 0.0f, -1.0f, 1.0f};
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nl, (vec2){0.0f,1.0f}, tl);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nl, (vec2){1.0f,0.0f}, tl);
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nl, (vec2){1.0f,1.0f}, tl);
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nl, (vec2){0.0f,1.0f}, tl);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nl, (vec2){0.0f,0.0f}, tl);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nl, (vec2){1.0f,0.0f}, tl);
+    vec4 c = {color.r,color.g,color.b,color.a};
+    verts[0] = (Vertex){ .pos={0,0,0}, .normal={0,1,0}, .texCoord={0.5f,0.5f},
+                         .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    for (int i=0; i<=segs; i++) {
+        float a = (float)i/segs * 6.2831853f;
+        float px = cosf(a)*radius, pz = sinf(a)*radius;
+        verts[1+i] = (Vertex){ .pos={px,0,pz}, .normal={0,1,0},
+            .texCoord={(px/radius+1.0f)*0.5f,(pz/radius+1.0f)*0.5f},
+            .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    }
+    for (int i=0; i<segs; i++) {
+        indices[i*3+0]=0; indices[i*3+1]=i+2; indices[i*3+2]=i+1;
+    }
+    primitive_commit(&m, "Circle", verts, segs+2, indices, i_count);
+    free(verts); free(indices);
+}
 
-    /* Right face (X+) — tangent points +Z */
-    vec3 nr = {1.0f, 0.0f, 0.0f};
-    vec4 tr = {0.0f, 0.0f, 1.0f, 1.0f};
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nr, (vec2){0.0f,1.0f}, tr);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nr, (vec2){1.0f,0.0f}, tr);
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nr, (vec2){1.0f,1.0f}, tr);
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nr, (vec2){0.0f,1.0f}, tr);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nr, (vec2){0.0f,0.0f}, tr);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nr, (vec2){1.0f,0.0f}, tr);
+void cylinder(vec3 origin, float height, float radius, Color color) {
+    Mesh m;
+    primitive_init_mesh(&m, "Cylinder", origin, color);
 
-    /* Top face (Y+) — tangent points +X */
-    vec3 nt = {0.0f, 1.0f, 0.0f};
-    vec4 tt = {1.0f, 0.0f, 0.0f, 1.0f};
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nt, (vec2){0.0f,1.0f}, tt);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nt, (vec2){1.0f,0.0f}, tt);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]-s}, color, nt, (vec2){1.0f,1.0f}, tt);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]-s}, color, nt, (vec2){0.0f,1.0f}, tt);
-    vertex_full((vec3){origin[0]-s, origin[1]+s, origin[2]+s}, color, nt, (vec2){0.0f,0.0f}, tt);
-    vertex_full((vec3){origin[0]+s, origin[1]+s, origin[2]+s}, color, nt, (vec2){1.0f,0.0f}, tt);
+    int segs = 32;
+    uint32_t max_v = (segs+1)*2 + (segs+2)*2;
+    uint32_t max_i = segs*6 + segs*3*2;
+    Vertex*   verts   = calloc(max_v, sizeof(Vertex));
+    uint32_t* indices = calloc(max_i, sizeof(uint32_t));
+    vec4 c = {color.r,color.g,color.b,color.a};
+    uint32_t v=0, idx=0;
+    float h = height*0.5f;
 
-    /* Bottom face (Y-) — tangent points +X */
-    vec3 nbo = {0.0f, -1.0f, 0.0f};
-    vec4 tbo = {1.0f, 0.0f, 0.0f, 1.0f};
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nbo, (vec2){0.0f,1.0f}, tbo);
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nbo, (vec2){1.0f,0.0f}, tbo);
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]+s}, color, nbo, (vec2){1.0f,1.0f}, tbo);
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]+s}, color, nbo, (vec2){0.0f,1.0f}, tbo);
-    vertex_full((vec3){origin[0]-s, origin[1]-s, origin[2]-s}, color, nbo, (vec2){0.0f,0.0f}, tbo);
-    vertex_full((vec3){origin[0]+s, origin[1]-s, origin[2]-s}, color, nbo, (vec2){1.0f,0.0f}, tbo);
+    for (int i=0; i<=segs; i++) {
+        float u=(float)i/segs, a=u*6.2831853f;
+        float px=cosf(a)*radius, pz=sinf(a)*radius;
+        verts[v]   = (Vertex){ .pos={px,-h,pz}, .normal={px/radius,0,pz/radius}, .texCoord={u,1}, .color={c[0],c[1],c[2],c[3]}, .tangent={-pz/radius,0,px/radius,1} };
+        verts[v+1] = (Vertex){ .pos={px, h,pz}, .normal={px/radius,0,pz/radius}, .texCoord={u,0}, .color={c[0],c[1],c[2],c[3]}, .tangent={-pz/radius,0,px/radius,1} };
+        v+=2;
+    }
+    for (int i=0; i<segs; i++) {
+        uint32_t b=i*2;
+        indices[idx++]=b;   indices[idx++]=b+1; indices[idx++]=b+2;
+        indices[idx++]=b+1; indices[idx++]=b+3; indices[idx++]=b+2;
+    }
+    uint32_t tc=v;
+    verts[v++]=(Vertex){ .pos={0,h,0}, .normal={0,1,0}, .texCoord={0.5f,0.5f}, .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    for (int i=0; i<=segs; i++) {
+        float a=(float)i/segs*6.2831853f;
+        float px=cosf(a)*radius, pz=sinf(a)*radius;
+        verts[v++]=(Vertex){ .pos={px,h,pz}, .normal={0,1,0}, .texCoord={(px/radius+1)*0.5f,(pz/radius+1)*0.5f}, .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    }
+    for (int i=0; i<segs; i++) { indices[idx++]=tc; indices[idx++]=tc+2+i; indices[idx++]=tc+1+i; }
 
-    mat4 identity; glm_mat4_identity(identity);
-    emit_draw(first, 36, identity);
+    uint32_t bc=v;
+    verts[v++]=(Vertex){ .pos={0,-h,0}, .normal={0,-1,0}, .texCoord={0.5f,0.5f}, .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    for (int i=0; i<=segs; i++) {
+        float a=(float)i/segs*6.2831853f;
+        float px=cosf(a)*radius, pz=sinf(a)*radius;
+        verts[v++]=(Vertex){ .pos={px,-h,pz}, .normal={0,-1,0}, .texCoord={(px/radius+1)*0.5f,(1-pz/radius)*0.5f}, .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    }
+    for (int i=0; i<segs; i++) { indices[idx++]=bc; indices[idx++]=bc+1+i; indices[idx++]=bc+2+i; }
+
+    primitive_commit(&m, "Cylinder", verts, v, indices, idx);
+    free(verts); free(indices);
+}
+
+void cone(vec3 origin, float height, float radius, Color color) {
+    Mesh m;
+    primitive_init_mesh(&m, "Cone", origin, color);
+
+    int segs=32;
+    uint32_t max_v=(segs+1)*2 + segs+2;
+    uint32_t max_i=segs*3 + segs*3;
+    Vertex*   verts   = calloc(max_v, sizeof(Vertex));
+    uint32_t* indices = calloc(max_i, sizeof(uint32_t));
+    vec4 c={color.r,color.g,color.b,color.a};
+    uint32_t v=0, idx=0;
+    float h=height*0.5f;
+
+    for (int i=0; i<=segs; i++) {
+        float u=(float)i/segs, a=u*6.2831853f;
+        float px=cosf(a)*radius, pz=sinf(a)*radius;
+        vec3 n={px,0.5f*radius,pz}; glm_vec3_normalize(n);
+        verts[v]   = (Vertex){ .pos={px,-h,pz}, .normal={n[0],n[1],n[2]}, .texCoord={u,1}, .color={c[0],c[1],c[2],c[3]}, .tangent={-pz/radius,0,px/radius,1} };
+        verts[v+1] = (Vertex){ .pos={0,  h, 0}, .normal={n[0],n[1],n[2]}, .texCoord={u,0}, .color={c[0],c[1],c[2],c[3]}, .tangent={-pz/radius,0,px/radius,1} };
+        v+=2;
+    }
+    for (int i=0; i<segs; i++) {
+        uint32_t b=i*2;
+        indices[idx++]=b; indices[idx++]=b+1; indices[idx++]=b+2;
+    }
+    uint32_t bc=v;
+    verts[v++]=(Vertex){ .pos={0,-h,0}, .normal={0,-1,0}, .texCoord={0.5f,0.5f}, .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    for (int i=0; i<=segs; i++) {
+        float a=(float)i/segs*6.2831853f;
+        float px=cosf(a)*radius, pz=sinf(a)*radius;
+        verts[v++]=(Vertex){ .pos={px,-h,pz}, .normal={0,-1,0}, .texCoord={(px/radius+1)*0.5f,(1-pz/radius)*0.5f}, .color={c[0],c[1],c[2],c[3]}, .tangent={1,0,0,1} };
+    }
+    for (int i=0; i<segs; i++) { indices[idx++]=bc; indices[idx++]=bc+2+i; indices[idx++]=bc+1+i; }
+
+    primitive_commit(&m, "Cone", verts, v, indices, idx);
+    free(verts); free(indices);
+}
+
+void uv_sphere(vec3 origin, float radius, int lats, int lons, Color color) {
+    Mesh m;
+    primitive_init_mesh(&m, "UV Sphere", origin, color);
+
+    uint32_t v_count = (lats+1)*(lons+1);
+    uint32_t i_count = lats*lons*6;
+    Vertex*   verts   = calloc(v_count, sizeof(Vertex));
+    uint32_t* indices = calloc(i_count, sizeof(uint32_t));
+    vec4 c={color.r,color.g,color.b,color.a};
+    uint32_t v=0, idx=0;
+
+    for (int i=0; i<=lats; i++) {
+        float vt=(float)i/lats, phi=vt*3.14159265f;
+        for (int j=0; j<=lons; j++) {
+            float u=(float)j/lons, theta=u*6.2831853f;
+            float px=sinf(phi)*cosf(theta)*radius;
+            float py=cosf(phi)*radius;
+            float pz=sinf(phi)*sinf(theta)*radius;
+            verts[v++]=(Vertex){ .pos={px,py,pz}, .normal={px/radius,py/radius,pz/radius},
+                .texCoord={u,vt}, .color={c[0],c[1],c[2],c[3]}, .tangent={-sinf(theta),0,cosf(theta),1} };
+        }
+    }
+    for (int i=0; i<lats; i++) {
+        for (int j=0; j<lons; j++) {
+            uint32_t p0=i*(lons+1)+j, p1=p0+1, p2=(i+1)*(lons+1)+j, p3=p2+1;
+            indices[idx++]=p0; indices[idx++]=p1; indices[idx++]=p2;
+            indices[idx++]=p1; indices[idx++]=p3; indices[idx++]=p2;
+        }
+    }
+    primitive_commit(&m, "UV Sphere", verts, v_count, indices, i_count);
+    free(verts); free(indices);
+}
+
+void torus(vec3 origin, float major_radius, float minor_radius, int major_segs, int minor_segs, Color color) {
+    Mesh m;
+    primitive_init_mesh(&m, "Torus", origin, color);
+
+    uint32_t v_count = (major_segs+1)*(minor_segs+1);
+    uint32_t i_count = major_segs*minor_segs*6;
+    Vertex*   verts   = calloc(v_count, sizeof(Vertex));
+    uint32_t* indices = calloc(i_count, sizeof(uint32_t));
+    vec4 c={color.r,color.g,color.b,color.a};
+    uint32_t v=0, idx=0;
+
+    for (int i=0; i<=major_segs; i++) {
+        float u=(float)i/major_segs, a1=u*6.2831853f;
+        float cos1=cosf(a1), sin1=sinf(a1);
+        for (int j=0; j<=minor_segs; j++) {
+            float vt=(float)j/minor_segs, a2=vt*6.2831853f;
+            float cos2=cosf(a2), sin2=sinf(a2);
+            float r=major_radius+minor_radius*cos2;
+            float px=r*cos1, py=minor_radius*sin2, pz=r*sin1;
+            float nx=cos2*cos1, ny=sin2, nz=cos2*sin1;
+            verts[v++]=(Vertex){ .pos={px,py,pz}, .normal={nx,ny,nz},
+                .texCoord={u,vt}, .color={c[0],c[1],c[2],c[3]}, .tangent={-sin1,0,cos1,1} };
+        }
+    }
+    for (int i=0; i<major_segs; i++) {
+        for (int j=0; j<minor_segs; j++) {
+            uint32_t p0=i*(minor_segs+1)+j, p1=p0+1, p2=(i+1)*(minor_segs+1)+j, p3=p2+1;
+            indices[idx++]=p0; indices[idx++]=p1; indices[idx++]=p2;
+            indices[idx++]=p1; indices[idx++]=p3; indices[idx++]=p2;
+        }
+    }
+    primitive_commit(&m, "Torus", verts, v_count, indices, i_count);
+    free(verts); free(indices);
 }
 
 static void triangle_batched(vec3 a, vec3 b, vec3 c, Color color) {

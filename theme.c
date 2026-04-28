@@ -84,6 +84,7 @@ void initThemes() {
         .red                   = hexToColor("#FC7F7F"),
         .blue                  = hexToColor("#8DA5F3"),
         .bound                 = hexToColor("#FFCCFF"),
+        .wireframe             = hexToColor("#0B0B0B"),
         .collision             = hexToColor("#7CE693"),
         .gltf                  = hexToColor("#87C63E"),
         .x                     = hexToColor("#EF4F6B"),
