@@ -165,6 +165,8 @@ bool  editor_panel_is_open(PanelSide side);
 /// Inspector API
 
 void inspector_select_mesh(int index);
+void inspector_show_collider(void);
+void inspector_show_material(void);
 void inspector_deselect(void);
 
 /// Hierarchy API
@@ -175,3 +177,6 @@ void hierarchy_select(int index);
 
 bool file_manager_navigate(const char* path);
 void file_manager_navigate_up(void);
+
+
+void inspector_select_mesh_internal(int index);

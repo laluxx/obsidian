@@ -93,6 +93,9 @@ layout(push_constant) uniform PC {
     DummyBuffer  dynamicBoundsData;
     DummyBuffer  meshletVertexAddr;
     DummyBuffer  meshletTriangleAddr;
+    DummyBuffer  sdfBufferAddr;
+    int          sdfCount;
+    int          _pad1;
 } pc;
 
 layout(location = 0) out vec3 outWorldPos;

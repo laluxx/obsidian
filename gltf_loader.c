@@ -1052,6 +1052,7 @@ int32_t scene_tree_add_node(SceneTree* tree, const char* name, int32_t parent_id
     node->first_child  = -1;
     node->next_sibling = -1;
     node->mesh_index   = mesh_index;
+    node->sdf_index = -1;
     node->expanded     = false;
     node->visible      = true;
 

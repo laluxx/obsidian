@@ -104,6 +104,8 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Jo
     PackedJoint joints[];
 };
 
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DummyBuffer { uint dummy[]; };
+
 layout(push_constant) uniform PC {
     int          ambientOcclusionEnabled;
     int          iblEnabled;
@@ -112,6 +114,17 @@ layout(push_constant) uniform PC {
     MeshBuffer   meshData;
     VertexBuffer vertexData;
     JointBuffer  jointData;
+    DummyBuffer  morphData;
+    DummyBuffer  weightData;
+    DummyBuffer  meshletData;
+    DummyBuffer  boundsData;
+    DummyBuffer  meshletSkinData;
+    DummyBuffer  dynamicBoundsData;
+    DummyBuffer  meshletVertexAddr;
+    DummyBuffer  meshletTriangleAddr;
+    DummyBuffer  sdfBufferAddr;
+    int          sdfCount;
+    int          _pad1;
 } pc;
 
 // ── Vertex shader outputs ─────────────────────────────────────────────────────

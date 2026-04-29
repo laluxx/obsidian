@@ -126,6 +126,9 @@ layout(push_constant) uniform PC {
     DummyBuffer  dynamicBounds;
     MLVertBuffer meshletVertexData;
     MLTriBuffer  meshletTriangleData;
+    DummyBuffer  sdfBufferAddr;
+    int          sdfCount;
+    int          _pad1;
 } pc;
 
 struct TaskPayload {

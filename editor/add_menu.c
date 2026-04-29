@@ -100,22 +100,64 @@ extern void physics_rebuild_mesh(Mesh* m);
 
 static void add_collider_to_selected(int type, const char* name) {
     (void)name;
-    if (editor.inspector.selected_mesh_index >= 0 && editor.inspector.selected_mesh_index < (int)scene.meshes.count) {
-        Mesh* m = &scene.meshes.items[editor.inspector.selected_mesh_index];
+    int mi = editor.inspector.selected_mesh_index;
+    if (mi >= 0 && mi < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[mi];
         m->collider_type = type;
         physics_rebuild_mesh(m);
-        // The Collider node is synthetic — generated at DFS render time from
-        // m->collider_type > 0, exactly like Skeleton. We never create a real
-        // scene tree node for it; doing so causes duplicate display and
-        // multi-selection corruption.
         extern bool scene_topology_dirty;
         scene_topology_dirty = true;
+        inspector_show_collider();
+        inspector_select_mesh_internal(mi);
     }
 }
 
 static void action_col_cube()    { add_collider_to_selected(1, "Cube Collider"); }
 static void action_col_sphere()  { add_collider_to_selected(2, "Sphere Collider"); }
 static void action_col_capsule() { add_collider_to_selected(3, "Capsule Collider"); }
+
+static void action_sdf_sphere() {
+    sdfs_add(&scene, "SDF Sphere", SDF_TYPE_SPHERE, (vec3){0, 0, 0}, (vec4){1.0f, 0, 0, 0}, (vec4){0.8f, 0.2f, 0.2f, 1.0f});
+    message(MSG_SUCCESS, "SDF Sphere added!");
+}
+static void action_sdf_cube()   {
+    sdfs_add(&scene, "SDF Cube", SDF_TYPE_BOX, (vec3){2, 0, 0}, (vec4){1.0f, 1.0f, 1.0f, 0}, (vec4){0.2f, 0.8f, 0.2f, 1.0f});
+    message(MSG_SUCCESS, "SDF Cube added!");
+}
+
+static void action_add_material(void) {
+    int mi = editor.inspector.selected_mesh_index;
+    if (mi < 0 || mi >= (int)scene.meshes.count) return;
+    Mesh* m = &scene.meshes.items[mi];
+    m->wireframe          = false;
+    m->baseColorFactor[0] = 1.0f;
+    m->baseColorFactor[1] = 1.0f;
+    m->baseColorFactor[2] = 1.0f;
+    m->baseColorFactor[3] = 1.0f;
+    m->metallicFactor     = 0.0f;
+    m->roughnessFactor    = 0.5f;
+    m->emissiveStrength   = 1.0f;
+    if (m->node) {
+        int32_t mesh_node_idx = (int32_t)(uintptr_t)m->node;
+        bool has_material_node = false;
+        int32_t c = scene.tree.nodes[mesh_node_idx].first_child;
+        while (c >= 0) {
+            if (strcmp(scene.tree.nodes[c].name, "Material") == 0) {
+                has_material_node = true; break;
+            }
+            c = scene.tree.nodes[c].next_sibling;
+        }
+        if (!has_material_node)
+            scene_tree_add_node(&scene.tree, "Material", mesh_node_idx, -1);
+    }
+    extern bool scene_topology_dirty;
+    scene_topology_dirty = true;
+    markMeshesSSBODirty(&context);
+    inspector_show_material();
+    inspector_select_mesh_internal(mi);
+    message(MSG_SUCCESS, "Material added");
+    add_menu_close();
+}
 
 void regenerate_active_primitive(void) {
     if (!adjust_state.active || adjust_state.mesh_index < 0 || adjust_state.mesh_index >= (int)scene.meshes.count) return;
@@ -243,9 +285,16 @@ static MenuItem collider_children[] = {
     {"Capsule", -1, false, NULL, 0, action_col_capsule}
 };
 
+static MenuItem sdf_children[] = {
+    {"Sphere", -1, false, NULL, 0, action_sdf_sphere},
+    {"Cube",   -1, false, NULL, 0, action_sdf_cube}
+};
+
 static MenuItem root_children[] = {
-    {"Mesh", -1, true, mesh_children, sizeof(mesh_children)/sizeof(MenuItem), NULL},
-    {"Collider", -1, true, collider_children, sizeof(collider_children)/sizeof(MenuItem), NULL}
+    {"Mesh",     -1, true,  mesh_children,     sizeof(mesh_children)/sizeof(MenuItem),      NULL},
+    {"Collider", -1, true,  collider_children, sizeof(collider_children)/sizeof(MenuItem), NULL},
+    {"SDF",      -1, true,  sdf_children,      sizeof(sdf_children)/sizeof(MenuItem),      NULL},
+    {"Material", -1, false, NULL, 0, NULL}
 };
 
 static MenuItem root_menu = {
@@ -274,10 +323,18 @@ static bool str_contains_ci(const char* haystack, const char* needle) {
 }
 
 // --- Filtering & View Management ---
+static bool mesh_has_material(void) {
+    int mi = editor.inspector.selected_mesh_index;
+    if (mi < 0 || mi >= (int)scene.meshes.count) return true;
+    Mesh* m = &scene.meshes.items[mi];
+    return !m->wireframe;
+}
+
 static void flatten_search_recursive(MenuItem* node, const char* query) {
     if (add_menu.visible_count >= ADD_MENU_MAX_RESULTS) return;
 
     if (node == &root_children[1] && editor.inspector.selected_mesh_index == -1) return;
+    if (node == &root_children[3] && mesh_has_material()) return;
 
     if (!node->is_menu) {
         if (str_contains_ci(node->name, query)) {
@@ -293,15 +350,19 @@ static void flatten_search_recursive(MenuItem* node, const char* query) {
 static void add_menu_filter(void) {
     add_menu.visible_count = 0;
 
+    // Wire the Material action dynamically
+    root_children[3].action = action_add_material;
+
     if (add_menu.input_length == 0) {
-        // Show current directory in hierarchy
         MenuItem* current = add_menu.menu_stack[add_menu.stack_depth];
         for (int i = 0; i < current->child_count && i < ADD_MENU_MAX_RESULTS; i++) {
+            // Collider: only show if a mesh is selected
             if (&current->children[i] == &root_children[1] && editor.inspector.selected_mesh_index == -1) continue;
+            // Material: only show if selected mesh has no material
+            if (&current->children[i] == &root_children[3] && mesh_has_material()) continue;
             add_menu.visible_items[add_menu.visible_count++] = &current->children[i];
         }
     } else {
-        // Deep search all leaves
         for (int i = 0; i < root_menu.child_count; i++) {
             flatten_search_recursive(&root_menu.children[i], add_menu.input);
         }
@@ -488,6 +549,7 @@ void add_menu_init(void) {
     // Assign icons to the structure
     root_children[0].icon_id  = add_menu.icon_mesh;
     root_children[1].icon_id  = add_menu.icon_collider_cat;
+    root_children[2].icon_id  = add_menu.icon_uvsphere; // Reusing uvsphere icon for SDF for now
 
     collider_children[0].icon_id = add_menu.icon_col_cube;
     collider_children[1].icon_id = add_menu.icon_col_sphere;

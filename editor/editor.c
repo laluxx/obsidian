@@ -30,6 +30,7 @@ Editor editor = {0};
 bool editor_show_bones = true;
 void* editor_selected_bone = NULL;
 AdjustPrimitiveState adjust_state = {0};
+int g_selected_sdf_index = -1;
 
 // UI Input State
 static double s_ui_mx = 0.0;
@@ -50,6 +51,10 @@ static int32_t s_icon_hidden = -1;
 static int32_t s_icon_bone = -1;
 static int32_t s_icon_skeleton = -1;
 static int32_t s_icon_material = -1;
+static int32_t s_icon_sdf = -1;
+static int32_t s_icon_col_cube = -1;
+static int32_t s_icon_col_sphere = -1;
+static int32_t s_icon_col_capsule = -1;
 static bool s_inspector_show_skeleton_only = false;
 static bool s_inspector_show_material_only = false;
 static bool s_inspector_show_collider_only = false;
@@ -865,6 +870,93 @@ typedef struct {
 } ToggleAnimState;
 static ToggleAnimState s_toggles[128];
 
+typedef struct {
+    void* id;
+    float shake_t;    // 0 = idle, >0 = shaking (counts down)
+    float shake_x;    // current horizontal offset
+} LockShakeState;
+static LockShakeState s_lock_shakes[32];
+
+static LockShakeState* get_lock_shake(void* id) {
+    for (int i = 0; i < 32; i++) {
+        if (s_lock_shakes[i].id == id) return &s_lock_shakes[i];
+        if (s_lock_shakes[i].id == NULL) {
+            s_lock_shakes[i].id = id;
+            return &s_lock_shakes[i];
+        }
+    }
+    return NULL;
+}
+
+static void field_toggle_locked(float cx, float row, float col2_x, float cw, const char* label, bool* val) {
+    (void)cw;
+    if (!editor.font) return;
+
+    LockShakeState* shake = get_lock_shake((void*)val);
+
+    float offset_x = 0.0f;
+    if (shake && shake->shake_t > 0.0f) {
+        shake->shake_t -= s_ui_dt * 6.0f;
+        if (shake->shake_t < 0.0f) shake->shake_t = 0.0f;
+        offset_x = sinf(shake->shake_t * 28.0f) * (5.0f * shake->shake_t);
+    }
+
+    // Draw label first, then lock icon immediately after
+    text(editor.font, label, cx + offset_x, row, CT.text_dim);
+    if (s_icon_lock >= 0) {
+        Texture2D* tex = texture_pool_get(s_icon_lock);
+        if (tex && tex->loaded) {
+            float lw = measure_text_width(editor.font, label, 1.0f);
+            float icon_y = row - (editor.font->ascent - editor.font->descent) * 0.5f - 1.0f;
+            texture2D((vec2){cx + lw + 6.0f + offset_x, icon_y}, (vec2){16, 16}, tex, CT.text_dim);
+        }
+    }
+
+    // Compute toggle track geometry — same as field_toggle does internally
+    float box_h   = editor.font->ascent - editor.font->descent + 6.0f;
+    float box_y   = row - editor.font->descent - 3.0f;
+    float track_h = box_h * 0.7f;
+    float track_w = 34.0f;
+    float track_y = box_y + (box_h - track_h) * 0.5f;
+    float track_x = col2_x + 8.0f;
+
+    // Hit test on the track — shake on click
+    bool track_hovered = (s_ui_mx >= track_x && s_ui_mx <= track_x + track_w &&
+                          s_ui_my >= track_y && s_ui_my <= track_y + track_h);
+    if (track_hovered && s_ui_mclicked && shake) {
+        shake->shake_t = 1.0f;
+    }
+
+    // Draw the track and thumb read-only using the toggle anim state
+    // We reuse the existing ToggleAnimState so the thumb is already settled
+    ToggleAnimState* anim = NULL;
+    for (int i = 0; i < 128; i++) {
+        if (s_toggles[i].id == (void*)val) { anim = &s_toggles[i]; break; }
+        if (s_toggles[i].id == NULL) {
+            s_toggles[i].id      = (void*)val;
+            s_toggles[i].t       = *val ? 1.0f : 0.0f;
+            s_toggles[i].vel     = 0.0f;
+            s_toggles[i].color_t = *val ? 1.0f : 0.0f;
+            anim = &s_toggles[i];
+            break;
+        }
+    }
+
+    if (anim) {
+        // No physics update — value is locked, just render current state
+        Color track_col = lerp_color(CT.bg_deep, CT.success, anim->color_t);
+        vec4 track_rad  = {track_h*0.5f, track_h*0.5f, track_h*0.5f, track_h*0.5f};
+        exQuad2D((vec2){track_x, track_y}, (vec2){track_w, track_h}, track_rad, 0.0f, track_col, track_col);
+
+        float thumb_size  = track_h - 4.0f;
+        float thumb_min_x = track_x + 2.0f;
+        float thumb_max_x = track_x + track_w - 2.0f - thumb_size;
+        float thumb_x     = thumb_min_x + (thumb_max_x - thumb_min_x) * anim->t;
+        vec4 thumb_rad    = {thumb_size*0.5f, thumb_size*0.5f, thumb_size*0.5f, thumb_size*0.5f};
+        exQuad2D((vec2){thumb_x, track_y + 2.0f}, (vec2){thumb_size, thumb_size}, thumb_rad, 0.0f, CT.text_dim, CT.text_dim);
+    }
+}
+
 static bool field_toggle(float cx, float row, float col2_x, float cw, const char* label, bool* val, int32_t icon_id) {
     (void)cw;
     bool changed = false;
@@ -1146,6 +1238,138 @@ static bool field_int(float cx, float row, float col2_x, float cw,
     return changed;
 }
 
+typedef struct {
+    void*  id;
+    bool   open;
+    float  anim_t;
+} DropdownState;
+static DropdownState s_dropdowns[32];
+
+static DropdownState* get_dropdown_state(void* id) {
+    for (int i = 0; i < 32; i++) {
+        if (s_dropdowns[i].id == id) return &s_dropdowns[i];
+        if (s_dropdowns[i].id == NULL) { s_dropdowns[i].id = id; return &s_dropdowns[i]; }
+    }
+    return NULL;
+}
+
+static bool field_dropdown(float cx, float row, float col2_x, float cw,
+                           const char* label,
+                           int* val,
+                           const char** options, const int32_t* option_icons, const Color* option_colors,
+                           int option_count,
+                           int32_t label_icon_id) {
+    if (!editor.font) return false;
+    bool changed = false;
+
+    text(editor.font, label, cx, row, CT.text_dim);
+    if (label_icon_id >= 0) draw_field_icon(cx, row, label, label_icon_id);
+
+    float box_h   = editor.font->ascent - editor.font->descent + 6.0f;
+    float box_y   = row - editor.font->descent - 3.0f;
+    float box_x   = col2_x;
+    float box_w   = (cx + cw) - box_x;
+
+    DropdownState* ds = get_dropdown_state((void*)val);
+
+    bool hovered = (s_ui_mx >= box_x && s_ui_mx <= box_x + box_w &&
+                    s_ui_my >= box_y  && s_ui_my <= box_y + box_h);
+
+    if (hovered && s_ui_mclicked) {
+        if (ds) ds->open = !ds->open;
+    }
+
+    // Draw the main box
+    Color box_bg = (hovered && !ds->open) ? CT.bg_alt : CT.bg_deep;
+    exQuad2D((vec2){box_x, box_y}, (vec2){box_w, box_h},
+             (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, box_bg, box_bg);
+
+    // Current selection icon + text
+    int cur = (*val >= 0 && *val < option_count) ? *val : 0;
+    float icon_x = box_x + 6.0f;
+    if (option_icons && option_icons[cur] >= 0) {
+        Texture2D* ico = texture_pool_get(option_icons[cur]);
+        if (ico && ico->loaded) {
+            Color ic = option_colors ? option_colors[cur] : CT.text;
+            float icon_y = box_y + (box_h - 14.0f) * 0.5f;
+            texture2D((vec2){icon_x, icon_y}, (vec2){14, 14}, ico, ic);
+        }
+        icon_x += 18.0f;
+    }
+    Color sel_col = option_colors ? option_colors[cur] : CT.text;
+    text(editor.font, options[cur], icon_x, row, sel_col);
+
+    // Chevron arrow on the right
+    float chev_x = box_x + box_w - 18.0f;
+    float chev_y = box_y + box_h * 0.5f;
+    Color chev_col = hovered ? CT.text : CT.text_dim;
+    // Draw a small downward triangle
+    float tri_s = 4.0f;
+    exQuad2D((vec2){chev_x, chev_y - tri_s * 0.5f}, (vec2){tri_s * 2.0f, tri_s},
+             (vec4){1.0f, 1.0f, 1.0f, 1.0f}, 0.0f, chev_col, chev_col);
+
+    // Dropdown popup
+    if (ds && ds->open) {
+        float pop_item_h = box_h + 2.0f;
+        float pop_h = option_count * pop_item_h + 4.0f;
+        float pop_x = box_x;
+        float pop_y = box_y - pop_h;
+
+        // Keep popup on screen
+        if (pop_y < 4.0f) pop_y = box_y + box_h + 2.0f;
+
+        exQuad2D((vec2){pop_x + 3.0f, pop_y - 3.0f}, (vec2){box_w, pop_h},
+                 (vec4){6.0f, 6.0f, 6.0f, 6.0f}, 0.0f, (Color){0,0,0,0.35f}, (Color){0,0,0,0.35f});
+        exQuad2D((vec2){pop_x, pop_y}, (vec2){box_w, pop_h},
+                 (vec4){6.0f, 6.0f, 6.0f, 6.0f}, 1.0f, CT.border, CT.bg);
+
+        float item_y = pop_y + pop_h - 2.0f - pop_item_h * 0.5f;
+        for (int i = 0; i < option_count; i++) {
+            bool item_hov = (s_ui_mx >= pop_x && s_ui_mx <= pop_x + box_w &&
+                             s_ui_my >= item_y - pop_item_h * 0.5f &&
+                             s_ui_my <= item_y + pop_item_h * 0.5f);
+            bool is_cur   = (i == *val);
+
+            if (item_hov || is_cur) {
+                Color hl = is_cur ? CT.vertico_current : CT.bg_alt;
+                exQuad2D((vec2){pop_x + 3.0f, item_y - pop_item_h * 0.5f + 1.0f},
+                         (vec2){box_w - 6.0f, pop_item_h - 2.0f},
+                         (vec4){4.0f, 4.0f, 4.0f, 4.0f}, 0.0f, hl, hl);
+            }
+
+            float ix = pop_x + 8.0f;
+            if (option_icons && option_icons[i] >= 0) {
+                Texture2D* ico = texture_pool_get(option_icons[i]);
+                if (ico && ico->loaded) {
+                    Color ic = option_colors ? option_colors[i] : CT.text;
+                    float iy = item_y - 7.0f;
+                    texture2D((vec2){ix, iy}, (vec2){14, 14}, ico, ic);
+                }
+                ix += 18.0f;
+            }
+            Color tc = option_colors ? option_colors[i] : (item_hov ? CT.text : CT.text_dim);
+            text(editor.font, options[i], ix, item_y, tc);
+
+            if (item_hov && s_ui_mclicked) {
+                *val = i;
+                changed = true;
+                ds->open = false;
+            }
+
+            item_y -= pop_item_h;
+        }
+
+        // Close if clicked outside
+        bool inside_pop = (s_ui_mx >= pop_x && s_ui_mx <= pop_x + box_w &&
+                           s_ui_my >= pop_y  && s_ui_my <= pop_y + pop_h);
+        if (s_ui_mclicked && !inside_pop && !hovered) {
+            ds->open = false;
+        }
+    }
+
+    return changed;
+}
+
 static void field_text(float cx, float row, float col2_x, float cw,
                        const char* label, const char* value, int32_t icon_id) {
     (void)cw;
@@ -1179,6 +1403,88 @@ static bool begin_section(const char* label, bool* is_open, float cx, float* row
 
     *row -= lh + 6.0f;
     return *is_open;
+}
+
+static bool field_vec3_expanded(float cx, float* row, float col2_x, float cw, const char* label, float* v, float speed);
+
+static bool inspector_draw_pbr_material(float cx, float* row, float col2_mat, float cw, float lh,
+                                        vec4 color, vec3 emissive, float* em_str,
+                                        float* metallic, float* roughness,
+                                        float* transmission, float* ior, float* thickness,
+                                        vec3 atten_color, float* atten_dist, float* dispersion)
+{
+    bool mat_changed = false;
+    bool sync_proxies = (!s_color_picker.visible && s_ui_active_id == NULL);
+
+    if (color) mat_changed |= field_vec4_color(cx, *row, col2_mat, cw, "Color", color, -1);
+    *row -= lh + 6.0f;
+
+    if (emissive) {
+        static vec4 s_proxy_emissive = {0};
+        if (sync_proxies) {
+            memcpy(s_proxy_emissive, emissive, 3 * sizeof(float)); s_proxy_emissive[3] = 1.0f;
+        }
+        if (field_vec4_color(cx, *row, col2_mat, cw, "Emissive", s_proxy_emissive, -1)) {
+            memcpy(emissive, s_proxy_emissive, 3 * sizeof(float));
+            mat_changed = true;
+        }
+        *row -= lh + 6.0f;
+    }
+
+    if (em_str) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "Emissive Strength", em_str, 0.1f, true, 0.0f, 1e6f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    if (metallic) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "Metallic", metallic, 0.01f, true, 0.0f, 1.0f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    if (roughness) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "Roughness", roughness, 0.01f, true, 0.0f, 1.0f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    if (transmission) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "Transmission", transmission, 0.01f, true, 0.0f, 1.0f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    if (ior) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "IOR", ior, 0.01f, true, 1.0f, 3.0f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    if (thickness) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "Thickness", thickness, 0.01f, true, 0.0f, 100.0f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    if (atten_color) {
+        static vec4 s_proxy_atten = {0};
+        if (sync_proxies) {
+            memcpy(s_proxy_atten, atten_color, 3 * sizeof(float)); s_proxy_atten[3] = 1.0f;
+        }
+        if (field_vec4_color(cx, *row, col2_mat, cw, "Atten. Color", s_proxy_atten, -1)) {
+            memcpy(atten_color, s_proxy_atten, 3 * sizeof(float));
+            mat_changed = true;
+        }
+        *row -= lh + 6.0f;
+    }
+
+    if (atten_dist) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "Atten. Distance", atten_dist, 0.1f, true, 0.0f, 1e6f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    if (dispersion) {
+        mat_changed |= field_float(cx, *row, col2_mat, cw, "Dispersion", dispersion, 0.01f, true, 0.0f, 1.0f, -1);
+        *row -= lh + 6.0f;
+    }
+
+    *row -= 6.0f;
+    return mat_changed;
 }
 
 static void render_image_inspector_content(float cx, float cy, float cw, float ch) {
@@ -1278,10 +1584,77 @@ static void bone_on_toggle_expand(int index, const TreeViewItem* item) {
     if (node) node->expanded = !node->expanded;
 }
 
+static void render_sdf_inspector(float cx, float cy, float cw, float ch) {
+    if (g_selected_sdf_index < 0 || g_selected_sdf_index >= (int)scene.sdf_count) return;
+    SdfPrimitive* prim = &scene.sdfs[g_selected_sdf_index];
+
+    float lh = editor.font->ascent - editor.font->descent + LH_EXTRA;
+    float col2 = cx + 120.0f;
+    float row = cy + ch - PAD;
+
+    static bool s_sec_transform = true;
+    static bool s_sec_material = true;
+
+    if (!s_inspector_show_material_only && begin_section("SDF Transform", &s_sec_transform, cx, &row, cw, lh)) {
+        mat4 transform;
+        glm_mat4_inv(prim->inverseTransform, transform);
+        vec3 pos = {transform[3][0], transform[3][1], transform[3][2]};
+
+        bool changed = false;
+        changed |= field_vec3(cx, row, col2, cw, "Position", pos, "m", 0.05f, -1);
+        row -= lh + 6.0f;
+
+        if (prim->type == SDF_TYPE_SPHERE) {
+            changed |= field_float(cx, row, col2, cw, "Radius", &prim->size[0], 0.05f, true, 0.0f, 1000.0f, -1);
+        } else if (prim->type == SDF_TYPE_BOX) {
+            vec3 extents = {prim->size[0], prim->size[1], prim->size[2]};
+            if (field_vec3(cx, row, col2, cw, "Extents", extents, "m", 0.05f, -1)) {
+                prim->size[0] = extents[0]; prim->size[1] = extents[1]; prim->size[2] = extents[2];
+                changed = true;
+            }
+        }
+        row -= lh + 6.0f;
+
+        static const char* op_names[] = {"Union", "Smooth Union", "Smooth Subtract"};
+        if (field_dropdown(cx, row, col2, cw, "Operation", &prim->operation, op_names, NULL, NULL, 3, -1)) changed = true;
+        row -= lh + 6.0f;
+
+        if (prim->operation == 1 || prim->operation == 2) {
+            changed |= field_float(cx, row, col2, cw, "Smoothness", &prim->smoothness, 0.01f, true, 0.0f, 10.0f, -1);
+            row -= lh + 6.0f;
+        }
+        row -= 6.0f;
+
+        if (changed) {
+            glm_mat4_identity(transform);
+            glm_translate(transform, pos);
+            glm_mat4_inv(transform, prim->inverseTransform);
+            flushSdfSSBO();
+        }
+    }
+
+    if ((s_inspector_show_material_only || !s_inspector_show_material_only) && begin_section("Material", &s_sec_material, cx, &row, cw, lh)) {
+        float space_w = font_width(editor.font);
+        float col2_mat = cx + strlen("Emissive Strength") * space_w + space_w;
+
+        if (inspector_draw_pbr_material(cx, &row, col2_mat, cw, lh,
+                                        prim->color, prim->emissive, &prim->emissiveStrength,
+                                        &prim->metallic, &prim->roughness,
+                                        NULL, NULL, NULL, NULL, NULL, NULL)) {
+            flushSdfSSBO();
+        }
+    }
+}
+
 static void render_inspector_content(float cx, float cy, float cw, float ch) {
     // Smart Routing: If the Image Viewer is open AND not actively closing, it steals the focus!
     if (s_image_viewer.visible && !s_image_viewer.window.closing) {
         render_image_inspector_content(cx, cy, cw, ch);
+        return;
+    }
+
+    if (g_selected_sdf_index >= 0 && g_selected_sdf_index < (int)scene.sdf_count) {
+        render_sdf_inspector(cx, cy, cw, ch);
         return;
     }
 
@@ -1352,63 +1725,14 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
     }
 
     // ── Material ───────────────────────────────────────────────────────────
-    if (!s_inspector_show_skeleton_only && !s_inspector_show_collider_only) {
+    bool mesh_has_mat = !m->wireframe;
+    if (!s_inspector_show_skeleton_only && !s_inspector_show_collider_only && (s_inspector_show_material_only || mesh_has_mat)) {
         if (begin_section("Material", &s_sec_material, cx, &row, cw, lh)) {
-            static vec4 s_proxy_emissive = {0};
-            static vec4 s_proxy_attenuation = {0};
-            static int s_proxy_mesh_idx = -1;
-
-            if (s_proxy_mesh_idx != s->selected_mesh_index || (!s_color_picker.visible && s_ui_active_id == NULL)) {
-                s_proxy_mesh_idx = s->selected_mesh_index;
-                memcpy(s_proxy_emissive, m->emissiveFactor, 3 * sizeof(float)); s_proxy_emissive[3] = 1.0f;
-                memcpy(s_proxy_attenuation, m->attenuationColor, 3 * sizeof(float)); s_proxy_attenuation[3] = 1.0f;
-            }
-
-            bool mat_changed = false;
-            mat_changed |= field_vec4_color(cx, row, col2, cw, "Color", m->baseColorFactor, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_vec4_color(cx, row, col2, cw, "Emissive", s_proxy_emissive, -1);
-            if (memcmp(m->emissiveFactor, s_proxy_emissive, 3 * sizeof(float)) != 0) {
-                memcpy(m->emissiveFactor, s_proxy_emissive, 3 * sizeof(float));
-                mat_changed = true;
-            }
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "Emissive Strength", &m->emissiveStrength, 0.1f, true, 0.0f, 1e6f, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "Metallic", &m->metallicFactor, 0.01f, true, 0.0f, 1.0f, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "Roughness", &m->roughnessFactor, 0.01f, true, 0.0f, 1.0f, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "Transmission", &m->transmissionFactor, 0.01f, true, 0.0f, 1.0f, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "IOR", &m->ior, 0.01f, true, 1.0f, 3.0f, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "Thickness", &m->thicknessFactor, 0.01f, true, 0.0f, 100.0f, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_vec4_color(cx, row, col2_mat, cw, "Atten. Color", s_proxy_attenuation, -1);
-            if (memcmp(m->attenuationColor, s_proxy_attenuation, 3 * sizeof(float)) != 0) {
-                memcpy(m->attenuationColor, s_proxy_attenuation, 3 * sizeof(float));
-                mat_changed = true;
-            }
-
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "Atten. Distance", &m->attenuationDistance, 0.1f, true, 0.0f, 1e6f, -1);
-            row -= lh + 6.0f;
-
-            mat_changed |= field_float(cx, row, col2_mat, cw, "Dispersion", &m->dispersion, 0.01f, true, 0.0f, 1.0f, -1);
-            row -= lh + 6.0f;
-            row -= 6.0f;
-
-            if (mat_changed) {
+            if (inspector_draw_pbr_material(cx, &row, col2_mat, cw, lh,
+                                            m->baseColorFactor, m->emissiveFactor, &m->emissiveStrength,
+                                            &m->metallicFactor, &m->roughnessFactor,
+                                            &m->transmissionFactor, &m->ior, &m->thicknessFactor,
+                                            m->attenuationColor, &m->attenuationDistance, &m->dispersion)) {
                 markMeshesSSBODirty(&context);
             }
         }
@@ -1450,8 +1774,12 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
             }
             row -= lh + 6.0f;
 
-            if (field_toggle(cx, row, col2_geo, cw, "Wireframe", &m->wireframe, -1)) {
-                markMeshesSSBODirty(&context);
+            if (mesh_has_mat) {
+                if (field_toggle(cx, row, col2_geo, cw, "Wireframe", &m->wireframe, -1)) {
+                    markMeshesSSBODirty(&context);
+                }
+            } else {
+                field_toggle_locked(cx, row, col2_geo, cw, "Wireframe", &m->wireframe);
             }
             row -= lh + 6.0f;
 
@@ -1482,12 +1810,32 @@ static void render_inspector_content(float cx, float cy, float cw, float ch) {
             }
             row -= 6.0f;
         }
+    }
 
-        // ── Collider ───────────────────────────────────────────────────────────
+    // ── Collider ───────────────────────────────────────────────────────────
+    if (m->collider_type > 0 && !s_inspector_show_skeleton_only && !s_inspector_show_material_only) {
         static bool s_sec_collider = true;
-        if (s_inspector_show_collider_only || begin_section("Collider", &s_sec_collider, cx, &row, cw, lh)) {
+        bool collider_open = s_inspector_show_collider_only
+            ? (begin_section("Collider", &s_sec_collider, cx, &row, cw, lh), true)
+            : begin_section("Collider", &s_sec_collider, cx, &row, cw, lh);
+        if (collider_open) {
             bool phys_changed = false;
-            if (field_int(cx, row, col2_geo, cw, "Collider Type", &m->collider_type, 0, 2, -1)) phys_changed = true;
+            {
+                static const char* col_type_names[] = {"None", "Cube", "Sphere", "Capsule"};
+                static int32_t col_type_icons[4];
+                static Color   col_type_colors[4];
+                col_type_icons[0]  = -1;
+                col_type_icons[1]  = s_icon_col_cube;
+                col_type_icons[2]  = s_icon_col_sphere;
+                col_type_icons[3]  = s_icon_col_capsule;
+                col_type_colors[0] = CT.text_dim;
+                col_type_colors[1] = CT.collision;
+                col_type_colors[2] = CT.collision;
+                col_type_colors[3] = CT.collision;
+                if (field_dropdown(cx, row, col2_geo, cw, "Type",
+                                   &m->collider_type,
+                                   col_type_names, col_type_icons, col_type_colors, 4, -1)) phys_changed = true;
+            }
             row -= lh + 6.0f;
 
             if (m->collider_type > 0) {
@@ -2126,22 +2474,20 @@ static void hier_on_select(int index, const TreeViewItem* item) {
     // Synthetic nodes (Skeleton tag=1, Collider tag=2) store the PARENT mesh
     // node index in user_data. The node itself IS the mesh node.
     if (item->tag == 1) {
-        // Skeleton synthetic node — node_idx is the mesh node
         if (node->mesh_index >= 0) {
-            inspector_select_mesh(node->mesh_index);
             s_inspector_show_skeleton_only = true;
             s_inspector_show_collider_only = false;
             s_inspector_show_material_only = false;
+            inspector_select_mesh_internal(node->mesh_index);
         }
         return;
     }
     if (item->tag == 2) {
-        // Collider synthetic node — node_idx is the mesh node
         if (node->mesh_index >= 0) {
-            inspector_select_mesh(node->mesh_index);
             s_inspector_show_skeleton_only = false;
             s_inspector_show_collider_only = true;
             s_inspector_show_material_only = false;
+            inspector_select_mesh_internal(node->mesh_index);
         }
         return;
     }
@@ -2153,13 +2499,28 @@ static void hier_on_select(int index, const TreeViewItem* item) {
         s_inspector_show_skeleton_only = false;
         s_inspector_show_collider_only = false;
         s_inspector_show_material_only = false;
+    } else if (node->sdf_index >= 0) {
+        // SDF node
+        editor.inspector.selected_mesh_index = -1;
+        g_selected_sdf_index = node->sdf_index;
+        editor.hierarchy.selected_index = index;
+        s_inspector_show_skeleton_only = false;
+        s_inspector_show_collider_only = false;
+        s_inspector_show_material_only = false;
     } else if (strcmp(node->name, "Material") == 0 && node->parent >= 0) {
         SceneNode* parent_node = &scene.tree.nodes[node->parent];
         if (parent_node->mesh_index >= 0) {
-            inspector_select_mesh(parent_node->mesh_index);
             s_inspector_show_skeleton_only = false;
             s_inspector_show_collider_only = false;
             s_inspector_show_material_only = true;
+            inspector_select_mesh_internal(parent_node->mesh_index);
+        } else if (parent_node->sdf_index >= 0) {
+            s_inspector_show_skeleton_only = false;
+            s_inspector_show_collider_only = false;
+            s_inspector_show_material_only = true;
+            editor.inspector.selected_mesh_index = -1;
+            g_selected_sdf_index = parent_node->sdf_index;
+            editor.hierarchy.selected_index = index;
         }
     } else {
         // Group node selected (GLTF root) — flag it for deletion
@@ -2261,7 +2622,8 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
 
         SceneNode* node  = &scene.tree.nodes[node_idx];
         bool is_collider_node = e.is_collider;
-        bool is_group    = (node->mesh_index < 0);
+        bool is_sdf_node = (node->sdf_index >= 0 && node->mesh_index == -1 && strcmp(node->name, "Material") != 0 && strcmp(node->name, "Scene") != 0);
+        bool is_group    = (node->mesh_index < 0 && !is_sdf_node);
         bool has_skel    = false;
         bool has_collider = false;
 
@@ -2285,8 +2647,16 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
             tv->selected       = (node->mesh_index == editor.inspector.selected_mesh_index && s_inspector_show_collider_only);
             tv->icon_expanded  = editor.file_manager.icon_arrow_down;
             tv->icon_collapsed = editor.file_manager.icon_arrow_right;
-            tv->icon_leaf      = s_icon_lock;
-            tv->icon_tint      = CT.warning;
+            {
+                int32_t col_icon = s_icon_col_cube;
+                if (node->mesh_index >= 0 && node->mesh_index < (int)scene.meshes.count) {
+                    int ct = scene.meshes.items[node->mesh_index].collider_type;
+                    if (ct == 2) col_icon = s_icon_col_sphere;
+                    else if (ct == 3) col_icon = s_icon_col_capsule;
+                }
+                tv->icon_leaf = col_icon;
+            }
+            tv->icon_tint      = CT.collision;
             tv->show_dot       = false;
             tv->has_visibility = false;
             tv->user_data      = (void*)(uintptr_t)node_idx;
@@ -2310,15 +2680,20 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
             tv->user_data      = (void*)(uintptr_t)node_idx;
         } else {
             tv->name           = node->name;
-            tv->type           = (is_group || has_skel || has_collider || has_tree_children) ? TREE_ITEM_GROUP : TREE_ITEM_FILE;
+            tv->type           = (is_group || is_sdf_node || has_skel || has_collider || has_tree_children) ? TREE_ITEM_GROUP : TREE_ITEM_FILE;
             if (is_group && strcmp(node->name, "Material") == 0) tv->type = TREE_ITEM_FILE;
             tv->tag            = 0; // 0 = Standard Node
             tv->depth          = d;
             tv->expanded       = node->expanded;
-            tv->selected       = (!is_group && node->mesh_index == editor.inspector.selected_mesh_index && !s_inspector_show_skeleton_only && !s_inspector_show_material_only && !s_inspector_show_collider_only);
+            tv->selected       = (!is_group && !is_sdf_node && node->mesh_index == editor.inspector.selected_mesh_index && !s_inspector_show_skeleton_only && !s_inspector_show_material_only && !s_inspector_show_collider_only);
+            if (is_sdf_node && node->sdf_index == g_selected_sdf_index && !s_inspector_show_material_only) {
+                tv->selected = true;
+            }
             if (is_group && strcmp(node->name, "Material") == 0 && node->parent >= 0) {
                 SceneNode* parent_node = &scene.tree.nodes[node->parent];
                 if (parent_node->mesh_index == editor.inspector.selected_mesh_index && s_inspector_show_material_only) {
+                    tv->selected = true;
+                } else if (parent_node->sdf_index == g_selected_sdf_index && s_inspector_show_material_only) {
                     tv->selected = true;
                 }
             }
@@ -2331,6 +2706,8 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
                 } else {
                     tv->icon_leaf = (node->parent == 0) ? s_icon_world : editor.file_manager.icon_folder;
                 }
+            } else if (is_sdf_node) {
+                tv->icon_leaf = s_icon_sdf;
             } else {
                 tv->icon_leaf = s_icon_mesh;
             }
@@ -2338,7 +2715,7 @@ static void render_hierarchy(Panel* panel, float px, float py, float pw, float p
             bool is_gltf_root = is_group && node->parent == 0 &&
                                 strcmp(node->name, "Material") != 0;
             tv->icon_tint = is_group ? (is_gltf_root ? CT.gltf : CT.accent)
-                                     : (Color){1.0f, 1.0f, 1.0f, 1.0f};
+                                     : (is_sdf_node ? CT.success : (Color){1.0f, 1.0f, 1.0f, 1.0f});
             if (is_group && strcmp(node->name, "Material") == 0) tv->icon_tint = CT.red;
             tv->show_dot       = false;
             tv->has_visibility = true;
@@ -2956,15 +3333,83 @@ static void delete_gltf_instance(GLTFInstance* inst) {
 static void delete_selected_mesh(void) {
     int mi = editor.inspector.selected_mesh_index;
 
-    // Check if a GLTF root group node is selected (no mesh, parent == 0)
-    // by looking at what the hierarchy selected
+    // ── Delete only the collider ──────────────────────────────────────────
+    if (s_inspector_show_collider_only && mi >= 0 && mi < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[mi];
+        m->collider_type  = 0;
+        m->mass           = 0.0f;
+        m->friction       = 0.0f;
+        m->restitution    = 0.0f;
+        m->physics_body_id = 0;
+        extern void physics_destroy_body(Mesh* m);
+        physics_destroy_body(m);
+        s_inspector_show_collider_only = false;
+        extern bool scene_topology_dirty;
+        scene_topology_dirty = true;
+        markMeshesSSBODirty(&context);
+        message(MSG_SUCCESS, "Collider removed");
+        return;
+    }
+
+    // ── Delete only the material (mark as no-material / wireframe) ────────
+    if (s_inspector_show_material_only && mi >= 0 && mi < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[mi];
+        m->textureIndex      = -1;
+        m->normalMapIndex    = -1;
+        m->metallicRoughIndex= -1;
+        m->aoIndex           = -1;
+        m->emissiveIndex     = -1;
+        m->transmissionIndex = -1;
+        m->thicknessIndex    = -1;
+        m->baseColorFactor[0]= CT.wireframe.r;
+        m->baseColorFactor[1]= CT.wireframe.g;
+        m->baseColorFactor[2]= CT.wireframe.b;
+        m->baseColorFactor[3]= CT.wireframe.a;
+        m->metallicFactor    = 0.0f;
+        m->roughnessFactor   = 1.0f;
+        m->emissiveStrength  = 0.0f;
+        m->wireframe         = true;
+        // Remove the Material child node from the scene tree
+        if (m->node) {
+            int32_t mesh_node_idx = (int32_t)(uintptr_t)m->node;
+            int32_t c = scene.tree.nodes[mesh_node_idx].first_child;
+            while (c >= 0) {
+                if (strcmp(scene.tree.nodes[c].name, "Material") == 0) {
+                    scene_tree_remove_node(c);
+                    break;
+                }
+                c = scene.tree.nodes[c].next_sibling;
+            }
+        }
+        s_inspector_show_material_only = false;
+        extern bool scene_topology_dirty;
+        scene_topology_dirty = true;
+        markMeshesSSBODirty(&context);
+        message(MSG_SUCCESS, "Material removed");
+        return;
+    }
+
+    // ── Delete only the skeleton override (bone poses) ────────────────────
+    if (s_inspector_show_skeleton_only && mi >= 0 && mi < (int)scene.meshes.count) {
+        Mesh* m = &scene.meshes.items[mi];
+        for (int i = 0; i < 256; i++) {
+            glm_mat4_identity(m->bone_overrides[i].world_offset);
+            m->bone_overrides[i].active = false;
+        }
+        editor_selected_bone = NULL;
+        s_bone_tree_state.selected_index = -1;
+        s_inspector_show_skeleton_only = false;
+        markMeshesSSBODirty(&context);
+        message(MSG_SUCCESS, "Skeleton poses reset");
+        return;
+    }
+
+    // ── Delete whole mesh / GLTF instance ────────────────────────────────
     if (mi < 0) {
-        // Try to find a selected group node and delete its whole instance
         for (int i = 0; i < scene.tree.count; i++) {
             SceneNode* n = &scene.tree.nodes[i];
             if (n->mesh_index >= 0) continue;
-            if (!n->selected_group) continue; // not flagged
-            // Find GLTF instance whose root is this group
+            if (!n->selected_group) continue;
             int32_t c = n->first_child;
             if (c >= 0 && scene.tree.nodes[c].mesh_index >= 0) {
                 int child_mi = scene.tree.nodes[c].mesh_index;
@@ -2988,13 +3433,10 @@ static void delete_selected_mesh(void) {
     GLTFInstance* inst = find_gltf_instance_for_mesh(mi);
 
     if (inst && inst->mesh_count == 1) {
-        // Only mesh in this GLTF instance — delete the whole instance
         delete_gltf_instance(inst);
         message(MSG_SUCCESS, "GLTF deleted");
     } else if (inst && inst->mesh_count > 1) {
-        // Multi-mesh GLTF — delete only this mesh, keep the instance
         inst->mesh_count--;
-        // Remove the tree node for this mesh
         for (int i = 0; i < scene.tree.count; i++) {
             if (scene.tree.nodes[i].mesh_index == mi) {
                 scene_tree_remove_node(i);
@@ -3004,7 +3446,6 @@ static void delete_selected_mesh(void) {
         scene_remove_mesh(mi);
         message(MSG_SUCCESS, "Mesh deleted");
     } else {
-        // Plain primitive — no GLTF instance
         for (int i = 0; i < scene.tree.count; i++) {
             if (scene.tree.nodes[i].mesh_index == mi) {
                 scene_tree_remove_node(i);
@@ -3370,7 +3811,11 @@ void editor_init(void) {
     s_icon_hidden   = texture_pool_add_svg(&context, "./assets/icons/GuiVisibilityHidden.svg",  16, 16);
     s_icon_bone     = texture_pool_add_svg(&context, "./assets/icons/Bone.svg",                 16, 16);
     s_icon_skeleton = texture_pool_add_svg(&context, "./assets/icons/SkeletonModifier.svg",     16, 16);
-    s_icon_material = texture_pool_add_svg(&context, "./assets/blender-icons/material.svg",     16, 16);
+    s_icon_material     = texture_pool_add_svg(&context, "./assets/blender-icons/material.svg",     16, 16);
+    s_icon_sdf          = texture_pool_add_svg(&context, "./assets/blender-icons/proportional_center_on.svg", 16, 16);
+    s_icon_col_cube     = texture_pool_add_svg(&context, "./assets/blender-icons/cube.svg",         16, 16);
+    s_icon_col_sphere   = texture_pool_add_svg(&context, "./assets/blender-icons/sphere.svg",       16, 16);
+    s_icon_col_capsule  = texture_pool_add_svg(&context, "./assets/blender-icons/mesh_capsule.svg", 16, 16);
 
     file_manager_navigate("./assets");
 
@@ -3850,12 +4295,9 @@ bool editor_panel_is_open(PanelSide side) {
 
 /// Inspector API
 
-void inspector_select_mesh(int index) {
+void inspector_select_mesh_internal(int index) {
     editor.inspector.selected_mesh_index = index;
     editor.hierarchy.selected_index      = index;
-    s_inspector_show_skeleton_only       = false;
-    s_inspector_show_material_only       = false;
-    s_inspector_show_collider_only       = false;
     gizmo.active                         = true;
     editor_selected_bone                 = NULL;
     s_bone_tree_state.selected_index     = -1;
@@ -3889,6 +4331,13 @@ void inspector_select_mesh(int index) {
     }
 }
 
+void inspector_select_mesh(int index) {
+    s_inspector_show_skeleton_only       = false;
+    s_inspector_show_material_only       = false;
+    s_inspector_show_collider_only       = false;
+    inspector_select_mesh_internal(index);
+}
+
 void inspector_select_bone(void* bone) {
     editor_selected_bone = bone;
     s_inspector_show_skeleton_only = true;
@@ -3916,8 +4365,21 @@ void inspector_select_bone(void* bone) {
     s_bone_needs_scroll = true;
 }
 
+void inspector_show_collider(void) {
+    s_inspector_show_skeleton_only = false;
+    s_inspector_show_material_only = false;
+    s_inspector_show_collider_only = true;
+}
+
+void inspector_show_material(void) {
+    s_inspector_show_skeleton_only = false;
+    s_inspector_show_material_only = true;
+    s_inspector_show_collider_only = false;
+}
+
 void inspector_deselect(void) {
     editor.inspector.selected_mesh_index = -1;
+    g_selected_sdf_index                 = -1;
 
     editor.hierarchy.selected_index      = -1;
     s_inspector_show_skeleton_only       = false;

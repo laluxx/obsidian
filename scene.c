@@ -12,10 +12,21 @@ void scene_init(Scene *s) {
     s->gltf_instances = NULL;
     s->gltf_instance_count = 0;
     s->gltf_instance_capacity = 0;
+
+    s->sdfs = NULL;
+    s->sdf_count = 0;
+    s->sdf_capacity = 0;
 }
 
 void scene_cleanup(Scene *s) {
     meshes_destroy(context.device, &s->meshes);
+
+    if (s->sdfs) {
+        free(s->sdfs);
+        s->sdfs = NULL;
+    }
+    s->sdf_count = 0;
+    s->sdf_capacity = 0;
 
     // Clean up all glTF instances
     for (size_t i = 0; i < s->gltf_instance_count; i++) {

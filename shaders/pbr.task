@@ -108,6 +108,9 @@ layout(push_constant) uniform PC {
     BoundsBuffer dynamicBounds;
     DummyBuffer  meshletVertexAddr;
     DummyBuffer  meshletTriangleAddr;
+    DummyBuffer  sdfBufferAddr;
+    int          sdfCount;
+    int          _pad1;
 } pc;
 
 struct TaskPayload {

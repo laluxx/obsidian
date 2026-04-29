@@ -93,6 +93,7 @@ typedef struct {
     int32_t  first_child;     // Index of first child node, -1 = leaf
     int32_t  next_sibling;    // Index of next sibling, -1 = last child
     int32_t  mesh_index;      // Index into scene.meshes.items, -1 = group node
+    int32_t  sdf_index;       // Index into scene.sdfs, -1 = not an SDF
     bool     expanded;        // UI state: is this node expanded in the tree?
     bool     visible;         // UI state: is this node visible in viewport?
     bool     selected_group;
@@ -110,11 +111,18 @@ typedef struct {
     size_t gltf_instance_count;
     size_t gltf_instance_capacity;
     SceneTree tree;           // Parallel hierarchy for UI rendering
+
+    SdfPrimitive* sdfs;       // CPU-side flat array of SDFs
+    uint32_t sdf_count;
+    uint32_t sdf_capacity;
 } Scene;
 
 extern Scene scene;
 void scene_init(Scene *s);
 void scene_cleanup(Scene *s);
+
+void sdfs_add(Scene* s, const char* name, int type, vec3 pos, vec4 size, vec4 color);
+void flushSdfSSBO(void);
 
 /// Scene tree API
 

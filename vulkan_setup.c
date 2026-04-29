@@ -80,11 +80,18 @@ uint32_t megaMeshletTriangleOffset = 0;
 
 // Forward declaration for internal use by gltf_loader
 uint32_t megaMorphBufferAllocate(VulkanContext* ctx, MorphDelta* deltas, uint32_t deltaCount);
+void createSdfPipeline(VulkanContext* ctx);
 uint64_t morphWeightAddr[MAX_FRAMES_IN_FLIGHT] = {0};
 uint64_t jointSSBOAddr[MAX_FRAMES_IN_FLIGHT] = {0};
 VkBuffer jointSSBO[MAX_FRAMES_IN_FLIGHT] = {0};
 VkDeviceMemory jointSSBOMemory[MAX_FRAMES_IN_FLIGHT] = {0};
 mat4* jointSSBOMapped[MAX_FRAMES_IN_FLIGHT] = {0};
+
+uint64_t sdfSSBOAddr[MAX_FRAMES_IN_FLIGHT] = {0};
+VkBuffer sdfSSBO[MAX_FRAMES_IN_FLIGHT] = {0};
+VkDeviceMemory sdfSSBOMemory[MAX_FRAMES_IN_FLIGHT] = {0};
+SdfPrimitive* sdfSSBOMapped[MAX_FRAMES_IN_FLIGHT] = {0};
+
 VkPipeline shadowPipeline = VK_NULL_HANDLE;
 bool skyboxEnabled = true;
 bool iblLightingEnabled = true;
@@ -128,6 +135,7 @@ static VkPipelineCache pipelineCache = VK_NULL_HANDLE;
 VkPipeline pipelineIndirectSolid    = VK_NULL_HANDLE;
 VkPipeline pipelineIndirectTextured = VK_NULL_HANDLE;
 VkPipeline graphicsPipelineWireframe = VK_NULL_HANDLE;
+VkPipeline sdfPipeline = VK_NULL_HANDLE;
 
 /// Helpers
 
@@ -999,6 +1007,8 @@ void createGraphicsPipelines(VulkanContext* ctx)
     vkDestroyShaderModule(ctx->device, fs2D,  NULL);
     vkDestroyShaderModule(ctx->device, vsSkybox, NULL);
     vkDestroyShaderModule(ctx->device, fsSkybox, NULL);
+
+    createSdfPipeline(ctx);
 }
 
 /* Indirect pipeline layout — created AFTER createMeshSSBO so ssboSetLayout is valid */
@@ -1006,6 +1016,42 @@ void createIndirectPipelineLayout(VulkanContext* ctx)
 {
     /* Unified layout already created in createAllPipelineLayouts — nothing to do */
     (void)ctx;
+}
+
+#include "sdf.vert.spv.h"
+#include "sdf.frag.spv.h"
+
+void createSdfPipeline(VulkanContext* ctx) {
+    VkShaderModule vs = createShaderModule(ctx->device, sdf_vert_spv, sizeof(sdf_vert_spv));
+    VkShaderModule fs = createShaderModule(ctx->device, sdf_frag_spv, sizeof(sdf_frag_spv));
+    VkPipelineShaderStageCreateInfo ss[2] = {
+        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", NULL},
+        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", NULL}
+    };
+
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkPipelineViewportStateCreateInfo vp = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1.0f };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+
+    VkPipelineColorBlendAttachmentState cba = { .colorWriteMask = 0xF, .blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA, .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .colorBlendOp = VK_BLEND_OP_ADD, .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .alphaBlendOp = VK_BLEND_OP_ADD };
+    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &cba };
+
+    // Test depth to intersect with meshes, write depth so meshes occlude the SDF properly!
+    VkPipelineDepthStencilStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_LESS };
+
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dynStates };
+
+    VkFormat colorFormat = ctx->swapChainImageFormat;
+    VkPipelineRenderingCreateInfo prci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &colorFormat, .depthAttachmentFormat = ctx->depthFormat };
+
+    VkGraphicsPipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &prci, .stageCount = 2, .pStages = ss, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dyn, .layout = ctx->pipelineLayout };
+    vkCreateGraphicsPipelines(ctx->device, VK_NULL_HANDLE, 1, &ci, NULL, &sdfPipeline);
+
+    vkDestroyShaderModule(ctx->device, vs, NULL);
+    vkDestroyShaderModule(ctx->device, fs, NULL);
 }
 
 #include "refit_bounds.comp.spv.h"
@@ -1057,6 +1103,8 @@ void createComputeCullPipeline(VulkanContext* ctx) {
 
 void createComputeCompactPipeline(VulkanContext* ctx) { (void)ctx; }
 
+extern uint32_t active_sdf_count;
+
 static void fill_gpu_addresses(VulkanContext* ctx) {
     pushConstants.meshBufferAddr      = meshSSBOAddr[ctx->currentFrame];
     pushConstants.vertexBufferAddr    = megaVertexBufferAddr;
@@ -1069,6 +1117,8 @@ static void fill_gpu_addresses(VulkanContext* ctx) {
     pushConstants.dynamicBoundsAddr   = dynamicBoundsBufferAddr[ctx->currentFrame];
     pushConstants.meshletVertexAddr   = megaMeshletVertexAddr;
     pushConstants.meshletTriangleAddr = megaMeshletTriangleAddr;
+    pushConstants.sdfBufferAddr       = sdfSSBOAddr[ctx->currentFrame];
+    pushConstants.sdfCount            = active_sdf_count;
 }
 
 static void update_cascade_matrices(VulkanContext* ctx) {
@@ -1279,6 +1329,20 @@ static void execute_main_pass(VkCommandBuffer cmd, void* user_data)
         VkDescriptorSet skyboxSets[2] = { ctx->descriptorSets[ctx->currentFrame], ctx->lightingSets[ctx->currentFrame] };
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 2, skyboxSets, 0, NULL);
         vkCmdDraw(cmd, 36, 1, 0, 0);
+    }
+
+    extern uint32_t active_sdf_count;
+    if (active_sdf_count > 0 && sdfPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfPipeline);
+        VkDescriptorSet sdfSets[4] = { ctx->descriptorSets[ctx->currentFrame], ctx->bindlessSet, ctx->bindlessSet, ctx->lightingSets[ctx->currentFrame] };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipelineLayout, 0, 4, sdfSets, 0, NULL);
+
+        pushConstants.cascadeIndex = -1;
+        pushConstants.meshIndex = -1;
+        fill_gpu_addresses(ctx);
+
+        vkCmdPushConstants(cmd, ctx->pipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pushConstants);
+        vkCmdDraw(cmd, 3, 1, 0, 0); // Raymarch Fullscreen Triangle!
     }
 
     if (lineVertexCount > 0) {
@@ -2262,6 +2326,7 @@ void cleanup(VulkanContext* ctx)
 
     if (skyboxPipeline) { vkDestroyPipeline(ctx->device, skyboxPipeline, NULL); skyboxPipeline = VK_NULL_HANDLE; }
     if (skyboxPipelineLayout) { vkDestroyPipelineLayout(ctx->device, skyboxPipelineLayout, NULL); skyboxPipelineLayout = VK_NULL_HANDLE; }
+    if (sdfPipeline) { vkDestroyPipeline(ctx->device, sdfPipeline, NULL); sdfPipeline = VK_NULL_HANDLE; }
     if (shadowPipeline) { vkDestroyPipeline(ctx->device, shadowPipeline, NULL); shadowPipeline = VK_NULL_HANDLE; }
     if (refitBoundsPipeline) { vkDestroyPipeline(ctx->device, refitBoundsPipeline, NULL); refitBoundsPipeline = VK_NULL_HANDLE; }
     if (refitBoundsPipelineLayout) { vkDestroyPipelineLayout(ctx->device, refitBoundsPipelineLayout, NULL); refitBoundsPipelineLayout = VK_NULL_HANDLE; }
@@ -2347,6 +2412,10 @@ void cleanup(VulkanContext* ctx)
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (ctx->meshSSBOMapped[i]) { vkUnmapMemory(ctx->device, ctx->meshSSBOMemory[i]); ctx->meshSSBOMapped[i] = NULL; }
         CLEANUP_BUFFER(meshSSBO[i], meshSSBOMemory[i]);
+
+        if (sdfSSBOMapped[i]) { vkUnmapMemory(ctx->device, sdfSSBOMemory[i]); sdfSSBOMapped[i] = NULL; }
+        if (sdfSSBO[i]) { vkDestroyBuffer(ctx->device, sdfSSBO[i], NULL); sdfSSBO[i] = VK_NULL_HANDLE; }
+        if (sdfSSBOMemory[i]) { vkFreeMemory(ctx->device, sdfSSBOMemory[i], NULL); sdfSSBOMemory[i] = VK_NULL_HANDLE; }
     }
     if (ctx->meshDirtyBits) { free(ctx->meshDirtyBits); ctx->meshDirtyBits = NULL; }
     if (ctx->ssboSetLayout) { vkDestroyDescriptorSetLayout(ctx->device, ctx->ssboSetLayout, NULL); ctx->ssboSetLayout = VK_NULL_HANDLE; }
@@ -3228,6 +3297,18 @@ void createMeshSSBO(VulkanContext* ctx, uint32_t maxMeshes)
     }
     fprintf(stdout, "Global Joint SSBO (Physical Pointers): %.1f MB x%d frames\n",
             (double)jointSize/(1024*1024), MAX_FRAMES_IN_FLIGHT);
+
+    // ── CREATE SDF SSBO ──
+    VkDeviceSize sdfSize = MAX_SDF_PRIMITIVES * sizeof(SdfPrimitive);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        createBuffer(ctx, sdfSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &sdfSSBO[i], &sdfSSBOMemory[i]);
+        vkMapMemory(ctx->device, sdfSSBOMemory[i], 0, sdfSize, 0, (void**)&sdfSSBOMapped[i]);
+
+        VkBufferDeviceAddressInfo sdfInfo = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = sdfSSBO[i] };
+        sdfSSBOAddr[i] = vkGetBufferDeviceAddress(ctx->device, &sdfInfo);
+    }
+    fprintf(stdout, "SDF SSBO (Physical Pointers): %.2f MB x%d frames\n",
+            (double)sdfSize/(1024*1024), MAX_FRAMES_IN_FLIGHT);
 }
 
 void createIndirectBuffer(VulkanContext* ctx, uint32_t maxMeshes) {

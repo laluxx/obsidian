@@ -60,6 +60,31 @@ typedef struct {
 #define MAX_DYNAMIC_MESHES 4096
 #define MAX_DYNAMIC_VERTICES (1024 * 1024)
 
+#define MAX_SDF_PRIMITIVES 1024
+
+#define SDF_TYPE_SPHERE 0
+#define SDF_TYPE_BOX 1
+
+#define SDF_OP_UNION 0
+#define SDF_OP_SMOOTH_UNION 1
+#define SDF_OP_SMOOTH_SUBTRACT 2
+
+typedef struct {
+    mat4  inverseTransform;
+    vec4  size;
+    vec4  color;            // RGB = Albedo, A = Alpha (unused for now)
+    vec3  emissive;         // RGB = Emissive Color
+    float metallic;
+    float roughness;
+    float emissiveStrength;
+    float smoothness;       // Blend factor
+    int   type;             // SDF_TYPE_SPHERE, SDF_TYPE_BOX
+    int   operation;        // SDF_OP_UNION, SDF_OP_SMOOTH_UNION
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
+} SdfPrimitive;
+
 void emit_draw(uint32_t firstVertex, uint32_t count, mat4 model);
 uint32_t append_vertices(const Vertex* verts, uint32_t count);
 
@@ -166,6 +191,9 @@ typedef struct {
     uint64_t dynamicBoundsAddr;   // BDA: Meshlet dynamic bounds
     uint64_t meshletVertexAddr;   // BDA: Meshlet local vertices
     uint64_t meshletTriangleAddr; // BDA: Meshlet local triangles
+    uint64_t sdfBufferAddr;       // BDA: SdfPrimitive array
+    int      sdfCount;            // Number of active SDF primitives
+    int      _pad1;
 } PushConstants;
 
 /* One entry per mesh in the SSBO — read by the vertex+fragment shader via gl_DrawID */

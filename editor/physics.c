@@ -207,6 +207,14 @@ void physics_step(float dt) {
     if (dirty) markMeshesSSBODirty(&context);
 }
 
+void physics_destroy_body(Mesh* m) {
+    if (!physics_system || m->physics_body_id == 0) return;
+    JPH_BodyInterface* bi = JPH_PhysicsSystem_GetBodyInterface(physics_system);
+    JPH_BodyInterface_RemoveBody(bi, m->physics_body_id);
+    JPH_BodyInterface_DestroyBody(bi, m->physics_body_id);
+    m->physics_body_id = 0;
+}
+
 void physics_set_transform(Mesh* m) {
     if (!physics_system || m->physics_body_id == 0) return;
 

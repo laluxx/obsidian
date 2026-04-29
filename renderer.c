@@ -440,6 +440,8 @@ static size_t mesh_distances_capacity = 0;
 uint32_t opaqueMeshCount = 0;
 uint32_t transparentMeshCount = 0;
 
+uint32_t active_sdf_count = 0;
+
 extern uint64_t megaVertexBufferAddr;
 extern uint64_t dynamicVertexBufferAddr;
 
