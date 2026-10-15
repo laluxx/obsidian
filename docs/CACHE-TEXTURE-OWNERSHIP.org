@@ -1,0 +1,54 @@
+#+TITLE: Obsidian — Cache texture descriptors and scene ownership
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Why stage the texture manifest?
+
+Cycle 36 moved OMDL cache-hit mesh preparation ahead of GPU upload, but
+textures still referenced strings in =OmdlMeshMeta= and each mesh registered
+all its own maps against renderer-global texture storage after the upload.
+Registration may allocate descriptors or upload texture content; therefore
+it must NOT run as part of a candidate's private preparation phase.
+
+* The Cycle 37 boundary
+
+=src/scene/cache_textures.[ch]= prepares one owned, immutable mapping from
+(mesh, material channel) to an interned texture path. All seven material
+channels follow the exact OMDL metadata ordering. Paths are copied from
+512-byte bounded fields. Duplicate references are interned using a transient
+open-address hash table; no renderer context is needed.
+
+- =prepare=: pure CPU allocations, source-path validation, no visible effects.
+  Failure leaves the original manifest unchanged and releases temporary data.
+- =resolve=: after geometry completion, register each distinct texture path
+  once and retain its pool ID. Optional unavailable textures remain =-1=.
+- =indices=: allocation-free mapping of a mesh's seven material slots.
+- =dispose=: release all copied paths, references, and resolved IDs.
+
+The actual =load_gltf= cache-hit preparation calls =prepare= BEFORE the
+geometry transfer. The staged manifest follows staged-mesh teardown and is
+released after the batch is transferred into the visible scene. Real texture
+registration is still deferred until after GPU geometry completion.
+
+* Explicit limits
+
+This is a *private descriptor plan*, not private Vulkan texture residency.
+The synchronous loader still performs global texture-pool operations before
+mesh append. A driver/descriptor failure after some successful registrations
+is not rollback-atomic. Negative texture-pool IDs preserve legacy missing-map
+fallback; they are not evidence of completed residency. Nor does this cycle
+connect the parser to =ObsPendingSceneLoad= or certify QTT lifetimes.
+
+Complete asynchronous loading requires a texture/descriptor owner with
+rollback-safe staging and lifetime constraints, prepared scene-tree/physics
+publication, and a single GPU/host commit boundary. The compiler remains
+responsible for typed QTT borrowing and native-code lifetime proofs.
+
+* Performance and test contract
+
+The original cache-hit resolver registered seven texture channels per mesh.
+The new path registers each distinct nonempty path at most once per cache
+candidate, without allocating in the per-mesh lookup after resolution.
+=tests/native/cache_textures.c= checks the once-per-path property, ownership,
+malformed metadata, 50,000 deterministic hash/slot plans, zero textures,
+and failed input validation. This is a CPU test: no Vulkan frame-time claim.

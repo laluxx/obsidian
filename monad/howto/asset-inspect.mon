@@ -1,0 +1,42 @@
+;;; asset-inspect.mon --- borrow a stored preset and read its saved values
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto asset-inspect
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/asset-inspect.mon ./obsidian
+Frame 1 stores mesh 0 as an independent preset; frame 2 borrows asset 0
+back and reports its stable index plus saved roughness and metallic.
+Assets survive mesh edits; scene reset invalidates them.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (inspect-frame f)
+  (if (> (mesh-count (scene)) 0)
+      (begin
+        (if (= (frame-number f) 1)
+            (begin (material-store (mesh 0)) True)
+            True)
+        (if (> (material-asset-count) 0)
+            (begin
+              (list (material-asset-index (material-asset 0))
+                    (material-asset-roughness (material-asset 0))
+                    (material-asset-metallic (material-asset 0)))
+              True)
+            True))
+      True))
+
+(on-frame! inspect-frame)

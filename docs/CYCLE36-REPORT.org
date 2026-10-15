@@ -1,0 +1,91 @@
+#+TITLE: Obsidian — Cycle 36: Private cache-hit mesh preparation
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Intent
+
+Move the first real =load_gltf= cache-hit CPU preparation boundary ahead of
+GPU submission. Preserve the legacy synchronous loading contract while
+preventing partially prepared meshes from entering =Scene.meshes=. This is a
+*partial* migration toward =ObsPendingSceneLoad=, not a claim that all scene
+resources have become private or that glTF loading is asynchronous.
+
+* Source work
+
+** DONE Cache-hit mesh preparation before GPU submission
+
+In =src/assets/gltf_loader.c=, a validated cache-hit now reconstructs its
+meshes into an owned private staging array *before* uploading geometry.
+Metadata count mismatch, allocation failure, invalid hierarchy, insufficient
+scene-tree capacity or failed paired-array reservation rejects the load before
+any geometry transfer. No cached mesh gets inserted into =Scene.meshes= on
+those paths. Prepared mesh names/morph weights are explicitly destroyed on
+rejection. Stale global staging left by a prior failed load is destroyed at
+entry to the next load.
+
+Cache texture-pool registration is deferred until after geometry completion;
+GPU-relative base offsets are kept at =UINT32_MAX= while preparing and patched
+only after successful upload. The final prepared batch is appended in a single
+allocation-free, topology-dirty/revision update. The cache-hit animation
+hierarchy's runtime buffers and parent-first order are also prepared before
+the geometry transfer.
+
+** DONE Allocation-failure-atomic paired mesh storage
+
+=src/scene/mesh_storage.[ch]= provides checked paired arrays for Mesh records
+and draw indices. Both arrays are allocated/copied before either live pointer
+is exchanged; failure preserves the prior buffers, contents and capacity.
+=meshes_reserve= and =meshes_append_prepared= in the real renderer expose the
+preparation/commit split and batch revision tracking. A single-mesh add uses
+this same allocation path.
+
+The fresh cooked-mesh path reuses the allocation-free batch append after GPU
+completion, although the fresh-glTF parser/cooker still performs additional
+legacy mutations and requires more work to become an isolated candidate.
+
+* Tests and evidence
+
+- =tests/native/mesh_storage.c= exercises deterministic allocation failures
+  at both allocation steps, old-buffer preservation, invalid/overflow
+  requests, 50,000 appended records, rejected capacity, and an illustrative
+  staged-cache prepare/reject/commit sequence.
+- The test is wired into =make test-native= and therefore =make test=.
+- Local verification: =make test-native= passed, including the strict
+  =-Werror -pedantic= mesh-storage binary and the Vulkan scene-load contract
+  tests. This did not execute =make test=, the live Monad runner, the full
+  Vulkan/Jolt application build, or the glTF cache-hit path on a GPU.
+- =CYCLE36-MANIFEST.sha256= records the incoming archive contents. Local
+  integration modifies the manifest-listed source files and intentionally
+  preserves the current Cycle 35 =Makefile= and =TODO.org= rather than
+  replacing them with stale archive snapshots.
+
+* Not yet established
+
+1. =load_gltf()= still begins with a device-idle wait, and its geometry upload
+   is synchronous. No render-thread frame-time improvement has been measured.
+2. The existing =ObsPendingSceneLoad= / Vulkan nonblocking bridge is not yet
+   driving this parser. It still requires a complete private texture,
+   descriptor, physics and animation/scene-tree payload that can be committed
+   without allocations or hidden host mutations.
+3. Cache-hit texture-pool population happens after the GPU transfer but is
+   not itself transactional. GPU capacity after a completed but subsequently
+   aborted host publication is not reclaimed by this patch.
+4. The cache hit requires one prepared visible mesh per cached mesh record.
+   Unusual zero-vertex cached primitives conservatively reject instead of
+   silently misaligning cached metadata; the fallback policy needs work.
+5. The complete Vulkan/Jolt engine link, native GPU transaction, GPU visual
+   parity and real embedded Monad execution have not been verified here.
+6. The large existing fresh-glTF cooker still contains unchecked allocations
+   outside this cycle's mesh storage scope; further work is required.
+7. Cache-path cleanup now frees the parsed cgltf document once the retained
+   OMDL scene graph is published. Mesh append rejection destroys the by-value
+   mesh's owned name/morph payload; these failure cleanups were discovered
+   while wiring the overlay.
+
+* Next concrete cycle
+
+Develop a fully owned cache-hit =SceneLoad= candidate containing the graph,
+mesh record batch, staged texture descriptors and ready-check. Route it through
+=ObsPendingSceneLoad=, then add nonblocking fence polling and a no-allocation
+safe-point activation. Test real Vulkan and QTT/foreign-handle invalidation
+before promoting the asynchronous path to default.

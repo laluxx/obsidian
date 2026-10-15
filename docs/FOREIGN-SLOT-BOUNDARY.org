@@ -1,0 +1,50 @@
+#+TITLE: Obsidian — Foreign dense-slot membership contract
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* API and layered checks
+
+A foreign =Mesh=, =SceneNode=, =SdfPrimitive=, or =GLTFInstance= reference is
+not a naked pointer. Borrowed values are interned by MonadC with a nominal
+foreign type and a host-owned lifetime epoch. The C guest-facing boundary
+validates, in order:
+
+1. The calling thread owns the current active Obsidian runtime.
+2. The Monad value has the expected nominal =obsidian.*= host-ref type.
+3. The value's epoch matches the runtime incarnation and subsystem revision.
+4. The engine's active dense storage has valid =count <= capacity= metadata.
+5. =obs_slot_index= verifies the candidate is exactly a live element start.
+6. Only then does C use the resulting index to access engine-owned storage.
+
+The resolver does not dereference a candidate, cannot create an owned value,
+and does not alter a QTT multiplicity, effect, or lifetime proof. A stale
+reference with a reused address *must be rejected by step 3*, not step 5.
+
+* Complexity and performance
+
+The former implementation scanned O(N) array elements on every accessor.
+The new checked resolver uses a fixed number of CPU arithmetic operations
+regardless of N. Both variants used the *same* foreign generation rule;
+this cycle optimizes only the inner membership check.
+
+The new helper is available for other dense engine resources only after
+validating their storage metadata and structural epoch discipline. Do not
+apply it to linked lists, sparse handles or storage that can move without
+updating its generation. For stable IDs across array compaction, a logical
+handle registry is required rather than just an address resolver.
+
+* Portability
+
+This fast path relies on an ordinary flat-address native CPU =uintptr_t=
+representation. It is not a CHERI/capability-pointer portability guarantee.
+The verifier uses integer address comparisons, not undefined C pointer
+subtraction, and never dereferences an unvalidated candidate.
+
+* Test contract
+
+- =make test= checks 100,000 adversarial synthetic slot references.
+- =make bench-foreign-slots= compares the previous pointer scan with
+  bounded constant-time lookup using deterministic random targets.
+- =tests/monad/foreign-slot-contract.mon= checks public language aliases
+  against real borrowed engine values; it requires a live MonadC runner.
+- Renderer/JIT performance and real frame-time impact remain unmeasured.

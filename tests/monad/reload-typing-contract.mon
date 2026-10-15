@@ -1,0 +1,16 @@
+;;; reload-typing-contract.mon --- Hot module entry points retain stable Int -> Int native ABI.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract reload-typing-contract
+
+;;; Commentary:
+
+QTT/effect schema checking is not yet implemented by the host.
+
+;;; Code:
+(module Main)
+(define (obsidian_camera_step_mm [current : Int] -> Int)
+  (+ current 100))
+(define (obsidian_reload_schema [version : Int] -> Int)
+  (+ version 1))

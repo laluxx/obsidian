@@ -1,0 +1,77 @@
+#+TITLE: Obsidian Cycle 21 — Opt-in native/foreign dispatch CPU profiling
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Purpose
+
+Make performance work evidence-driven by observing the real *host hot paths*
+that invoke embedded Monad every frame. This cycle changes neither the MonadC
+ABI nor the QTT proof system and does not invent independently compiled native
+candidates. Native-image pinning and callback ownership remain unchanged.
+
+* DONE Implementation
+
+- =src/monad/dispatch_metrics.[ch]=: allocation-free, owner-thread-only,
+  fixed log2 nanosecond histogram for frame callbacks and pinned camera-native
+  policies, separated into setup, execution and total CPU cost. O(1) sample
+  insertion, fixed memory, no locks, no per-record sorting or allocation.
+- Opt-in =OBSIDIAN_MONAD_PROFILE_FFI=1=; disabled path has only a Boolean check
+  and does not call =clock_gettime= or update counters.
+- =src/monad/frame_api.c=: scopes timings across foreign frame borrow,
+  lease acquisition, Monad procedure invocation, and cleanup. Failing borrows,
+  denied leases and failing callbacks increment diagnostic failures. A callback
+  is compared with its live slot *before* the retained pointer is released.
+- =src/monad/runtime.c=: scopes coherent native-generation pin, function
+  lookup, guest native invocation, C camera application and release.
+- =src/monad/hotreload_api.c=: nine concise =dispatch-*= read-only procedures;
+  =modules/obsidian/live-reload.mon=: pure host-facing helpers.
+- =src/monad/repl_service.c=: =:dispatch= reports attempts, failures, upper-
+  bound CPU p95 and maximum by lane; no work runs on the GPU callback thread.
+- =Makefile=: new headless tests and opt-in benchmark; stricter SDK syntax gate
+  for the modified frame and hotreload API through a labelled header fixture.
+
+* Performance evidence
+
+Local Linux/container CPU microbenchmark, GNU C23 =-O3 -DNDEBUG=, two independent
+runs of 2,000,000 deterministic alternating frame/camera metric recordings:
+
+| Run | Recorder disabled | Recorder enabled |
+|-----+-------------------+------------------|
+| 1   | 1.882 ns/record   | 8.967 ns/record  |
+| 2   | 1.545 ns/record   | 5.285 ns/record  |
+
+These observations measure *only histogram recorder overhead*, not the
+clock calls and not Monad callback performance, native compiler/JIT latency,
+or Vulkan GPU/CPU frame times. Frequencies, CPU scheduling and cache state
+were not controlled; no speedup claim is drawn from these figures.
+
+The implementation uses log2 buckets; =p95= is the inclusive bucket upper
+bound, not a sampled order statistic. No raw frame timestamps or user content
+are stored. Recordings reset when the Monad host opens.
+
+* Tests and verification
+
+- =make test-native=: PASS; new 50,000 deterministic profiler samples plus
+  empty/invalid lane, disabled, zero, UINT64_MAX, p50/95/99 and reset tests.
+- =make test MONADC_ROOT=<provided SDK>=: PASS. Monad and frame integration
+  report SKIP explicitly when no actual runner is provided.
+- =make test-repl-abi=: PASS against supplied public Monad headers, with a
+  headless test-only window declaration fixture; not a linked engine.
+- Strict syntax checks of changed =runtime.c= using interface-shaped camera
+  declarations, and =frame_api.c= using a window fixture: PASS.
+- =make bench-dispatch=: completed with workload above.
+- Full engine link, real Monad JIT callbacks, graphics execution, GPU fences
+  and frame p99: NOT VERIFIED in this container.
+
+* NEXT
+
+1. Run =OBSIDIAN_MONAD_PROFILE_FFI=1 ./obsidian= on a workstation with an
+   actual MonadC runtime and GPU; collect =:dispatch= and frame profiles on
+   representative scenes, under cold/warm REPL reloads.
+2. Investigate native snapshot pin/lookup overhead and frame callback value
+   allocation using real JIT evidence; batch carefully without weakening
+   compiler-pinned code lifetimes or frame-scoped foreign handles.
+3. Coordinate precompiled MonadC candidate+QTT verification with prepared
+   host callback images. This still requires new compiler SDK entry points.
+4. Profile dirty font atlas uploads and geometry batching in a live Vulkan
+   workload before attempting further renderer rewrites.

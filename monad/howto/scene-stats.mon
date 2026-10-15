@@ -1,0 +1,35 @@
+;;; scene-stats.mon --- one snapshot: meshes, SDFs, presets, first mesh name
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto scene-stats
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/scene-stats.mon ./obsidian
+Borrowed views only: counts and names cross no lifetime boundary, and a
+mesh borrow is engine-owned, never an allocation.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (stats-frame f)
+  (begin
+    (list (mesh-count (scene))
+          (sdf-count (scene))
+          (material-asset-count)
+          (if (> (mesh-count (scene)) 0)
+              (mesh-name (mesh 0))
+              "empty scene"))
+    True))
+
+(on-frame! stats-frame)

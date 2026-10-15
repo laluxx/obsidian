@@ -1,0 +1,72 @@
+#+TITLE: Obsidian — Cycle 15: Publication checkpoint profiling and revision identity
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Cycle 15 continues Cycle 14's host scheduler without inventing compiler-owned
+native candidate APIs. The engine remains one owner-thread Monad client.
+
+* Implemented
+
+** DONE Measured publication checkpoint latency
+- =src/monad/publication_metrics.[ch]=: allocation-free, fixed-size rolling
+  CPU checkpoint timings; 128 samples globally and 128 per BOOT/REPL lane.
+- Separately records synchronous *execution* versus admission-to-dispatch
+  *queue wait* in microseconds; timestamps use the same monotonic clock.
+- Per-lane success/failure, budget-exceeded counts and timestamp validation.
+- =OBSIDIAN_MONAD_STALL_BUDGET_US= configures the CPU checkpoint threshold;
+  defaults to 16667 microseconds (~60 Hz). Invalid values use the default.
+- Timing is sampled around =obs_monad_engine_process_pending= dispatch,
+  including the synchronous MonadC load. It is NOT GPU frame timing and does
+  not imply concurrent native compilation.
+
+** DONE Real Monad/REPL observability
+- Eight read-only registered Monad host procedures: =(publish-last-us)=,
+  =(publish-p95-us)=, =(publish-p99-us)=, =(publish-wait-p95-us)=,
+  =(publish-stalls)=, =(publish-budget-us)=, =(publish-repl-p95-us)=,
+  =(publish-boot-p95-us)=.
+- =modules/obsidian/live-reload.mon=: composable timing helpers.
+- REPL =:latency= displays queue wait versus boot/REPL execution cost.
+
+** DONE Stronger source integrity
+- Stage snapshots and the watcher's fingerprints now compare =ctime= as
+  well as device, inode, size and =mtime=; same-size rewrites followed by a
+  restored modification timestamp are no longer silently considered equal.
+- Regression tests cover restored-mtime writes and 50,000 deterministic
+  owner-thread checkpoint samples, including queue timestamps, rolling p99,
+  negative timestamps, lane attribution and latency budgeting.
+
+* Validation (on delivery host)
+
+- Headless =make test-native=: PASS.
+- =make test= with supplied MonadC public headers: PASS for available native
+  and SDK declaration checks. No real embedded evaluator or GPU run here.
+- Strict C23 C syntax using actual Monad public headers: PASS; the runtime
+  unit required a minimal local camera declaration because cglm is absent.
+- ASan + UBSan for new metrics and source-stage tests: see final run evidence.
+- Full Vulkan engine launch, real JIT execution, frame p95/p99: NOT VERIFIED.
+
+* Local benchmarking protocol
+
+1. Launch a real, complete engine with the matching MonadC runtime.
+2. Optionally configure =OBSIDIAN_MONAD_STALL_BUDGET_US=8000= to highlight
+   checkpoints exceeding 8 ms of CPU time (NOT measured GPU time).
+3. Alternate successful/rejected live recompiles while a scene is rendering;
+   type =:latency= to capture checkpoint p95/p99, queue p95 and stall counts.
+4. Measure actual CPU frame-wall p50/p95/p99 and GPU timestamp p50/p95/p99
+   separately using the renderer profiler. Compare no-reload and reload cases.
+5. Record MonadC native-image counts and RSS throughout a long soak; a pinned
+   image may remain live until readers finish, which is expected.
+
+* Compiler dependency — still blocked
+
+Independent =candidate_compile/verify/commit=; QTT-authorized host borrows,
+compiler-specified state migration, and truly off-render-thread compilation.
+The source-stage worker only reads immutable bytes. Without MonadC staged
+candidates, no honest zero-stall guarantee can be made.
+
+* Patch
+
+Extract over a Cycle 14 checkout. Verify =docs/CYCLE15-MANIFEST.sha256=
+then run =make test=. No file deletions are needed.

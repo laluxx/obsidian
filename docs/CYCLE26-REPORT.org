@@ -1,0 +1,38 @@
+#+TITLE: Obsidian — Cycle 26: Validated hierarchy ordering
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Why this baseline was merged
+
+Cycle 27's loader assumes Cycle 26's runtime-only =topology_order= and
+=node_topology= API. The working tree was still at Cycle 25, so this prerequisite
+was merged before the requested Cycle 27 overlay. The Cycle 26 archive manifest
+was verified before integration; its stale Makefile and TODO.org were not
+copied over the live project.
+
+* Integrated behavior
+
+- =src/scene/node_topology.[ch]= builds parent-first order in O(N), using
+  iterative traversal and caller-owned scratch. Invalid parent indices,
+  self-edges, cycles, and invalid strided layouts fail without recursion.
+- =OmdlSceneGraph.topology_order= is generated at graph load and freed by
+  =omdl_scene_graph_destroy=. It is runtime state, not serialized cache data.
+- =animate_scene= traverses the prepared order once per tick. It guards the
+  instance mesh span and handles graphs without meshes; mesh matrices are marked
+  dirty only when their bytes change.
+- Added native randomized topology and parsed-glTF fixture tests, plus a
+  CPU-only comparison harness at =make bench-node-topology=.
+
+* Verification performed here
+
+- =make test-native=: PASS. The suite exercised 50,000 deterministic randomized
+  forests, invalid/self/long-cycle cases, a parsed three-node glTF hierarchy,
+  and local-translation composition. Other existing native tests also passed.
+- The benchmark target is available but was not run for this merge. No sanitizer,
+  full renderer, live Monad, or GPU playback result is claimed here.
+
+* Remaining integration limitation
+
+At this stage the legacy OMDL cache reader still trusted serialized counts and
+read data before complete validation. Cycle 27's cache preflight and checked
+streaming are required before treating cached graph data as trusted.

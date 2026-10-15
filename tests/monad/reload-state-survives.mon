@@ -1,0 +1,21 @@
+;;; reload-state-survives.mon --- Reload state lifetime — requires two executions in the same host image.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract reload-state-survives
+
+;;; Commentary:
+
+Call obsidian-test-live-state-setup before editing source and reloading,
+then call obsidian-test-live-state-check. The host, not a script-local
+global, must own persistent scene state. A harness must coordinate reload.
+
+;;; Code:
+(define obsidian-live-test-token 7201)
+(define (obsidian-test-live-state-setup)
+  (let ([c (obs-current-camera)])
+    (obs-camera-set-speed c 1.5)
+    True))
+(define (obsidian-test-live-state-check)
+  (and (= obsidian-live-test-token 7201)
+       (> (obs-camera-speed (obs-current-camera)) 0)))

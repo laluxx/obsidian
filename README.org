@@ -1,0 +1,185 @@
+#+TITLE: Obsidian Engine
+#+SUBTITLE: A C Vulkan engine and editor with an evolving compiled Monad interface
+#+STARTUP: overview
+
+* What Obsidian is
+
+Obsidian combines a native rendering engine, scene editor, asset pipeline,
+physics, audio, and keyboard command system. The engine remains written in C;
+the Monad integration adds compiled application logic and controlled access
+to engine capabilities through a persistent embedded runtime.
+
+The executable built here is the sample application in =src/app/main.c=.
+It opens the integrated editor and a scene with a cube, textures, a PBR
+material, an HDR environment, and a font-based FPS display. This is an
+actively developed engine, with an evolving public API.
+
+* Current capabilities and verification
+
+| Area                  | Present implementation                                                                                   | Verification boundary                                                                     |
+|-----------------------+----------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------|
+| Graphics              | Vulkan mesh/task shaders, GPU buffers, PBR/IBL, shadows, render graph, 2D drawing, 3D SDFs               | Engine builds and starts locally; broad rendering correctness remains unproven            |
+| Editor and scene      | Scene graph, gizmos, inspector, asset browser, text and animation editing                                | Startup smoke check; no complete editor interaction suite                                 |
+| Assets and simulation | glTF/OBJ, texture cooking/cache, EXR decoding, Jolt physics, audio backend                               | Included in the engine build; subsystem integration coverage varies                       |
+| Text                  | FreeType bitmap atlas, UTF-8 validation, fallback/font caching, face shader payloads                     | Native UTF-8/capacity tests pass; GPU lifetime and shaping work remain                    |
+| Monad                 | Persistent host, foreign scene/camera/resource handles, key procedures, root-module reload and telemetry | Compiles and links against the local SDK; full embedded integration suite is unconfigured |
+| MSDF glyphs           | Optional upstream-msdfgen generator and decode shader                                                    | Separate from the default bitmap renderer; atlas/pipeline integration remains             |
+
+Local verification on 2026-10-11 rebuilt engine objects and generated shaders
+and font headers, passed =make test= with an explicit Monad integration skip,
+and launched the executable on an NVIDIA RTX 3060 for eight seconds.
+Existing Jolt archives were retained during that rebuild. This establishes
+build/startup success, not long-running stability or performance targets.
+See [[file:BUILD-PROBLEMS.org][build status]] for the evidence and remaining warnings.
+
+* Build and run
+
+** Dependencies
+
+The current build targets Linux with GLFW and X11 integration. It requires:
+
+- GCC with =-std=c23= support, GNU Make, a C++ toolchain, CMake, and =pkg-config=.
+- Vulkan headers/loader, GLFW, CGLM, FreeType, fontconfig, miniz, and meshoptimizer.
+- =mold= for linking, =glslangValidator= for GLSL compilation, and =xxd= for embedded headers.
+- A compatible MonadC checkout containing =src/embed/include/= and
+  =build/lib/libmonad-{compiler,embed}.so=; both libraries are required.
+- Python 3 for the build regression check.
+
+Jolt and its C wrapper are built from =vendor/joltc/= using CMake. Their
+initial build may need network access for fetched dependencies.
+The renderer requests Vulkan 1.3 features and =VK_EXT_mesh_shader= with
+mesh/task shaders, descriptor indexing, buffer device addresses, and dynamic
+rendering. A working display and a GPU/driver supporting the requested
+features are required to run the graphical application.
+
+** Quick start
+
+Run from the repository root so relative asset and module paths resolve:
+
+#+begin_src sh
+make -j2
+make run
+#+end_src
+
+Plain =make= builds the engine, not the optional MSDF tool. The default
+optimization is portable =-O2=. =make -j2= bounds engine compilation;
+the nested Jolt CMake build currently chooses its own CPU-count parallelism.
+
+The default MonadC location is =../monadc=. To use another checkout:
+
+#+begin_src sh
+make -j2 MONADC_ROOT=/path/to/monadc
+#+end_src
+
+The executable embeds the selected Monad library directory in its runtime
+search path. Keep the compatible SDK libraries available after building.
+When switching SDKs or build flags, rebuild affected objects; Make does not
+track flag changes as file dependencies.
+
+The restored =assets/= tree includes source TTFs, icons, demo models,
+textures, and HDR environments. Make generates font headers from TTF files
+and SPIR-V headers from GLSL. Keep source assets when packaging the project.
+Asset caches are written under =~/.cache/obsidian/=.
+
+** Other targets
+
+| Command    | Purpose                                                                      |
+|------------+------------------------------------------------------------------------------|
+| =make libs=  | Build =libobsidian.a= and =libobsidian.so=                                       |
+| =make debug= | Clean and rebuild with =-O0= and debug symbols; run without =-j=                 |
+| =make clean= | Remove engine/generated files, test outputs, and Jolt/MSDF build directories |
+| =make help=  | List the principal Makefile targets                                          |
+
+* Working with Monad
+
+Without =OBSIDIAN_MONAD_BOOT=, startup does not load a script. To try the
+compiled camera-policy module:
+
+#+begin_src sh
+OBSIDIAN_MONAD_BOOT=monad/obsidian/live-demo.mon ./obsidian
+#+end_src
+
+=C-M-<right>= invokes the exported =Int -> Int= camera policy; =F5= queues
+reload of the boot module. Enable debounced root-file watching with:
+
+#+begin_src sh
+OBSIDIAN_MONAD_BOOT=monad/obsidian/live-demo.mon \
+OBSIDIAN_MONAD_WATCH=1 ./obsidian
+#+end_src
+
+Compilation runs synchronously at an event-loop safe point and can stall a
+frame. Reload releases script key closures before publication; replacement
+modules must rebind commands. Failed publication disables the native camera
+hook. Atomic rollback, imported-module watching, staged images, and state
+migration remain open work. See [[file:docs/EMBEDDING.org][embedding contracts]] and
+[[file:docs/HOTRELOAD.org][reload semantics]] before changing this path.
+
+* Tests and measurements
+
+#+begin_src sh
+make test
+make test-native
+OBSIDIAN_MONAD_TEST_RUNNER=/path/to/embedded-host-runner make test-all
+./make help
+./make help test
+./make test native
+./make test all
+./make bench --list
+./make bench keymap
+./make bench cpu --iterations 20000
+make bench BENCH_SELECTION=cpu
+OBSIDIAN_FONT_PROFILE=1 ./obsidian
+#+end_src
+
+=make test= remains the GNU Make default suite. The additive =./make= CLI
+routes named suites to the original Make targets; =./make test all= maps to
+the strict =make test-all= gate. The default suite reports unavailable SDK and
+live-runner suites as =SKIP=.
+
+The external Monad runner must own a live runtime/object space and initialized
+scene/camera, execute each =tests/monad/*.mon= fixture, report assertions, and
+coordinate staged reload fixtures. A compiler accepting definitions alone
+does not satisfy that contract. =make test-all= requires this runner.
+
+=bench-font= measures CPU UTF-8 scanning, not GPU text rendering.
+=OBSIDIAN_FONT_PROFILE=1= enables font counters and CPU timings reported at
+font destruction. See [[file:docs/TESTING.org][test requirements]] and [[file:docs/perf/README.org][measurement notes]].
+=./make= is an additive frontend; GNU Make remains the backend and all original
+Makefile targets remain directly callable. =./make bench= is the unified
+benchmark frontend; it runs every
+registered workload sequentially, and =./make bench cpu= selects the
+headless CPU-only group. =make bench= delegates to that same frontend;
+=BENCH_SELECTION= chooses its group or individual workload.
+
+* Optional MSDF tool
+
+The existing editor uses bitmap fonts. The separate MSDF generator needs an
+installed upstream =msdfgen= CMake package or an explicit source checkout:
+
+#+begin_src sh
+make msdf-tool MSDFGEN_SOURCE_DIR=/path/to/msdfgen
+build/msdf/obsidian-msdf assets/fonts/MapleMono-NF-Regular.ttf 0x41 capital-A.ppm
+#+end_src
+
+Its 2D glyph distance textures are separate from the engine's 3D SDF
+raymarcher. See [[file:docs/MSDF.org][MSDF format and integration requirements]].
+
+* Source map and contribution
+
+| Path                          | Responsibility                                |
+|-------------------------------+-----------------------------------------------|
+| =src/app/=, =obsidian.h=          | Demo entry point and umbrella engine header   |
+| =src/graphics/=, =shaders/=       | Rendering, GPU resources, fonts, GLSL         |
+| =src/editor/=, =src/scene/=       | Editor UI, scene graph, camera                |
+| =src/assets/=, =assets/=          | Asset decoding and runtime source data        |
+| =src/platform/=, =src/core/=      | Window/input/keymaps and shared runtime types |
+| =src/physics/=, =src/audio/=      | Simulation and audio backends                 |
+| =src/monad/=, =monad/obsidian/= | Embedded host, capabilities, Monad modules    |
+| =tests/=, =tools/=, =vendor/=       | Regression fixtures, utilities, dependencies  |
+
+Read [[file:AGENTS.md][Repository Guidelines]] before contributing and use [[file:TODO.org][TODO.org]]
+as the active work queue. [[file:docs/ARCHITECTURE.org][Architecture]] defines subsystem ownership.
+[[file:docs/FACE-TEXT.org][Face-text shader payloads]] documents the host-facing 2D text ABI.
+Cycle reports, patch lists, and manifests preserve migration history; their
+verification claims describe those earlier snapshots. Current build fixes
+are recorded in =BUILD-PROBLEMS.org=.

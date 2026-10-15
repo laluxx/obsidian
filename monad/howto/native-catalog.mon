@@ -1,0 +1,34 @@
+;;; native-catalog.mon --- compiler-published export inventory reads
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto native-catalog
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/native-catalog.mon ./obsidian
+Reports how many exports the most recently published source carries.
+These are compiler-authored inventory facts, not host ledger counters
+(dispatch-watch.mon) or QTT borrow proofs. Drift between the native
+image and the host image is a fail-closed publication mismatch, never a
+silent skew.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (catalog-frame f)
+  (begin
+    (list (native-export-count))
+    True))
+
+(on-frame! catalog-frame)

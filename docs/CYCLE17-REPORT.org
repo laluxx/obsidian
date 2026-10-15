@@ -1,0 +1,69 @@
+#+TITLE: Obsidian — Cycle 17: Host effects at native publication
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Purpose
+
+The current MonadC embedding API atomically replaces native generations, but
+host callbacks are a separate C-owned effect. A source unit can call
+=(on-frame! ...)= or =(bind-key! ...)= while loading. Previously, Obsidian
+immediately modified live callback state and then discarded all callbacks on
+SUCCESS; a failing load could replace the old callback even though MonadC
+preserved the old native image. That violates the desired publication contract.
+
+* Implemented
+
+** DONE Journal compiler-time callback registrations
+- =src/monad/live_binding_txn.[ch]= is a bounded, allocation-free journal of
+  key binds, unbinds, and frame callbacks. Value retain/release supplied by
+  the owner, no compiler pointers or Vulkan dependencies in the journal.
+- =obs_monad_load_source= starts the journal before invoking MonadC; it replays
+  it only after =monad_source_result_is_published= succeeds. On a rejection,
+  it releases staged references and preserves old host callbacks.
+- =on-frame!= uses the journal while compiling; outside compilation, it
+  preserves the existing direct behavior. Key chords have syntax and native
+  ownership checks before staging; an exhausted journal returns an error.
+- On successful replacement, obsolete old-image key and frame closures are
+  released, and new callbacks are installed in original operation order.
+- Corrected a stale comment about destruction ordering.
+
+** DONE Guard engine-side mutations during compiler publication
+- Host-side camera positions/speed/orientation, mesh visibility, SDF material
+  and frame profiling refuse mutation while MonadC is publishing source.
+- Read-only capability queries remain available. Callback registration is the
+  exception, implemented transactionally rather than mutating live state.
+- This is a *runtime safety policy*, not yet a compiler-checked QTT effect
+  proof or a comprehensive rollback of arbitrary external IO. The compiler
+  still needs effect/borrow signatures for native imported capabilities.
+
+** DONE Regression tests and Monad examples
+- =tests/native/live_binding_txn.c=: 50,000 deterministic publication cycles;
+  rollback, duplicate action order, saturation, ownership, failure cleanup.
+- Wired into =make test-native= and =make test=; no Vulkan SDK dependency.
+- =modules/obsidian/live-publication.mon= shows real concise engine syntax.
+- =tests/monad/live-publication-contract.mon= records the mandatory end-to-end
+  live compiler/engine integration scenario, currently gated.
+
+* Verification boundaries
+
+- Native =make test-native= and SDK-backed =make test= passed in this container.
+- Compiler generation reads, source staging and native test doubles pass.
+- Actual callbacks during source load, Vulkan engine launch, timing under
+  real JIT compilation, and the complete native build are NOT verified here.
+- Native compilation is still synchronous. Source preflight remains advisory.
+- Applying host callbacks can still fail AFTER the compiler publishes, e.g.
+  a keymap allocation failure. This failure is reported but cannot roll back
+  an already published native image. Compiler-side candidate commit and
+  preallocated/staged host effect transactions are needed to close this gap.
+
+* Next
+
+** NEXT OBS-C18-001 — Compiler-declared effects and verified host commit
+- Add compiler-authored QTT/effect/borrow descriptors to dynamic host imports.
+- Prevalidate and reserve host callback capacity before image commit, and
+  add a compiler-owned candidate transaction/commit phase.
+- Test scene/GPU mutation denial and callback rollback with the REAL runtime.
+
+** BLOCKED OBS-C18-002 — Fully nonblocking native candidate compilation
+- Requires MonadC =ABI-001/002/003= independent candidate APIs; do not
+  call advisory =check_source= a native JIT candidate.

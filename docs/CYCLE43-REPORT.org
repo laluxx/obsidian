@@ -1,0 +1,122 @@
+#+TITLE: Obsidian — Cycle 43: checked Vulkan render graph and glTF source integrity
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Provenance and scope
+
+Input: the user-supplied =obsidian.tar(2).gz= plus Cycle 41 and Cycle 42
+incremental overlays, in order. The Cycle 42 SHA-256 manifest was checked
+before editing. This is a file-only *Cycle 43 delta*, not an engine replacement.
+
+This cycle implements and tests hardening of the actual production Vulkan
+render-graph compilation/command-recording path, and extends the private
+uncached glTF source inspection path. It does *not* claim to implement the
+still-missing independent eight-stream glTF cooker.
+
+* Change 1 — Fail-closed render-graph admission
+
+- =rg_import_image/buffer= reject null handles, invalid image format/dimensions
+  and capacity overflow; return =RG_INVALID_ID= and a sticky =RgResult=.
+- Dependencies require valid IDs, correct resource type, nonzero pipeline
+  stage, valid image layout and enough dep capacity. Compatible same-layout
+  dependencies combine stage/access; conflicting layouts are rejected.
+- Color/depth attachments require a correctly formatted image, unique
+  attachment ID and available capacity. A preflight detects mixed sizes.
+- =rg_validate= checks ALL passes before Vulkan commands are issued, so graph
+  admission failures cannot leave a half-rendered graph in a command buffer.
+- =rg_execute_checked= propagates failure to the actual =recordCommandBuffer=
+  production call site. A fatal diagnostic prevents submitting a corrupt frame
+  while recovery/error-routing is not yet implemented.
+- =rg_reset= intentionally discards BOTH passes and imports: this is how the
+  production per-frame command recorder currently uses the graph. The old
+  header comment claiming retained resource imports was inconsistent.
+- The old =rg_execute= entry point is retained for compatibility, but new
+  code should use =rg_execute_checked= and handle its result.
+
+* Change 2 — Vulkan synchronization corrections
+
+The previous resource transition logic skipped barriers when access/layout
+bits repeated, including write-after-write hazards in consecutive passes.
+
+Cycle 43 tracks each dependency's last access/stage/layout and emits barriers
+for transitions or any prior/current write; repeated read-only access can
+still share residency without a redundant barrier. Combined depth+stencil
+formats transition both aspects. Vulkan image, buffer and rendering structures
+are fully initialized rather than containing indeterminate fields. The graph
+still assumes ordered passes in one command buffer and does not implement
+subresource-level tracking, multi-queue ownership or dependency scheduling.
+
+* Change 3 — Cold-source integrity and cache-miss fast path
+
+=obs_gltf_source_plan= retains its worker-safe cgltf validation, buffer data
+and source-document hash. It now also accounts for externally referenced
+image bytes, including percent-decoded local URIs. Absent assets produce
+=OBS_GLTF_PLAN_IO= and resources exceeding the bounded memory budget produce
+=OBS_GLTF_PLAN_LIMIT=. The signature detects image-content changes even if
+source JSON and geometry buffers remain identical. Data URIs are already
+captured in the source document and embedded bufferView images in decoded
+buffer data.
+
+=obs_gltf_cache_prepare_cpu= checks for the OMDL file *before* parsing and
+loading all glTF buffers, avoiding redundant CPU parsing on the common cold
+cache-miss path (which next runs =obs_gltf_source_plan=).
+
+** Explicit limitations
+
+- The source plan only observes files while hashing; it is not a pinned or
+  immutable multi-file scene snapshot. An external image may change afterward.
+- Cache hits use the OMDL source cache signature and a separate texture
+  manifest; this new source-plan fingerprint does not automatically invalidate
+  pre-existing OMDL cache hit texture resources.
+- There is still no glTF =ObsGltfCacheCandidate= cooker on cache miss;
+  =OBS_GLTF_ASYNC_NEEDS_COOK= remains the correct terminal state.
+- The sync loader still calls =vkDeviceWaitIdle=, and real on-device async
+  upload, texture/descriptor/physics parity is unverified by these host tests.
+
+* Test results
+
+| Gate                                      | Result |
+|-------------------------------------------+--------|
+| =make -j2 test= headless native/tooling    | PASS   |
+| render-graph production code + fake Vulkan command seam | PASS |
+| render-graph native ASan + UBSan + leak checking | PASS |
+| glTF parser + image mutation/encoded URI/missing/oversize | PASS |
+| glTF parser native ASan + UBSan + leak checking | PASS |
+| deterministic tar manifest + hash/checks | PASS   |
+| reconstructed Cycle 42 overlay and Cycle 43 replay | PASS |
+| native Vulkan SDK full build             | NOT RUN (missing SDK/dependencies) |
+| live validation-layer frame              | NOT RUN (no GPU/display) |
+| Monad SDK / Jolt / physics scene          | NOT RUN |
+| skinned and animated glTF cold publication| NOT IMPLEMENTED |
+
+The renderer native seam exercises the *real* =render_graph.c=, but replaces
+Vulkan API recording functions with inspectable callbacks. It does not prove
+on-device VUID compliance, correct submitted frame contents or timing.
+
+* Next cycle recommendation (Cycle 44)
+
+1. Build a per-request owned glTF cooker context and separate primitive
+   extraction, meshlet generation, material/texture plans, morph streams,
+   skinning and animation graph from the current global legacy loader.
+2. Make the returned payload match the existing =ObsGltfCacheCandidate= and
+   =ObsPendingSceneLoad= lifetime contract. The owner thread alone may stage
+   Vulkan resources; poll real GPU upload fences before commit. Preserve
+   cancellation, stale ticket and memory/quarantine invariants.
+3. Extend cold-scene fixture coverage with real geometry, texture, skinned
+   and morph assets, then run both cache-hit and cold-load pipelines under
+   Vulkan validation layers. Quantify frame p95/p99 and staging overhead.
+4. Add nonfatal render-graph reporting once the command buffer and present
+   path has an explicit failure/result propagation contract; do not silently
+   continue recording on invalid resources.
+5. Implement explicit texture-slot generations, safe deferred reuse, and
+   fence-aware retirement to remove device-wide idle from scene churn.
+
+* Applying the file-only delta
+
+#+begin_src sh
+# From the parent of the existing Cycle 42 obsidian/ directory:
+tar -xzf obsidian-monad-cycle43-incremental-20261012.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE43-MANIFEST.sha256
+make -j2 test
+#+end_src

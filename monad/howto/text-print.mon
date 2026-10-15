@@ -1,0 +1,37 @@
+;;; text-print.mon --- PROPOSES API: HUD text lines from compiled Monad
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto text-print proposal
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/text-print.mon ./obsidian
+No host binding exists yet: the engine renders text (FreeType atlas) but
+Monad cannot emit any. Proposed surface, engine-owned and bounded:
+(hud-print row text) returns a line ticket; (hud-clear) removes all lines.
+Rows are 0-based; overlong text truncates, never grows the atlas on the
+frame path. Reads stay safe during publication; writes need engine-mutable?.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (text-frame f)
+  (if (= (frame-number f) 1)
+      (begin
+        (hud-print 0 "SCORE 0")
+        (hud-print 1 "C-c t tours the selection")
+        True)
+      True))
+
+(on-frame! text-frame)

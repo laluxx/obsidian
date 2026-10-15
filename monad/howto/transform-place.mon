@@ -1,0 +1,40 @@
+;;; transform-place.mon --- absolute mesh placement plus axis readback
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto transform-place
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/transform-place.mon ./obsidian
+Frame 1 teleports mesh 0 to (2, 0, -3); every frame reports its world
+axes. Rotation lives in animate-mesh.mon; this is the placement twin.
+Attached physics bodies teleport with the mesh; the GPU slot dirties only
+on actual change.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (place-frame f)
+  (if (> (mesh-count (scene)) 0)
+      (begin
+        (if (= (frame-number f) 1)
+            (begin (transform-position! (transform (mesh 0)) 2.0 0.0 -3.0) True)
+            True)
+        (list (transform-x (transform (mesh 0)))
+              (transform-y (transform (mesh 0)))
+              (transform-z (transform (mesh 0))))
+        True)
+      True))
+
+(on-frame! place-frame)

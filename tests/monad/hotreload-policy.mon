@@ -1,0 +1,22 @@
+;;; hotreload-policy.mon --- Native Monad policy reload smoke fixture.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract hotreload-policy
+
+;;; Commentary:
+
+hotreload-policy.mon — Native Monad policy reload smoke fixture.
+Run in engine: set OBSIDIAN_MONAD_BOOT to this file, start Obsidian,
+press C-M-right, edit the delta below, save atomically and press F5.
+OBSIDIAN_MONAD_WATCH=1 enables stable-file polling, not background builds.
+Integration verification is still gated on a working MonadC toolchain.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm [current : Int] -> Int)
+  (+ current 275))
+
+(define (obsidian_reload_version [ignored : Int] -> Int)
+  4)

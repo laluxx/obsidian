@@ -1,0 +1,15 @@
+Makefile
+README.md
+TODO.org
+docs/CYCLE56-PATCH-FILES.txt
+docs/CYCLE56-REPORT.org
+docs/VIEWPORT-INPUT-OWNERSHIP.org
+src/editor/gizmo.c
+src/editor/sdf_viewport.c
+src/editor/sdf_viewport.h
+src/editor/viewport_coordinates.c
+src/editor/viewport_coordinates.h
+src/graphics/vulkan_setup.c
+src/platform/input.c
+tests/native/sdf_viewport.c
+tests/native/viewport_coordinates.c

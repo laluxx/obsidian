@@ -1,0 +1,21 @@
+Cycle 13 overlay: extract from the parent of the existing obsidian/ directory.
+No file deletions required.
+
+Makefile
+TODO.org
+docs/CYCLE13-REPORT.org
+docs/MONADC-API-REQUESTS.org
+docs/PUBLICATION-SCHEDULER.org
+docs/TESTING.org
+modules/obsidian/live-reload.mon
+src/monad/hotreload_api.c
+src/monad/publication_queue.c
+src/monad/publication_queue.h
+src/monad/repl_service.c
+src/monad/runtime.c
+src/monad/runtime.h
+tests/monad/publication-queue-contract.mon
+tests/native/publication_queue.c
+tests/native/publication_queue_repl.c
+docs/CYCLE13-MANIFEST.sha256
+docs/CYCLE13-PATCH-FILES.txt

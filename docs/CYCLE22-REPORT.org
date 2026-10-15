@@ -1,0 +1,90 @@
+#+TITLE: Obsidian Cycle 22 — Constant-time foreign-object resolution
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Goal
+
+Remove unbounded O(N) foreign-reference membership scans from the editor/game
+scripting boundary, without weakening MonadC's nominal type verification,
+structural epoch checks, engine ownership, or resource lifetime contracts.
+Keep the convenient Monad language surface consistent across scene resources.
+
+* DONE Source implementation
+
+- Added =src/monad/slot_index.[ch]= as the single bounds-checked dense-array
+  slot resolver. It checks candidate pointer representation against a live
+  array's base, element stride, and count in constant time. It rejects NULL,
+  zero-stride, empty, out-of-range, and mid-element addresses. The untrusted
+  candidate is never dereferenced; no subtraction of unrelated C pointers is
+  performed. No allocations or synchronization are introduced.
+- Converted repeated pointer-equality scans in =mesh_api.c=, =sdf_api.c=,
+  =asset_api.c=, and =scene_api.c= to the shared resolver. The embedding
+  nominal type check, host incarnation/structural epoch and count/capacity
+  validation all still happen *before* slot membership. A valid slot address
+  is not a substitute for a valid Monad generation or a compiler proof.
+- Exposed =(sdf-index ref)= and =(gltf-index ref)= with the same concise
+  language design as =(mesh-index ref)= and =(node-index ref)=.
+- Added =(with-sdf ...)= and =(with-gltf ...)= Syntax transformers to
+  =modules/obsidian/language.mon=; no second VM or object allocation policy.
+- Added =tests/monad/foreign-slot-contract.mon= to the live Monad suite.
+  The runtime-dependent integration test is not claimed to have run here.
+
+* DONE Native tests and measured CPU benchmark
+
+- =make test= includes =tests/native/slot_index.c=: 4096 slots and 100,000
+  deterministic adverse queries, plus NULL, zero-stride, aligned endpoint,
+  out-of-range, mid-element, simulated stale-looking addresses and bounded
+  count tests. The owner epoch is deliberately outside this pure helper.
+- The new native test passed with =-fsanitize=address,undefined= and leak
+  detection. The remainder of =make test= passed using the actual public
+  Monad SDK headers extracted from =embed.tar(8).gz=. The Monad/Vulkan
+  integration gates explicitly reported SKIP.
+- =make bench-foreign-slots= compares the previous linear pointer-equality
+  scan against the new checked membership, using 100,000 deterministic
+  randomly distributed references per container size. GNU C23, =-O3=,
+  native headless CPU, =clock_gettime(CLOCK_MONOTONIC)=; no GPU/JIT involved.
+
+| Dense array slots | Old scan ns/lookup (three runs) | New checked slot ns/lookup (three runs) |
+|-------------------+---------------------------------+-----------------------------------------|
+| 16                | 4.98 / 4.76 / 6.52             | 2.20 / 2.54 / 2.21                      |
+| 1024              | 175.53 / 194.52 / 172.99       | 2.21 / 2.60 / 2.32                      |
+| 8192              | 1282.39 / 1193.91 / 1198.59    | 2.37 / 2.51 / 2.38                      |
+
+The benchmark measures only C slot membership; it excludes foreign type
+checking, value interning, host lifetime epoch checks, QTT proof validation,
+foreign procedure dispatch, Vulkan execution and rendering frame time. No
+end-to-end FPS, live scripting speedup, or cross-machine timing claim is made.
+CPU scheduling and clock frequencies were not controlled.
+
+* Supported-architecture contract
+
+=slot_index= uses a checked =uintptr_t= representation, appropriate for
+Obsidian's ordinary flat-address native CPU memory. Capability-machine
+pointer representations need a different, registry-backed resolver; do not
+assume this implementation works unchanged on CHERI or non-flat pointers.
+The caller must hold owner-thread access and validate =count <= capacity=.
+Structural changes must continue to bump the respective scene revision;
+slot membership cannot detect replacement of an object at the same address.
+
+* BLOCKED Integration requirements
+
+- Complete graphics/Jolt link and live scene traversal benchmark on the
+  user's workstation, including cold and warm load, p95/p99 script dispatch
+  and frame timings. Not available in this build environment.
+- Live execution of =foreign-slot-contract.mon= through the actual embedded
+  Monad object space and compiled JIT. SDK headers are not a running compiler.
+- Stable logical SceneNode/Mesh IDs across unrelated insert/delete operations.
+  Current conservative structural epochs intentionally invalidate such handles.
+- Candidate compilation and QTT-certified, atomic engine-host publication.
+  Requires additional MonadC API support; no candidate API fabricated.
+
+* NEXT
+
+1. Run the headless and live tests in the real engine, and collect per-operation
+   C/JIT dispatch timings through Cycle 21 =:dispatch= diagnostics.
+2. Audit all remaining foreign references for explicit ownership and lifetime;
+   avoid assuming pointer membership makes an arbitrary resource safe.
+3. Consider stable resource identifiers/handles where structural revisions
+   currently cause excessive invalidation, preserving QTT lifetimes.
+4. Bring compiler-prepared candidates into Obsidian only after the compiler
+   provides the necessary verified candidate/commit API.

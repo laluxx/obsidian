@@ -1,0 +1,4171 @@
+#include "mesh_storage.h"
+#include "renderer.h"
+#include "camera.h"
+#include "common.h"
+#include "context.h"
+#include "renderer2d_capacity.h"
+#include "scene.h"
+#include "tinyexr_c.h"
+#include "texture_page_policy.h"
+#include "texture_refs.h"
+#include "vulkan_setup.h"
+#include <stdlib.h>
+#include <string.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_DXT_IMPLEMENTATION
+#include "stb_dxt.h"
+#define NANOSVG_IMPLEMENTATION
+#include "nanosvg.h"
+#define NANOSVGRAST_IMPLEMENTATION
+#include "nanosvgrast.h"
+#include <dirent.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+/// Implementation
+
+#ifndef MIN
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+
+#define DDS_MAGIC 0x20534444
+typedef struct {
+  uint32_t dwSize;
+  uint32_t dwFlags;
+  uint32_t dwHeight;
+  uint32_t dwWidth;
+  uint32_t dwPitchOrLinearSize;
+  uint32_t dwDepth;
+  uint32_t dwMipMapCount;
+  uint32_t dwReserved1[11];
+  struct {
+    uint32_t dwSize;
+    uint32_t dwFlags;
+    uint32_t dwFourCC;
+    uint32_t dwRGBBitCount;
+    uint32_t dwRBitMask;
+    uint32_t dwGBitMask;
+    uint32_t dwBBitMask;
+    uint32_t dwABitMask;
+  } ddspf;
+  uint32_t dwCaps;
+  uint32_t dwCaps2;
+  uint32_t dwCaps3;
+  uint32_t dwCaps4;
+  uint32_t dwReserved2;
+} DDS_HEADER;
+typedef struct {
+  uint32_t dxgiFormat;
+  uint32_t resourceDimension;
+  uint32_t miscFlag;
+  uint32_t arraySize;
+  uint32_t miscFlags2;
+} DDS_HEADER_DXT10;
+
+// --- OBSIDIAN MEMORY MANAGER & ASYNC QUEUE ---
+typedef struct {
+  VkDeviceMemory memory;
+  VkDeviceSize size;
+  VkDeviceSize offset;
+  uint32_t active_allocations;
+  uint32_t memory_type_index;
+} TexturePage;
+static TexturePage *texture_pages;
+static size_t texture_page_count;
+static size_t texture_page_capacity;
+
+static bool alloc_texture_vram(VulkanContext *ctx, VkMemoryRequirements req,
+                               VkDeviceMemory *out_mem,
+                               VkDeviceSize *out_offset) {
+  VkDeviceSize alignment = req.alignment;
+  if (alignment == 0)
+    return false;
+  for (size_t i = 0; i < texture_page_count; i++) {
+    if (texture_pages[i].memory_type_index >= 32 ||
+        !(req.memoryTypeBits &
+          (UINT32_C(1) << texture_pages[i].memory_type_index)))
+      continue;
+    VkDeviceSize offset = texture_pages[i].offset;
+    VkDeviceSize aligned_offset =
+        (offset + alignment - 1) & ~(alignment - 1);
+    if (aligned_offset < offset || aligned_offset > texture_pages[i].size ||
+        req.size > texture_pages[i].size - aligned_offset)
+      continue;
+    *out_mem = texture_pages[i].memory;
+    *out_offset = aligned_offset;
+    texture_pages[i].offset = aligned_offset + req.size;
+    texture_pages[i].active_allocations++;
+    return true;
+  }
+  if (texture_page_count == texture_page_capacity) {
+    if (texture_page_capacity > SIZE_MAX / 2 / sizeof(*texture_pages))
+      return false;
+    size_t new_capacity = texture_page_capacity ? texture_page_capacity * 2 : 16;
+    TexturePage *grown =
+        realloc(texture_pages, new_capacity * sizeof(*texture_pages));
+    if (!grown)
+      return false;
+    texture_pages = grown;
+    texture_page_capacity = new_capacity;
+  }
+  if (texture_page_count == SIZE_MAX)
+    return false;
+  VkDeviceSize page_size = 0;
+  if (!obs_texture_page_capacity(req.size, alignment, &page_size))
+    return false;
+  uint32_t memType = findMemoryType(ctx->physicalDevice, req.memoryTypeBits,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  VkMemoryAllocateInfo allocInfo = {.sType =
+                                        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                    .allocationSize = page_size,
+                                    .memoryTypeIndex = memType};
+  VkDeviceMemory new_mem;
+  if (vkAllocateMemory(ctx->device, &allocInfo, NULL, &new_mem) != VK_SUCCESS)
+    return false;
+
+  texture_pages[texture_page_count] = (TexturePage){.memory = new_mem,
+                                                    .size = page_size,
+                                                    .offset = req.size,
+                                                    .active_allocations = 1,
+                                                    .memory_type_index =
+                                                        memType};
+  *out_mem = new_mem;
+  *out_offset = 0;
+  texture_page_count++;
+  fprintf(
+      stdout,
+      "\033[35m[OMM] Allocated %.2f MiB VRAM Texture Block (Page %zu)\033[0m\n",
+      (double)page_size / (1024.0 * 1024.0), texture_page_count);
+  return true;
+}
+
+static void free_texture_vram(VkDeviceMemory mem) {
+  for (size_t i = 0; i < texture_page_count; i++) {
+    if (texture_pages[i].memory == mem) {
+      if (texture_pages[i].active_allocations > 0) {
+        texture_pages[i].active_allocations--;
+        if (texture_pages[i].active_allocations == 0) {
+          texture_pages[i].offset = 0; // Compacting reset!
+          fprintf(stdout,
+                  "\033[35m[OMM] Page %u compacted (0 active "
+                  "allocations).\033[0m\n",
+                  (unsigned)i);
+        }
+      }
+      return;
+    }
+  }
+}
+
+typedef struct {
+  VkBuffer buffer;
+  VkDeviceMemory memory;
+  VkFence fence;
+  VkCommandBuffer cmd;
+  bool *loaded_flag;
+} AsyncUpload;
+static AsyncUpload *async_uploads = NULL;
+static uint32_t async_upload_count = 0;
+static uint32_t async_upload_capacity = 0;
+
+static VkCommandPool async_cmd_pool = VK_NULL_HANDLE;
+typedef struct {
+  VkBuffer buffer;
+  VkDeviceMemory memory;
+  VkCommandBuffer cmd;
+  bool *loaded_flag;
+} PendingUpload;
+static PendingUpload pending_uploads[8192];
+static uint32_t pending_upload_count = 0;
+static pthread_mutex_t upload_mutex = PTHREAD_MUTEX_INITIALIZER;
+static vec2 renderer2D_pointer_position = {-1.0f, -1.0f};
+
+static VkCommandBuffer begin_async_cmd(VulkanContext *ctx) {
+  pthread_mutex_lock(&upload_mutex);
+  if (async_cmd_pool == VK_NULL_HANDLE) {
+    VkCommandPoolCreateInfo poolInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
+                 VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = ctx->graphicsQueueFamily};
+    vkCreateCommandPool(ctx->device, &poolInfo, NULL, &async_cmd_pool);
+  }
+  VkCommandBufferAllocateInfo allocInfo = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandPool = async_cmd_pool,
+      .commandBufferCount = 1};
+  VkCommandBuffer cmd;
+  vkAllocateCommandBuffers(ctx->device, &allocInfo, &cmd);
+  VkCommandBufferBeginInfo beginInfo = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+  vkBeginCommandBuffer(cmd, &beginInfo);
+  return cmd;
+}
+
+static void end_async_cmd(VkCommandBuffer cmd) {
+  vkEndCommandBuffer(cmd);
+  pthread_mutex_unlock(&upload_mutex);
+}
+
+static void submit_async_upload(VulkanContext *ctx, VkBuffer buf,
+                                VkDeviceMemory mem, VkCommandBuffer cmd,
+                                bool *loaded_flag) {
+  pthread_mutex_lock(&upload_mutex);
+  if (pending_upload_count < 8192) {
+    pending_uploads[pending_upload_count++] =
+        (PendingUpload){buf, mem, cmd, loaded_flag};
+  } else {
+    fprintf(stderr, "\033[31m[CRITICAL] Pending uploads overflow! Skipping "
+                    "upload.\033[0m\n");
+  }
+  pthread_mutex_unlock(&upload_mutex);
+}
+
+void pump_async_uploads(VulkanContext *ctx) {
+  for (uint32_t i = 0; i < async_upload_count; i++) {
+    if (vkGetFenceStatus(ctx->device, async_uploads[i].fence) == VK_SUCCESS) {
+      vkDestroyBuffer(ctx->device, async_uploads[i].buffer, NULL);
+      vkFreeMemory(ctx->device, async_uploads[i].memory, NULL);
+      pthread_mutex_lock(&upload_mutex);
+      vkFreeCommandBuffers(ctx->device, async_cmd_pool, 1,
+                           &async_uploads[i].cmd);
+      pthread_mutex_unlock(&upload_mutex);
+      vkDestroyFence(ctx->device, async_uploads[i].fence, NULL);
+      if (async_uploads[i].loaded_flag)
+        *async_uploads[i].loaded_flag = true;
+      async_uploads[i] = async_uploads[--async_upload_count];
+      i--;
+    }
+  }
+  pthread_mutex_lock(&upload_mutex);
+  for (uint32_t i = 0; i < pending_upload_count; i++) {
+    VkSubmitInfo submitInfo = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers = &pending_uploads[i].cmd};
+    VkFenceCreateInfo fenceInfo = {.sType =
+                                       VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence;
+    vkCreateFence(ctx->device, &fenceInfo, NULL, &fence);
+    vkQueueSubmit(ctx->graphicsQueue, 1, &submitInfo, fence);
+
+    if (async_upload_count == async_upload_capacity) {
+      uint32_t new_cap =
+          async_upload_capacity == 0 ? 128 : async_upload_capacity * 2;
+      AsyncUpload *new_arr =
+          realloc(async_uploads, new_cap * sizeof(AsyncUpload));
+      if (new_arr) {
+        async_uploads = new_arr;
+        async_upload_capacity = new_cap;
+      } else {
+        fprintf(stderr, "\033[31m[CRITICAL] Failed to allocate memory for "
+                        "async uploads!\033[0m\n");
+        continue;
+      }
+    }
+    async_uploads[async_upload_count++] = (AsyncUpload){
+        pending_uploads[i].buffer, pending_uploads[i].memory, fence,
+        pending_uploads[i].cmd, pending_uploads[i].loaded_flag};
+  }
+  pending_upload_count = 0;
+  pthread_mutex_unlock(&upload_mutex);
+}
+
+// --- BACKGROUND TEXTURE COOKER ---
+typedef struct {
+  char filepath[512];
+  int32_t pool_index;
+  bool is_roughness;
+} CookerJob;
+
+#define MAX_COOKER_JOBS 8192
+static CookerJob cooker_queue[MAX_COOKER_JOBS];
+static volatile uint32_t cooker_head = 0;
+static volatile uint32_t cooker_tail = 0;
+static pthread_mutex_t cooker_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cooker_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t cooker_threads[8];
+static bool cooker_running = true;
+
+// Forward declarations for cooker thread
+static float *load_exr_as_float(const char *path, int *out_w, int *out_h,
+                                bool is_normal, bool is_roughness);
+static const char *get_texture_cache_path(const char *original_path,
+                                          bool is_roughness);
+static bool load_texture_dds(VulkanContext *ctx, const char *filepath,
+                             Texture2D *texture);
+
+typedef struct {
+  uint32_t magic; // 0x5845544F 'OTEX'
+  uint32_t width;
+  uint32_t height;
+  uint32_t format;
+  uint32_t data_size;
+} OtexHeader;
+
+// --- Texture Pool Management ---
+static Texture2D texturePool[MAX_TEXTURES];
+static char texturePoolPaths[MAX_TEXTURES][512];
+static bool texturePoolIsRoughness[MAX_TEXTURES];
+static uint32_t textureCount = 0;
+static Texture2D dummyWhiteTexture;
+/* Managed leases never reuse indices consumed by legacy renderer draws. */
+static ObsTextureRefs s_texture_refs;
+
+/// cooker_worker_thread — implementation group
+static void *cooker_worker_thread(void *arg) {
+  (void)arg;
+  while (cooker_running) {
+    pthread_mutex_lock(&cooker_mutex);
+    while (cooker_head == cooker_tail && cooker_running) {
+      pthread_cond_wait(&cooker_cond, &cooker_mutex);
+    }
+    if (!cooker_running) {
+      pthread_mutex_unlock(&cooker_mutex);
+      break;
+    }
+
+    CookerJob job = cooker_queue[cooker_head];
+    cooker_head = (cooker_head + 1) % MAX_COOKER_JOBS;
+    pthread_mutex_unlock(&cooker_mutex);
+
+    Texture2D *tex = &texturePool[job.pool_index];
+    tex->status = TEXTURE_STATUS_COOKING;
+
+    fprintf(stdout, "\033[35m[BACKGROUND COOKER] Compiling %s...\033[0m\n",
+            job.filepath);
+
+    const char *cache_path =
+        get_texture_cache_path(job.filepath, job.is_roughness);
+    int w, h, ch;
+
+    if (job.is_roughness) {
+      if (strstr(job.filepath, ".exr")) {
+        float *floatPixels =
+            load_exr_as_float(job.filepath, &w, &h, false, true);
+        if (floatPixels) {
+          FILE *fout = fopen(cache_path, "wb");
+          if (fout) {
+            OtexHeader header = {0x5845544F, (uint32_t)w, (uint32_t)h,
+                                 VK_FORMAT_R32G32B32A32_SFLOAT,
+                                 (uint32_t)(w * h * 16)};
+            fwrite(&header, sizeof(OtexHeader), 1, fout);
+            fwrite(floatPixels, 1, header.data_size, fout);
+            fclose(fout);
+          }
+          free(floatPixels);
+          tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+        } else {
+          tex->status = TEXTURE_STATUS_FAILED;
+        }
+      } else {
+        stbi_uc *roughPixels = stbi_load(job.filepath, &w, &h, &ch, 1);
+        if (roughPixels) {
+          size_t size = (size_t)w * h * 4;
+          stbi_uc *packed = malloc(size);
+          for (int i = 0; i < w * h; i++) {
+            packed[i * 4 + 0] = 255; // AO default
+            packed[i * 4 + 1] =
+                roughPixels[i];    // Roughness correctly packed in G!
+            packed[i * 4 + 2] = 0; // Metallic default
+            packed[i * 4 + 3] = 255;
+          }
+          free(roughPixels);
+          FILE *fout = fopen(cache_path, "wb");
+          if (fout) {
+            OtexHeader header = {0x5845544F, (uint32_t)w, (uint32_t)h,
+                                 VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)(size)};
+            fwrite(&header, sizeof(OtexHeader), 1, fout);
+            fwrite(packed, 1, header.data_size, fout);
+            fclose(fout);
+          }
+          free(packed);
+          tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+        } else {
+          tex->status = TEXTURE_STATUS_FAILED;
+        }
+      }
+    } else {
+      // Standard Albedo/Normal/etc JIT to DDS
+      if (strstr(job.filepath, ".exr")) {
+        bool is_normal = (strstr(job.filepath, "nor") != NULL);
+        float *float_pixels =
+            load_exr_as_float(job.filepath, &w, &h, is_normal, false);
+        if (float_pixels) {
+          FILE *fout = fopen(cache_path, "wb");
+          if (fout) {
+            OtexHeader header = {0x5845544F, (uint32_t)w, (uint32_t)h,
+                                 VK_FORMAT_R32G32B32A32_SFLOAT,
+                                 (uint32_t)(w * h * 16)};
+            fwrite(&header, sizeof(OtexHeader), 1, fout);
+            fwrite(float_pixels, 1, header.data_size, fout);
+            fclose(fout);
+          }
+          free(float_pixels);
+          tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+        } else {
+          tex->status = TEXTURE_STATUS_FAILED;
+        }
+      } else {
+        unsigned char *pixels =
+            stbi_load(job.filepath, &w, &h, &ch, STBI_rgb_alpha);
+        if (pixels) {
+          uint32_t num_blocks_x = (w + 3) / 4;
+          uint32_t num_blocks_y = (h + 3) / 4;
+          uint32_t dxt_size = num_blocks_x * num_blocks_y * 16;
+          unsigned char *dxt_data = malloc(dxt_size);
+
+          for (uint32_t by = 0; by < num_blocks_y; by++) {
+            for (uint32_t bx = 0; bx < num_blocks_x; bx++) {
+              unsigned char block[64];
+              for (uint32_t y = 0; y < 4; y++) {
+                for (uint32_t x = 0; x < 4; x++) {
+                  uint32_t px = (bx * 4) + x;
+                  uint32_t py = (by * 4) + y;
+                  uint32_t idx =
+                      ((py < (uint32_t)h ? py : (uint32_t)h - 1) * w +
+                       (px < (uint32_t)w ? px : (uint32_t)w - 1)) *
+                      4;
+                  memcpy(&block[(y * 4 + x) * 4], &pixels[idx], 4);
+                }
+              }
+              stb_compress_dxt_block(&dxt_data[(by * num_blocks_x + bx) * 16],
+                                     block, 1, STB_DXT_NORMAL);
+            }
+          }
+
+          char out_dds_path[512];
+          strncpy(out_dds_path, job.filepath, sizeof(out_dds_path) - 1);
+          char *out_ext = strrchr(out_dds_path, '.');
+          if (out_ext)
+            strcpy(out_ext, ".dds");
+          const char *out_dds_cache =
+              get_texture_cache_path(out_dds_path, false);
+
+          FILE *fdds = fopen(out_dds_cache, "wb");
+          if (fdds) {
+            uint32_t magic = DDS_MAGIC;
+            DDS_HEADER header = {0};
+            header.dwSize = 124;
+            header.dwFlags = 0x1007 | 0x80000;
+            header.dwHeight = h;
+            header.dwWidth = w;
+            header.dwPitchOrLinearSize = dxt_size;
+            header.dwMipMapCount = 1;
+            header.ddspf.dwSize = 32;
+            header.ddspf.dwFlags = 0x4;
+            header.ddspf.dwFourCC = 0x35545844;
+            header.dwCaps = 0x1000;
+
+            fwrite(&magic, 4, 1, fdds);
+            fwrite(&header, sizeof(DDS_HEADER), 1, fdds);
+            fwrite(dxt_data, 1, dxt_size, fdds);
+            fclose(fdds);
+          }
+          free(dxt_data);
+          stbi_image_free(pixels);
+          tex->status = TEXTURE_STATUS_READY_FOR_UPLOAD;
+        } else {
+          tex->status = TEXTURE_STATUS_FAILED;
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+void texture_pool_init() {
+  textureCount = 0;
+  obs_texture_refs_init(&s_texture_refs);
+  memset(texturePool, 0, sizeof(texturePool));
+
+  // Generate Dummy 1x1 White Texture Fallback
+  unsigned char white_pixel[4] = {255, 255, 255, 255};
+  dummyWhiteTexture.loaded = false;
+  load_texture_from_rgba(&context, white_pixel, 1, 1, &dummyWhiteTexture);
+  dummyWhiteTexture.status = TEXTURE_STATUS_READY;
+
+  // Launch 8 Background Cooker Threads
+  cooker_running = true;
+  for (int i = 0; i < 8; i++) {
+    pthread_create(&cooker_threads[i], NULL, cooker_worker_thread, NULL);
+  }
+}
+
+void texture_pool_cleanup(VulkanContext *context) {
+  cooker_running = false;
+  pthread_cond_broadcast(&cooker_cond);
+  for (int i = 0; i < 8; i++) {
+    if (cooker_threads[i] != 0) {
+      pthread_join(cooker_threads[i], NULL);
+      cooker_threads[i] = 0;
+    }
+  }
+
+  texture_pool_wait_for_uploads(context);
+
+  destroy_texture(context, &dummyWhiteTexture);
+
+  for (uint32_t i = 0; i < textureCount; i++) {
+    destroy_texture(context, &texturePool[i]);
+  }
+  textureCount = 0;
+  obs_texture_refs_init(&s_texture_refs);
+
+  for (size_t i = 0; i < texture_page_count; i++) {
+    if (texture_pages[i].memory) {
+      vkFreeMemory(context->device, texture_pages[i].memory, NULL);
+      texture_pages[i].memory = VK_NULL_HANDLE;
+    }
+  }
+  texture_page_count = 0;
+  free(texture_pages);
+  texture_pages = NULL;
+  texture_page_capacity = 0;
+
+  if (async_uploads) {
+    free(async_uploads);
+    async_uploads = NULL;
+  }
+  async_upload_capacity = 0;
+  async_upload_count = 0;
+
+  if (async_cmd_pool) {
+    vkDestroyCommandPool(context->device, async_cmd_pool, NULL);
+    async_cmd_pool = VK_NULL_HANDLE;
+  }
+}
+
+void texture_pool_wait_for_uploads(VulkanContext *context) {
+  pump_async_uploads(context);
+  for (uint32_t i = 0; i < async_upload_count; i++)
+    vkWaitForFences(context->device, 1, &async_uploads[i].fence, VK_TRUE,
+                    UINT64_MAX);
+  pump_async_uploads(context);
+}
+
+int32_t texture_pool_add(VulkanContext *context, const char *filename) {
+  if (textureCount >= MAX_TEXTURES) {
+    fprintf(stderr, "Texture pool full! Cannot load %s\n", filename);
+    return -1;
+  }
+
+  printf("Loading texture %u: %s\n", textureCount, filename);
+
+  if (load_texture(context, filename, &texturePool[textureCount])) {
+    printf("  -> Successfully queued texture #%u\n", textureCount);
+    return textureCount++;
+  }
+
+  printf("  -> Failed to load\n");
+  return -1;
+}
+
+/// Managed per-acquisition texture references
+/* Only a texture obtained here can be released here. Legacy texture_pool_add
+ * still owns its untracked pool indices until renderer shutdown. All these
+ * entry points are engine-owner-thread only; the cooker can complete work but
+ * must never mutate the reference registry. */
+bool texture_pool_acquire(VulkanContext *context, const char *filename,
+                          int32_t *out_index) {
+  if (!context || !filename || !out_index) return false;
+  *out_index = -1;
+  uint32_t index = 0;
+  if (obs_texture_refs_find(&s_texture_refs, filename, &index)) {
+    if (!obs_texture_refs_retain(&s_texture_refs, index)) return false;
+    *out_index = (int32_t)index;
+    return true;
+  }
+  /* Reject unsupported paths before any loader or GPU side effects. */
+  size_t length = 0;
+  while (length < OBS_TEXTURE_REF_PATH_MAX && filename[length]) ++length;
+  if (!length || length == OBS_TEXTURE_REF_PATH_MAX ||
+      textureCount >= MAX_TEXTURES)
+    return false;
+  int32_t added = texture_pool_add(context, filename);
+  if (added < 0) return false;
+  /* Fail closed: an untracked entry remains until renderer shutdown. */
+  if (!obs_texture_refs_enroll(&s_texture_refs, (uint32_t)added, filename))
+    return false;
+  *out_index = added;
+  return true;
+}
+
+bool texture_pool_release(int32_t index) {
+  return index >= 0 &&
+         obs_texture_refs_release(&s_texture_refs, (uint32_t)index);
+}
+
+/* Explicit blocking retirement checkpoint, NOT a per-frame operation.
+ * Drain known texture DMA and prove device-wide quiescence before destruction.
+ * Slots remain permanently reserved until texture_pool_cleanup(). */
+uint32_t texture_pool_collect_retired(VulkanContext *context) {
+  if (!context || !obs_texture_refs_pending(&s_texture_refs)) return 0;
+  texture_pool_wait_for_uploads(context);
+  if (vkDeviceWaitIdle(context->device) != VK_SUCCESS) return 0;
+  uint32_t reclaimed = 0;
+  for (uint32_t i = 0; i < textureCount; ++i) {
+    if (obs_texture_refs_state(&s_texture_refs, i) != OBS_TEXTURE_REF_PENDING)
+      continue;
+    Texture2D *texture = &texturePool[i];
+    if (texture->status != TEXTURE_STATUS_FAILED &&
+        !(texture->status == TEXTURE_STATUS_READY && texture->loaded))
+      continue;
+    if (texture->bindlessSlot && dummyWhiteTexture.view &&
+        dummyWhiteTexture.sampler) {
+      bindlessRegisterTexture(context, texture->bindlessSlot,
+                              dummyWhiteTexture.view, dummyWhiteTexture.sampler);
+    }
+    destroy_texture(context, texture);
+    texture->status = TEXTURE_STATUS_EMPTY;
+    if (obs_texture_refs_retire(&s_texture_refs, i)) ++reclaimed;
+  }
+  return reclaimed;
+}
+
+uint32_t texture_pool_retirement_pending(void) {
+  return obs_texture_refs_pending(&s_texture_refs);
+}
+
+bool texture_pool_lease_acquire(void *user, const char *path,
+                                int32_t *out_index) {
+  return texture_pool_acquire((VulkanContext *)user, path, out_index);
+}
+
+void texture_pool_lease_release(void *user, int32_t index) {
+  (void)user;
+  (void)texture_pool_release(index);
+}
+
+Texture2D *texture_pool_get(int32_t index) {
+  if (index < 0 || index >= (int32_t)textureCount) {
+    return NULL;
+  }
+  if (obs_texture_refs_state(&s_texture_refs, (uint32_t)index) ==
+      OBS_TEXTURE_REF_RETIRED) return NULL;
+  return &texturePool[index];
+}
+
+// --- 3D Renderer ---
+static uint32_t vertex_count = 0;
+static uint32_t dynamic_draw_count = 0;
+static uint32_t frame_index = 0;
+
+bool scene_topology_dirty = true;
+static bool indirect_buffer_dirty[MAX_FRAMES_IN_FLIGHT] = {true, true};
+static vec3 last_camera_pos = {-1e7f, -1e7f, -1e7f};
+static float *mesh_distances = NULL;
+static size_t mesh_distances_capacity = 0;
+
+uint32_t opaqueMeshCount = 0;
+uint32_t transparentMeshCount = 0;
+
+uint32_t active_sdf_count = 0;
+
+static bool ensure_dynamic_vertex_storage(uint32_t required) {
+  uint32_t capacity = OBS_DYNAMIC_VERTEX_STRIDE(&context);
+  if (required <= capacity && context.dynamicStagingMapped) return true;
+  if (required > MAX_DYNAMIC_VERTICES) return false;
+  if (capacity == 0) capacity = 64;
+  while (capacity < required) capacity *= 2;
+  const uint64_t dynamic_vertices =
+      (uint64_t)MAX_FRAMES_IN_FLIGHT * capacity;
+  const uint64_t required_vertices =
+      (uint64_t)context.megaVertexBufferOffset + dynamic_vertices;
+  if (!megaVertexBufferReserve(&context, required_vertices))
+    return false;
+  const VkDeviceSize staging_size =
+      (VkDeviceSize)dynamic_vertices * sizeof(Vertex);
+  return createDynamicBuffers(&context, staging_size);
+}
+
+extern uint64_t megaVertexBufferAddr;
+uint32_t append_vertices(const Vertex *verts, uint32_t count) {
+  if (count > MAX_DYNAMIC_VERTICES - vertex_count ||
+      (count != 0 && !verts) ||
+      (count != 0 &&
+       !ensure_dynamic_vertex_storage(vertex_count + count)))
+    return UINT32_MAX;
+  uint32_t first = vertex_count;
+  if (count == 0) return first;
+  Vertex *dynVerts = (Vertex *)context.dynamicStagingMapped;
+  uint32_t offset = (frame_index * OBS_DYNAMIC_VERTEX_STRIDE(&context)) + first;
+  memcpy(&dynVerts[offset], verts, count * sizeof(Vertex));
+  vertex_count += count;
+  return first;
+}
+
+static VkDevice device;
+static VkPhysicalDevice physicalDevice;
+static VkCommandPool commandPool;
+static VkQueue graphicsQueue;
+
+PushConstants pushConstants;
+
+static Material currentMaterial = {
+    .baseColorFactor = {1.0f, 1.0f, 1.0f, 1.0f},
+    .metallicFactor = 0.0f,
+    .roughnessFactor = 0.5f,
+    .emissiveStrength = 1.0f,
+    .aoStrength = 1.0f,
+    .isUnlit = 0,
+    .alphaMode = 2,
+    .emissiveFactor = {0.0f, 0.0f, 0.0f},
+    .albedoIndex = -1,
+    .normalMapIndex = -1,
+    .metallicRoughIndex = -1,
+    .aoIndex = -1,
+    .emissiveIndex = -1,
+};
+
+void set_material(const Material *mat) { currentMaterial = *mat; }
+
+void reset_material(void) {
+  currentMaterial = (Material){
+      .baseColorFactor = {1.0f, 1.0f, 1.0f, 1.0f},
+      .metallicFactor = 0.0f,
+      .roughnessFactor = 0.5f,
+      .emissiveStrength = 1.0f,
+      .aoStrength = 1.0f,
+      .isUnlit = 0,
+      .alphaMode = 2,
+      .emissiveFactor = {0.0f, 0.0f, 0.0f},
+      .albedoIndex = -1,
+      .normalMapIndex = -1,
+      .metallicRoughIndex = -1,
+      .aoIndex = -1,
+      .emissiveIndex = -1,
+      .displacementIndex = -1,
+      .displacementScale = 0.1f, // Default 10cm displacement
+      .transmissionFactor = 0.0f,
+      .ior = 1.5f,
+      .thicknessFactor = 0.0f,
+      .transmissionIndex = -1,
+      .thicknessIndex = -1,
+      .attenuationColor = {1.0f, 1.0f, 1.0f},
+      .attenuationDistance = 100000.0f,
+      .dispersion = 0.0f,
+      .isWireframe = 0,
+  };
+}
+
+static bool load_texture_from_pixels(VulkanContext *ctx, stbi_uc *pixels, int w,
+                                     int h, Texture2D *texture);
+
+static float *load_exr_as_float(const char *path, int *out_w, int *out_h,
+                                bool is_normal, bool is_roughness) {
+  printf("\n[EXR] Decoding %s (HDR 32-bit float)...\n", path);
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return NULL;
+  fseek(f, 0, SEEK_END);
+  size_t file_size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  unsigned char *file_data = malloc(file_size);
+  fread(file_data, 1, file_size, f);
+  fclose(f);
+
+  ExrContextCreateInfo ctx_info = {.api_version = TINYEXR_C_API_VERSION};
+  ExrContext exr_ctx;
+  if (exr_context_create(&ctx_info, &exr_ctx) != EXR_SUCCESS) {
+    free(file_data);
+    return NULL;
+  }
+
+  ExrDataSource src;
+  exr_data_source_from_memory(file_data, file_size, &src);
+
+  ExrDecoderCreateInfo dec_info = {.source = src};
+  ExrDecoder decoder;
+  if (exr_decoder_create(exr_ctx, &dec_info, &decoder) != EXR_SUCCESS) {
+    exr_context_destroy(exr_ctx);
+    free(file_data);
+    return NULL;
+  }
+
+  ExrImage image;
+  if (exr_decoder_parse_header(decoder, &image) != EXR_SUCCESS) {
+    exr_decoder_destroy(decoder);
+    exr_context_destroy(exr_ctx);
+    free(file_data);
+    return NULL;
+  }
+
+  ExrImageInfo img_info;
+  exr_image_get_info(image, &img_info);
+  *out_w = img_info.width;
+  *out_h = img_info.height;
+
+  uint32_t c = img_info.num_channels;
+  ExrPart part;
+  exr_image_get_part(image, 0, &part);
+
+  size_t num_pixels = (size_t)img_info.width * img_info.height;
+  float *float_data = malloc(num_pixels * c * sizeof(float));
+
+  ExrCommandBufferCreateInfo cmd_info = {.decoder = decoder};
+  ExrCommandBuffer cmd;
+  exr_command_buffer_create(exr_ctx, &cmd_info, &cmd);
+  exr_command_buffer_begin(cmd);
+
+  ExrFullImageRequest req = {
+      .part = part,
+      .output = {.data = float_data, .size = num_pixels * c * sizeof(float)},
+      .channels_mask = 0,
+      .output_pixel_type = EXR_PIXEL_FLOAT,
+      .output_layout = EXR_LAYOUT_INTERLEAVED};
+  exr_cmd_request_full_image(cmd, &req);
+  exr_command_buffer_end(cmd);
+
+  ExrSubmitInfo submit = {.command_buffer_count = 1, .command_buffers = &cmd};
+  exr_submit(decoder, &submit);
+  exr_decoder_wait_idle(decoder);
+
+  exr_command_buffer_destroy(cmd);
+  exr_image_destroy(image);
+  exr_decoder_destroy(decoder);
+  exr_context_destroy(exr_ctx);
+  free(file_data);
+
+  // Pack into pristine 32-bit RGBA float
+  float *rgba_float = malloc(num_pixels * 4 * sizeof(float));
+  for (size_t i = 0; i < num_pixels; i++) {
+    float r = float_data[i * c + 0];
+    float g = (c > 1) ? float_data[i * c + 1] : r;
+    float b = (c > 2) ? float_data[i * c + 2] : r;
+    float a = (c > 3) ? float_data[i * c + 3] : 1.0f;
+
+    if (is_normal) {
+      // Polyhaven EXR normals are already encoded in [0.0, 1.0] space.
+      // We pass the pristine 32-bit floats directly to the GPU without mangling
+      // them!
+    }
+
+    if (is_roughness) {
+      // EXR roughness is usually in R. glTF expects Roughness in G.
+      float rough = r;
+      r = 1.0f;  // AO default
+      g = rough; // Roughness
+      b = 0.0f;  // Metallic default
+      a = 1.0f;
+    }
+
+    rgba_float[i * 4 + 0] = r;
+    rgba_float[i * 4 + 1] = g;
+    rgba_float[i * 4 + 2] = b;
+    rgba_float[i * 4 + 3] = a;
+  }
+  free(float_data);
+  printf("[EXR] -> Successfully unpacked and formatted HDR float data.\n");
+
+  return rgba_float;
+}
+
+// Forward declarations for texture utilities
+static bool alloc_texture_image(VulkanContext *ctx, uint32_t w, uint32_t h,
+                                VkFormat fmt, VkImage *image,
+                                VkDeviceMemory *memory);
+static bool upload_pixels_to_image(VulkanContext *ctx, unsigned char *pixels,
+                                   VkDeviceSize imageSize, VkImage image,
+                                   uint32_t w, uint32_t h, VkFormat fmt,
+                                   VkImageLayout srcLayout, bool *loaded_flag);
+static bool finalize_texture(VulkanContext *ctx, Texture2D *texture,
+                             VkFormat fmt, VkSamplerAddressMode addrMode);
+
+static bool load_texture_from_float_pixels(VulkanContext *ctx, float *pixels,
+                                           int w, int h, Texture2D *texture) {
+  if (!pixels)
+    return false;
+  VkFormat fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
+  bool ok =
+      alloc_texture_image(ctx, w, h, fmt, &texture->image, &texture->memory) &&
+      upload_pixels_to_image(ctx, (unsigned char *)pixels,
+                             (VkDeviceSize)w * h * 16, texture->image, w, h,
+                             fmt, VK_IMAGE_LAYOUT_UNDEFINED,
+                             &texture->loaded) &&
+      finalize_texture(ctx, texture, fmt, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+  if (ok) {
+    texture->width = w;
+    texture->height = h;
+  }
+  return ok;
+}
+
+static const char *get_texture_cache_path(const char *original_path,
+                                          bool is_roughness) {
+  static char cache_path[512];
+  const char *home = getenv("HOME");
+  if (!home)
+    home = ".";
+  char dir_path[512];
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
+  mkdir(dir_path, 0777);
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
+  mkdir(dir_path, 0777);
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/textures", home);
+  mkdir(dir_path, 0777);
+
+  char safe_name[256];
+  strncpy(safe_name, original_path, sizeof(safe_name) - 1);
+  safe_name[sizeof(safe_name) - 1] = '\0';
+  for (int i = 0; safe_name[i]; i++) {
+    if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.')
+      safe_name[i] = '_';
+  }
+  snprintf(cache_path, sizeof(cache_path), "%s/%s%s.otex", dir_path, safe_name,
+           is_roughness ? "_rough" : "");
+  return cache_path;
+}
+
+// Forward declaration
+static bool upload_file_to_image_direct(VulkanContext *ctx,
+                                        const char *filepath,
+                                        VkDeviceSize imageSize, VkImage image,
+                                        uint32_t w, uint32_t h, VkFormat fmt,
+                                        size_t file_offset, bool *loaded_flag);
+
+static int32_t texture_pool_load_roughness_to_gltf(VulkanContext *ctx,
+                                                   const char *roughPath) {
+  if (!roughPath)
+    return -1;
+
+  const char *cache_path = get_texture_cache_path(roughPath, true);
+  FILE *f = fopen(cache_path, "rb");
+  if (f) {
+    OtexHeader header;
+    if (fread(&header, sizeof(OtexHeader), 1, f) == 1 &&
+        header.magic == 0x5845544F) {
+      fclose(f);
+      fprintf(stdout,
+              "\033[32m[TEXTURE] Cache Hit Roughness (ZERO-COPY): %s\033[0m\n",
+              cache_path);
+      if (textureCount >= MAX_TEXTURES)
+        return -1;
+      Texture2D *texture = &texturePool[textureCount];
+      if (alloc_texture_image(ctx, header.width, header.height, header.format,
+                              &texture->image, &texture->memory)) {
+        if (upload_file_to_image_direct(ctx, cache_path, header.data_size,
+                                        texture->image, header.width,
+                                        header.height, header.format,
+                                        sizeof(OtexHeader), &texture->loaded)) {
+          if (finalize_texture(ctx, texture, header.format,
+                               VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
+            texture->width = header.width;
+            texture->height = header.height;
+            texture->status = TEXTURE_STATUS_READY;
+            return textureCount++;
+          }
+        }
+      }
+    } else {
+      fclose(f);
+    }
+  }
+
+  fprintf(stdout,
+          "\033[33m[TEXTURE] Cache Miss Roughness. Queueing Background Cook: "
+          "%s\033[0m\n",
+          roughPath);
+  if (textureCount >= MAX_TEXTURES)
+    return -1;
+
+  int32_t tIdx = textureCount++;
+  Texture2D *texture = &texturePool[tIdx];
+
+  // AAA Instant metadata parsing for Editor UI sizing
+  int w = 1, h = 1, ch;
+  if (stbi_info(roughPath, &w, &h, &ch)) {
+    texture->width = w;
+    texture->height = h;
+  } else {
+    texture->width = 1;
+    texture->height = 1;
+  }
+
+  texture->status = TEXTURE_STATUS_QUEUED_FOR_COOKING;
+
+  // Pre-allocate bindless slot to eliminate gray flickering
+  if (texture->bindlessSlot == 0) {
+    texture->bindlessSlot = ctx->bindlessTextureCount++;
+    bindlessRegisterTexture(ctx, texture->bindlessSlot, dummyWhiteTexture.view,
+                            dummyWhiteTexture.sampler);
+  }
+
+  strncpy(texturePoolPaths[tIdx], roughPath, 511);
+  texturePoolIsRoughness[tIdx] = true;
+
+  pthread_mutex_lock(&cooker_mutex);
+  uint32_t next = (cooker_tail + 1) % MAX_COOKER_JOBS;
+  if (next != cooker_head) {
+    strncpy(cooker_queue[cooker_tail].filepath, roughPath, 511);
+    cooker_queue[cooker_tail].pool_index = tIdx;
+    cooker_queue[cooker_tail].is_roughness = true;
+    cooker_tail = next;
+    pthread_cond_signal(&cooker_cond);
+  }
+  pthread_mutex_unlock(&cooker_mutex);
+
+  return tIdx;
+}
+
+Material load_pbr_material(const char *albedoPath, const char *normalPath,
+                           const char *roughnessPath) {
+  Material mat;
+  reset_material();
+  mat = currentMaterial;
+
+  int32_t pIdx;
+  if (albedoPath) {
+    pIdx = texture_pool_add(&context, albedoPath);
+    if (pIdx >= 0)
+      mat.albedoIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR] Loaded Albedo: %s (Slot: %d)\n", albedoPath, mat.albedoIndex);
+  }
+  if (normalPath) {
+    pIdx = texture_pool_add(&context, normalPath);
+    if (pIdx >= 0)
+      mat.normalMapIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR] Loaded Normal: %s (Slot: %d)\n", normalPath,
+           mat.normalMapIndex);
+  }
+  if (roughnessPath) {
+    pIdx = texture_pool_load_roughness_to_gltf(&context, roughnessPath);
+    if (pIdx >= 0)
+      mat.metallicRoughIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR] Loaded Roughness: %s (Slot: %d)\n", roughnessPath,
+           mat.metallicRoughIndex);
+  }
+
+  // Clear default factors since we are using textures
+  if (albedoPath)
+    glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mat.baseColorFactor);
+  if (roughnessPath)
+    mat.roughnessFactor = 1.0f;
+  if (roughnessPath)
+    mat.metallicFactor = 1.0f;
+
+  return mat;
+}
+
+typedef struct {
+  uint32_t magic; // 0x54414D4F 'OMAT'
+  char albedoPath[512];
+  char normalPath[512];
+  char roughPath[512];
+  char aoPath[512];
+  char dispPath[512];
+  float displacementScale;
+} OmatCache;
+
+/// get_material_cache_path — implementation group
+static const char *get_material_cache_path(const char *dirPath) {
+  static char cache_path[512];
+  const char *home = getenv("HOME");
+  if (!home)
+    home = ".";
+  char dir_path[512];
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
+  mkdir(dir_path, 0777);
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
+  mkdir(dir_path, 0777);
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/materials", home);
+  mkdir(dir_path, 0777);
+
+  char safe_name[256];
+  strncpy(safe_name, dirPath, sizeof(safe_name) - 1);
+  safe_name[sizeof(safe_name) - 1] = '\0';
+  for (int i = 0; safe_name[i]; i++) {
+    if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.')
+      safe_name[i] = '_';
+  }
+  snprintf(cache_path, sizeof(cache_path), "%s/%s.omat", dir_path, safe_name);
+  return cache_path;
+}
+
+Material load_pbr_material_dir(const char *dirPath) {
+  printf("\n[PBR SCAN] ==========================================\n");
+
+  const char *cache_path = get_material_cache_path(dirPath);
+  FILE *f = fopen(cache_path, "rb");
+  OmatCache cache = {0};
+  bool cache_hit = false;
+
+  if (f) {
+    if (fread(&cache, sizeof(OmatCache), 1, f) == 1 &&
+        cache.magic == 0x54414D4F) {
+      fprintf(stdout,
+              "\033[32m[MATERIAL] Cache Hit (OMAT Manifest): %s\033[0m\n",
+              cache_path);
+      cache_hit = true;
+    }
+    fclose(f);
+  }
+
+  if (!cache_hit) {
+    fprintf(stdout,
+            "\033[33m[MATERIAL] Cache Miss. Scanning directory (OS Syscalls): "
+            "%s\033[0m\n",
+            dirPath);
+    cache.magic = 0x54414D4F;
+    cache.displacementScale = 0.5f;
+
+    DIR *dir;
+    struct dirent *ent;
+    if ((dir = opendir(dirPath)) != NULL) {
+      while ((ent = readdir(dir)) != NULL) {
+        if (strstr(ent->d_name, "diff") || strstr(ent->d_name, "albedo") ||
+            strstr(ent->d_name, "basecolor")) {
+          snprintf(cache.albedoPath, sizeof(cache.albedoPath), "%s/%s", dirPath,
+                   ent->d_name);
+        } else if (strstr(ent->d_name, "nor")) {
+          snprintf(cache.normalPath, sizeof(cache.normalPath), "%s/%s", dirPath,
+                   ent->d_name);
+        } else if (strstr(ent->d_name, "rough")) {
+          snprintf(cache.roughPath, sizeof(cache.roughPath), "%s/%s", dirPath,
+                   ent->d_name);
+        } else if (strstr(ent->d_name, "ao") ||
+                   strstr(ent->d_name, "ambient")) {
+          snprintf(cache.aoPath, sizeof(cache.aoPath), "%s/%s", dirPath,
+                   ent->d_name);
+        } else if (strstr(ent->d_name, "disp") ||
+                   strstr(ent->d_name, "height")) {
+          snprintf(cache.dispPath, sizeof(cache.dispPath), "%s/%s", dirPath,
+                   ent->d_name);
+        }
+      }
+      closedir(dir);
+    } else {
+      fprintf(stderr, "[WARNING] Could not open material directory: %s\n",
+              dirPath);
+    }
+
+    FILE *fout = fopen(cache_path, "wb");
+    if (fout) {
+      fwrite(&cache, sizeof(OmatCache), 1, fout);
+      fclose(fout);
+    }
+  }
+
+  Material mat;
+  reset_material();
+  mat = currentMaterial;
+
+  int32_t pIdx;
+  if (cache.albedoPath[0]) {
+    pIdx = texture_pool_add(&context, cache.albedoPath);
+    if (pIdx >= 0)
+      mat.albedoIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR SCAN] -> Albedo mapped to Bindless Slot: %d\n",
+           mat.albedoIndex);
+  }
+  if (cache.normalPath[0]) {
+    pIdx = texture_pool_add(&context, cache.normalPath);
+    if (pIdx >= 0)
+      mat.normalMapIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR SCAN] -> Normal mapped to Bindless Slot: %d\n",
+           mat.normalMapIndex);
+  }
+  if (cache.roughPath[0]) {
+    pIdx = texture_pool_load_roughness_to_gltf(&context, cache.roughPath);
+    if (pIdx >= 0)
+      mat.metallicRoughIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR SCAN] -> Roughness mapped to Bindless Slot: %d\n",
+           mat.metallicRoughIndex);
+  }
+  if (cache.aoPath[0]) {
+    pIdx = texture_pool_add(&context, cache.aoPath);
+    if (pIdx >= 0)
+      mat.aoIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR SCAN] -> AO mapped to Bindless Slot: %d\n", mat.aoIndex);
+  }
+  if (cache.dispPath[0]) {
+    pIdx = texture_pool_add(&context, cache.dispPath);
+    if (pIdx >= 0)
+      mat.displacementIndex = texture_pool_get(pIdx)->bindlessSlot;
+    printf("[PBR SCAN] -> Displacement mapped to Bindless Slot: %d\n",
+           mat.displacementIndex);
+    mat.displacementScale = cache.displacementScale;
+  }
+  printf("[PBR SCAN] ==========================================\n\n");
+
+  if (cache.albedoPath[0])
+    glm_vec4_copy((vec4){1.0f, 1.0f, 1.0f, 1.0f}, mat.baseColorFactor);
+  if (cache.roughPath[0])
+    mat.roughnessFactor = 1.0f;
+  if (cache.roughPath[0])
+    mat.metallicFactor = 1.0f;
+
+  return mat;
+}
+
+int alloc_slot(mat4 model) {
+  if (!scene || dynamic_draw_count >= MAX_DYNAMIC_MESHES ||
+      scene->meshes.count > UINT32_MAX)
+    return -1;
+  uint32_t staticCount = (uint32_t)scene->meshes.count;
+  if (staticCount > UINT32_MAX - dynamic_draw_count - 1)
+    return -1;
+  uint32_t slot = staticCount + dynamic_draw_count;
+  if (slot > INT_MAX || !obs_mesh_ssbo_reserve(&context, slot + 1))
+    return -1;
+
+  MeshGPUData *d = &((MeshGPUData *)context.meshSSBOMapped[frame_index])[slot];
+  glm_mat4_copy(model, d->model);
+  glm_vec4_copy(currentMaterial.baseColorFactor, d->baseColorFactor);
+  d->metallicFactor = currentMaterial.metallicFactor;
+  d->roughnessFactor = currentMaterial.roughnessFactor;
+  d->emissiveStrength = currentMaterial.emissiveStrength;
+  d->isUnlit = currentMaterial.isUnlit;
+  d->alphaMode = currentMaterial.alphaMode;
+  d->alphaCutoff = 0.5f;
+  glm_vec3_copy(currentMaterial.emissiveFactor, d->emissiveFactor);
+  d->albedoIndex = currentMaterial.albedoIndex;
+  d->normalMapIndex = currentMaterial.normalMapIndex;
+  d->metallicRoughIndex = currentMaterial.metallicRoughIndex;
+  d->aoIndex = currentMaterial.aoIndex;
+  d->aoStrength = currentMaterial.aoStrength;
+  d->emissiveIndex = currentMaterial.emissiveIndex;
+  d->displacementIndex = currentMaterial.displacementIndex;
+  d->displacementScale = currentMaterial.displacementScale;
+  d->transmissionFactor = currentMaterial.transmissionFactor;
+  d->ior = currentMaterial.ior;
+  d->thicknessFactor = currentMaterial.thicknessFactor;
+  d->transmissionIndex = currentMaterial.transmissionIndex;
+  d->thicknessIndex = currentMaterial.thicknessIndex;
+  d->attenuationColorR = currentMaterial.attenuationColor[0];
+  d->attenuationColorG = currentMaterial.attenuationColor[1];
+  d->attenuationColorB = currentMaterial.attenuationColor[2];
+  d->attenuationDistance = currentMaterial.attenuationDistance;
+  d->dispersion = currentMaterial.dispersion;
+  d->isVisible = 1; // Dynamic immediate-mode meshes/lines are always visible
+  d->isWireframe = currentMaterial.isWireframe;
+  d->thicknessFactor = currentMaterial.thicknessFactor;
+  glm_vec3_copy((vec3){-1e5f, -1e5f, -1e5f}, d->aabbMin);
+  glm_vec3_copy((vec3){1e5f, 1e5f, 1e5f}, d->aabbMax);
+
+  d->jointOffset = -1;
+  d->morphCount = 0;
+  d->morphDeltaOffset = 0;
+  d->morphWeightOffset = 0;
+  return (int)slot;
+}
+
+static void renderer_begin_frame(bool scene_enabled) {
+  pump_async_uploads(
+      &context); // Garbage collect finished staging buffers asynchronously
+
+  // Async GPU Upload Pipeline: Pump compiled cache files back to VRAM
+  for (uint32_t i = 0; i < textureCount; i++) {
+    if (texturePool[i].status == TEXTURE_STATUS_READY_FOR_UPLOAD) {
+      texturePool[i].status = TEXTURE_STATUS_UPLOADING;
+      texturePool[i].loaded = false; // Arm the DMA fence flag
+
+      if (texturePoolIsRoughness[i]) {
+        const char *cache_path =
+            get_texture_cache_path(texturePoolPaths[i], true);
+        FILE *f = fopen(cache_path, "rb");
+        if (f) {
+          OtexHeader header;
+          if (fread(&header, sizeof(OtexHeader), 1, f) != 1 ||
+              !alloc_texture_image(&context, header.width, header.height,
+                                   header.format, &texturePool[i].image,
+                                   &texturePool[i].memory)) {
+            fprintf(stderr, "[TEXTURE] Failed to allocate cached image: %s\n",
+                    texturePoolPaths[i]);
+            texturePool[i].status = TEXTURE_STATUS_FAILED;
+            fclose(f);
+            continue;
+          }
+          if (!upload_file_to_image_direct(
+                  &context, cache_path, header.data_size, texturePool[i].image,
+                  header.width, header.height, header.format,
+                  sizeof(OtexHeader), &texturePool[i].loaded)) {
+            destroy_texture(&context, &texturePool[i]);
+            texturePool[i].status = TEXTURE_STATUS_FAILED;
+            fclose(f);
+            continue;
+          }
+          finalize_texture(&context, &texturePool[i], header.format,
+                           VK_SAMPLER_ADDRESS_MODE_REPEAT);
+          texturePool[i].width = header.width;
+          texturePool[i].height = header.height;
+          fclose(f);
+        }
+      } else {
+        char dds_path[512];
+        strncpy(dds_path, texturePoolPaths[i], sizeof(dds_path) - 1);
+        char *ext = strrchr(dds_path, '.');
+        if (ext)
+          strcpy(ext, ".dds");
+
+        const char *dds_cache = get_texture_cache_path(dds_path, false);
+        if (ext && load_texture_dds(&context, dds_cache, &texturePool[i])) {
+          // load_texture_dds handles async flag setting
+        } else {
+          const char *cache_path =
+              get_texture_cache_path(texturePoolPaths[i], false);
+          FILE *f = fopen(cache_path, "rb");
+          if (f) {
+            OtexHeader header;
+            if (fread(&header, sizeof(OtexHeader), 1, f) != 1 ||
+                !alloc_texture_image(&context, header.width, header.height,
+                                     header.format, &texturePool[i].image,
+                                     &texturePool[i].memory)) {
+              fprintf(stderr,
+                      "[TEXTURE] Failed to allocate cached image: %s\n",
+                      texturePoolPaths[i]);
+              texturePool[i].status = TEXTURE_STATUS_FAILED;
+              fclose(f);
+              continue;
+            }
+            if (!upload_file_to_image_direct(
+                    &context, cache_path, header.data_size,
+                    texturePool[i].image, header.width, header.height,
+                    header.format, sizeof(OtexHeader), &texturePool[i].loaded)) {
+              destroy_texture(&context, &texturePool[i]);
+              texturePool[i].status = TEXTURE_STATUS_FAILED;
+              fclose(f);
+              continue;
+            }
+            finalize_texture(&context, &texturePool[i], header.format,
+                             VK_SAMPLER_ADDRESS_MODE_REPEAT);
+            texturePool[i].width = header.width;
+            texturePool[i].height = header.height;
+            fclose(f);
+          }
+        }
+      }
+    }
+
+    // Zero-flicker DMA validation
+    // Only swap the global bindless slot ONCE the GPU fence signals the DMA
+    // transfer is fully complete
+    if (texturePool[i].status == TEXTURE_STATUS_UPLOADING &&
+        texturePool[i].loaded == true) {
+      bindlessRegisterTexture(&context, texturePool[i].bindlessSlot,
+                              texturePool[i].view, texturePool[i].sampler);
+      texturePool[i].status = TEXTURE_STATUS_READY;
+      markMeshesSSBODirty(&context); // Force SSBO to drop the -1 fallback and
+                                     // use the real texture slot
+      fprintf(stdout,
+              "\033[36m[GPU PUMP] Swap complete! Texture %d is live.\033[0m\n",
+              i);
+    }
+  }
+
+  frame_index = context.currentFrame;
+
+  dynamic_draw_count = 0;
+  vertex_count = 0;
+  line_renderer_clear();
+  if (!scene_enabled) {
+    context.indirectDrawCount = 0;
+    return;
+  }
+  context.indirectDrawCount = (uint32_t)scene->meshes.count;
+
+  extern void animate_scene(Scene * scene, float time);
+  animate_scene(scene, 0.0f);
+
+  vec3 camPos = {camera.position[0], camera.position[1], camera.position[2]};
+  float cam_delta = glm_vec3_distance2(camPos, last_camera_pos);
+
+  // AAA Zero-Tick Architecture: Only sort and write to PCIe if the observer or
+  // topology changes
+  if (scene_topology_dirty || cam_delta > 0.01f) {
+    sort_meshes_by_alpha(&scene->meshes, camPos);
+    glm_vec3_copy(camPos, last_camera_pos);
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+      indirect_buffer_dirty[i] = true;
+    }
+    scene_topology_dirty = false;
+  }
+
+  if (indirect_buffer_dirty[frame_index]) {
+    updateMeshSSBOAndIndirect(&context, &scene->meshes);
+    indirect_buffer_dirty[frame_index] = false;
+  }
+
+  // flushMeshSSBO is extremely cheap (O(1) bitmask scan) so it safely runs
+  // every frame
+  flushMeshSSBO(&context, &scene->meshes);
+}
+
+void begin_frame(void) { renderer_begin_frame(true); }
+
+void begin_frame_2d(void) { renderer_begin_frame(false); }
+
+static void create_mapped_buffer(VkDevice dev, VkPhysicalDevice physDev,
+                                 VkDeviceSize size, VkBufferUsageFlags usage,
+                                 VkBuffer *buffer, VkDeviceMemory *memory,
+                                 void **mapped) {
+  VkBufferCreateInfo bufferInfo = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = size,
+      .usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+  vkCreateBuffer(dev, &bufferInfo, NULL, buffer);
+
+  VkMemoryRequirements memReq;
+  vkGetBufferMemoryRequirements(dev, *buffer, &memReq);
+
+  VkMemoryAllocateFlagsInfo flagsInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+      .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+  };
+  VkMemoryAllocateInfo allocInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = &flagsInfo,
+      .allocationSize = memReq.size,
+      .memoryTypeIndex =
+          findMemoryType(physDev, memReq.memoryTypeBits,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+  vkAllocateMemory(dev, &allocInfo, NULL, memory);
+  vkBindBufferMemory(dev, *buffer, *memory, 0);
+  vkMapMemory(dev, *memory, 0, size, 0, mapped);
+}
+
+static bool create_mapped_buffer_checked(VkDevice dev, VkPhysicalDevice physDev,
+                                         VkDeviceSize size,
+                                         VkBufferUsageFlags usage,
+                                         VkBuffer *buffer,
+                                         VkDeviceMemory *memory,
+                                         void **mapped) {
+  *buffer = VK_NULL_HANDLE;
+  *memory = VK_NULL_HANDLE;
+  *mapped = NULL;
+  VkBufferCreateInfo bufferInfo = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = size,
+      .usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  if (vkCreateBuffer(dev, &bufferInfo, NULL, buffer) != VK_SUCCESS)
+    return false;
+
+  VkMemoryRequirements requirements;
+  vkGetBufferMemoryRequirements(dev, *buffer, &requirements);
+  VkMemoryAllocateFlagsInfo flagsInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+      .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+  };
+  VkPhysicalDeviceMemoryProperties memory_properties;
+  vkGetPhysicalDeviceMemoryProperties(physDev, &memory_properties);
+  uint32_t memory_type = UINT32_MAX;
+  for (uint32_t i = 0; i < memory_properties.memoryTypeCount; i++) {
+    if ((requirements.memoryTypeBits & (1u << i)) &&
+        (memory_properties.memoryTypes[i].propertyFlags &
+         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+      memory_type = i;
+      break;
+    }
+  }
+  if (memory_type == UINT32_MAX) {
+    vkDestroyBuffer(dev, *buffer, NULL);
+    *buffer = VK_NULL_HANDLE;
+    return false;
+  }
+  VkMemoryAllocateInfo allocation = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = &flagsInfo,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = memory_type,
+  };
+  if (vkAllocateMemory(dev, &allocation, NULL, memory) != VK_SUCCESS ||
+      vkBindBufferMemory(dev, *buffer, *memory, 0) != VK_SUCCESS ||
+      vkMapMemory(dev, *memory, 0, size, 0, mapped) != VK_SUCCESS) {
+    if (*mapped)
+      vkUnmapMemory(dev, *memory);
+    if (*memory)
+      vkFreeMemory(dev, *memory, NULL);
+    vkDestroyBuffer(dev, *buffer, NULL);
+    *buffer = VK_NULL_HANDLE;
+    *memory = VK_NULL_HANDLE;
+    *mapped = NULL;
+    return false;
+  }
+  return true;
+}
+
+void renderer_init(VkDevice dev, VkPhysicalDevice physDev,
+                   VkCommandPool cmdPool, VkQueue queue) {
+  device = dev;
+  physicalDevice = physDev;
+  commandPool = cmdPool;
+  graphicsQueue = queue;
+}
+
+static inline void emit_vertex(vec3 pos, vec4 color, vec3 normal, vec2 uv,
+                               vec4 tangent) {
+  if (vertex_count >= MAX_DYNAMIC_VERTICES ||
+      !ensure_dynamic_vertex_storage(vertex_count + 1))
+    return;
+  Vertex *dynVerts = (Vertex *)context.dynamicStagingMapped;
+  uint32_t offset = (frame_index * OBS_DYNAMIC_VERTEX_STRIDE(&context)) + vertex_count;
+  glm_vec3_copy(pos, dynVerts[offset].pos);
+  glm_vec4_copy(color, dynVerts[offset].color);
+  glm_vec3_copy(normal, dynVerts[offset].normal);
+  glm_vec2_copy(uv, dynVerts[offset].texCoord);
+  glm_vec4_copy(tangent, dynVerts[offset].tangent);
+
+  // Explicitly zero weights/joints so unskinned dynamic primitives don't NaN
+  // out
+  dynVerts[offset].weights[0] = 0.0f;
+  dynVerts[offset].weights[1] = 0.0f;
+  dynVerts[offset].weights[2] = 0.0f;
+  dynVerts[offset].weights[3] = 0.0f;
+  dynVerts[offset].joints[0] = 0;
+  dynVerts[offset].joints[1] = 0;
+  dynVerts[offset].joints[2] = 0;
+  dynVerts[offset].joints[3] = 0;
+
+  vertex_count++;
+}
+
+void vertex_full(vec3 pos, Color color, vec3 normal, vec2 uv, vec4 tangent) {
+  emit_vertex(pos, (vec4){color.r, color.g, color.b, color.a}, normal, uv,
+              tangent);
+}
+
+void vertex_with_normal(vec3 pos, Color color, vec3 normal) {
+  emit_vertex(pos, (vec4){color.r, color.g, color.b, color.a}, normal,
+              (vec2){0.0f, 0.0f}, (vec4){1.0f, 0.0f, 0.0f, 1.0f});
+}
+
+void vertex(vec3 pos, vec4 color) {
+  emit_vertex(pos, color, (vec3){0.0f, 1.0f, 0.0f}, (vec2){0.0f, 0.0f},
+              (vec4){1.0f, 0.0f, 0.0f, 1.0f});
+}
+
+void triangle(vec3 a, vec3 b, vec3 c, Color color) {
+  uint32_t first = vertex_count;
+  vec3 edge1, edge2, normal;
+  glm_vec3_sub(b, a, edge1);
+  glm_vec3_sub(c, a, edge2);
+  glm_vec3_cross(edge1, edge2, normal);
+  glm_vec3_normalize(normal);
+  vertex_with_normal(a, color, normal);
+  vertex_with_normal(b, color, normal);
+  vertex_with_normal(c, color, normal);
+  mat4 identity;
+  glm_mat4_identity(identity);
+  emit_draw(first, 3, identity);
+}
+
+// ─── Shared internals for scene primitive spawning
+// ────────────────────────────
+
+extern uint32_t megaBufferAllocate(VulkanContext *ctx, Vertex *vertices,
+                                   uint32_t vertexCount);
+extern uint32_t megaIndexBufferAllocate(VulkanContext *ctx, uint32_t *indices,
+                                        uint32_t indexCount);
+extern uint32_t megaMeshletBufferAllocate(VulkanContext *ctx, Meshlet *meshlets,
+                                          MeshletBounds *bounds,
+                                          MeshletSkinData *skins,
+                                          uint32_t count);
+extern uint32_t megaMeshletVertexBufferAllocate(VulkanContext *ctx,
+                                                uint32_t *verts,
+                                                uint32_t count);
+extern uint32_t megaMeshletTriangleBufferAllocate(VulkanContext *ctx,
+                                                  uint8_t *tris,
+                                                  uint32_t count);
+extern void flushUploadStagingBuffer(VulkanContext *ctx);
+extern void markMeshesSSBODirty(VulkanContext *ctx);
+extern void inspector_select_mesh(int index);
+extern bool scene_topology_dirty;
+extern Scene *scene;
+
+static void primitive_build_meshlets(Vertex *verts, uint32_t v_count,
+                                     uint32_t *indices, uint32_t i_count,
+                                     Mesh *m) {
+  uint32_t tri_count = i_count / 3;
+  uint32_t max_ml = (tri_count + 123) / 124 + 1;
+  Meshlet *ml_arr = calloc(max_ml, sizeof(Meshlet));
+  MeshletBounds *mb_arr = calloc(max_ml, sizeof(MeshletBounds));
+  MeshletSkinData *ms_arr = calloc(max_ml, sizeof(MeshletSkinData));
+  uint32_t *mlv_arr = calloc(max_ml * 64, sizeof(uint32_t));
+  uint8_t *mlt_arr = calloc(max_ml * 124 * 3, sizeof(uint8_t));
+
+  uint32_t ml_count = 0, mlv_total = 0, mlt_total = 0, tri_cursor = 0;
+
+  while (tri_cursor < tri_count) {
+    Meshlet *ml = &ml_arr[ml_count];
+    ml->vertex_offset = mlv_total;
+    ml->triangle_offset = mlt_total;
+    ml->vertex_count = 0;
+    ml->triangle_count = 0;
+
+    uint8_t local_used[4096];
+    uint32_t local_idx[4096];
+    memset(local_used, 0, v_count);
+    memset(local_idx, 0, v_count * sizeof(uint32_t));
+
+    while (tri_cursor < tri_count && ml->triangle_count < 124) {
+      uint32_t i0 = indices[tri_cursor * 3 + 0];
+      uint32_t i1 = indices[tri_cursor * 3 + 1];
+      uint32_t i2 = indices[tri_cursor * 3 + 2];
+      int nv = (!local_used[i0]) + (!local_used[i1]) + (!local_used[i2]);
+      if (ml->vertex_count + nv > 64)
+        break;
+      if (!local_used[i0]) {
+        local_used[i0] = 1;
+        local_idx[i0] = ml->vertex_count;
+        mlv_arr[mlv_total + ml->vertex_count] = i0;
+        ml->vertex_count++;
+      }
+      if (!local_used[i1]) {
+        local_used[i1] = 1;
+        local_idx[i1] = ml->vertex_count;
+        mlv_arr[mlv_total + ml->vertex_count] = i1;
+        ml->vertex_count++;
+      }
+      if (!local_used[i2]) {
+        local_used[i2] = 1;
+        local_idx[i2] = ml->vertex_count;
+        mlv_arr[mlv_total + ml->vertex_count] = i2;
+        ml->vertex_count++;
+      }
+      mlt_arr[mlt_total + ml->triangle_count * 3 + 0] = (uint8_t)local_idx[i0];
+      mlt_arr[mlt_total + ml->triangle_count * 3 + 1] = (uint8_t)local_idx[i1];
+      mlt_arr[mlt_total + ml->triangle_count * 3 + 2] = (uint8_t)local_idx[i2];
+      ml->triangle_count++;
+      tri_cursor++;
+    }
+
+    float cx = 0, cy = 0, cz = 0;
+    for (uint32_t vi = 0; vi < ml->vertex_count; vi++) {
+      uint32_t gi = mlv_arr[mlv_total + vi];
+      cx += verts[gi].pos[0];
+      cy += verts[gi].pos[1];
+      cz += verts[gi].pos[2];
+    }
+    float inv = 1.0f / (float)ml->vertex_count;
+    cx *= inv;
+    cy *= inv;
+    cz *= inv;
+    float radius = 0.0f;
+    for (uint32_t vi = 0; vi < ml->vertex_count; vi++) {
+      uint32_t gi = mlv_arr[mlv_total + vi];
+      float dx = verts[gi].pos[0] - cx, dy = verts[gi].pos[1] - cy,
+            dz = verts[gi].pos[2] - cz;
+      float d = sqrtf(dx * dx + dy * dy + dz * dz);
+      if (d > radius)
+        radius = d;
+    }
+    MeshletBounds *mb = &mb_arr[ml_count];
+    mb->center[0] = cx;
+    mb->center[1] = cy;
+    mb->center[2] = cz;
+    mb->radius = radius;
+    mb->cone_cutoff = 1.0f;
+    memset(&ms_arr[ml_count], 0, sizeof(MeshletSkinData));
+    mlv_total += ml->vertex_count;
+    mlt_total += ml->triangle_count * 3;
+    ml_count++;
+  }
+
+  m->megaBaseMeshlet =
+      megaMeshletBufferAllocate(&context, ml_arr, mb_arr, ms_arr, ml_count);
+  m->megaBaseMeshletVertex =
+      megaMeshletVertexBufferAllocate(&context, mlv_arr, mlv_total);
+  m->megaBaseMeshletTriangle =
+      megaMeshletTriangleBufferAllocate(&context, mlt_arr, mlt_total);
+  m->meshletCount = ml_count;
+
+  free(ml_arr);
+  free(mb_arr);
+  free(ms_arr);
+  free(mlv_arr);
+  free(mlt_arr);
+}
+
+static void primitive_init_mesh(Mesh *m, const char *name, vec3 origin,
+                                Color color) {
+  memset(m, 0, sizeof(Mesh));
+  m->megaBaseVertex = UINT32_MAX;
+  m->megaBaseIndex = UINT32_MAX;
+  m->dynamicBaseVertex = UINT32_MAX;
+  m->megaBaseMeshlet = UINT32_MAX;
+  m->megaBaseMeshletVertex = UINT32_MAX;
+  m->megaBaseMeshletTriangle = UINT32_MAX;
+  glm_mat4_identity(m->local_transform);
+  glm_mat4_identity(m->model);
+  glm_translate(m->model, origin);
+  glm_translate(m->local_transform, origin);
+  glm_vec3_copy((vec3){-1, -1, -1}, m->aabbMin);
+  glm_vec3_copy((vec3){1, 1, 1}, m->aabbMax);
+  m->name = strdup(name);
+  m->visible = true;
+  m->alpha_mode = 0;
+  m->baseColorFactor[0] = color.r;
+  m->baseColorFactor[1] = color.g;
+  m->baseColorFactor[2] = color.b;
+  m->baseColorFactor[3] = color.a;
+  m->roughnessFactor = 0.5f;
+  m->metallicFactor = 0.0f;
+  m->emissiveStrength = 1.0f;
+  m->textureIndex = -1;
+  m->normalMapIndex = -1;
+  m->metallicRoughIndex = -1;
+  m->aoIndex = -1;
+  m->emissiveIndex = -1;
+  m->transmissionIndex = -1;
+  m->thicknessIndex = -1;
+  m->jointOffset = -1;
+  m->ior = 1.5f;
+  m->attenuationDistance = 100000.0f;
+  m->attenuationColor[0] = 1.0f;
+  m->attenuationColor[1] = 1.0f;
+  m->attenuationColor[2] = 1.0f;
+}
+
+static void primitive_commit(Mesh *m, const char *name, Vertex *verts,
+                             uint32_t v_count, uint32_t *indices,
+                             uint32_t i_count) {
+  for (uint32_t i = 0; i < v_count; i++) {
+    if (verts[i].tangent[3] == 0.0f) {
+      verts[i].tangent[0] = 1.0f;
+      verts[i].tangent[3] = 1.0f;
+    }
+  }
+
+  m->megaBaseVertex = megaBufferAllocate(&context, verts, v_count);
+  m->megaBaseIndex = megaIndexBufferAllocate(&context, indices, i_count);
+  m->vertexCount = v_count;
+  m->indexCount = i_count;
+
+  primitive_build_meshlets(verts, v_count, indices, i_count, m);
+
+  flushUploadStagingBuffer(&context);
+  flushUploadStagingBuffer(&context);
+
+  if (scene->tree.count == 0) {
+    memset(&scene->tree.nodes[0], 0, sizeof(SceneNode));
+    strcpy((char *)scene->tree.nodes[0].name, "World");
+    scene->tree.nodes[0].first_child = -1;
+    scene->tree.nodes[0].next_sibling = -1;
+    scene->tree.nodes[0].parent = -1;
+    scene->tree.nodes[0].visible = true;
+    scene->tree.nodes[0].expanded = true;
+    scene->tree.count = 1;
+    scene->tree.root = 0;
+  }
+
+  int new_idx = (int)scene->meshes.count;
+  int node_idx = scene_tree_add_node(&scene->tree, name, 0, new_idx);
+  m->node = (void *)(uintptr_t)node_idx;
+
+  meshes_add(&scene->meshes, *m);
+  scene_tree_add_node(&scene->tree, "Material", node_idx, -1);
+
+  inspector_select_mesh(new_idx);
+  markMeshesSSBODirty(&context);
+  scene_topology_dirty = true;
+}
+
+// ─── Public primitive API
+// ─────────────────────────────────────────────────────
+
+void plane(vec3 origin, vec2 size, Color color) {
+  Mesh m;
+  primitive_init_mesh(&m, "Plane", origin, color);
+
+  float w = size[0] * 0.5f, h = size[1] * 0.5f;
+  Vertex verts[4] = {
+      {.pos = {-w, 0, h},
+       .normal = {0, 1, 0},
+       .texCoord = {0, 1},
+       .color = {color.r, color.g, color.b, color.a},
+       .tangent = {1, 0, 0, 1}},
+      {.pos = {w, 0, h},
+       .normal = {0, 1, 0},
+       .texCoord = {1, 1},
+       .color = {color.r, color.g, color.b, color.a},
+       .tangent = {1, 0, 0, 1}},
+      {.pos = {w, 0, -h},
+       .normal = {0, 1, 0},
+       .texCoord = {1, 0},
+       .color = {color.r, color.g, color.b, color.a},
+       .tangent = {1, 0, 0, 1}},
+      {.pos = {-w, 0, -h},
+       .normal = {0, 1, 0},
+       .texCoord = {0, 0},
+       .color = {color.r, color.g, color.b, color.a},
+       .tangent = {1, 0, 0, 1}},
+  };
+  uint32_t indices[] = {0, 1, 2, 0, 2, 3};
+  primitive_commit(&m, "Plane", verts, 4, indices, 6);
+}
+
+//    h-------g
+//   /|      /|
+//  d-------c |
+//  | |  .  | |  <- Origin
+//  | e-----|-f
+//  |/      |/
+//  a-------b
+void cube(vec3 origin, float size, Color color) {
+  Mesh m;
+  primitive_init_mesh(&m, "Cube", origin, color);
+
+  vec4 c = {color.r, color.g, color.b, color.a};
+  vec3 norms[6] = {{0, 0, 1}, {0, 0, -1}, {-1, 0, 0},
+                   {1, 0, 0}, {0, 1, 0},  {0, -1, 0}};
+  vec4 tangs[6] = {{1, 0, 0, 1},  {-1, 0, 0, 1}, {0, 0, 1, 1},
+                   {0, 0, -1, 1}, {1, 0, 0, 1},  {1, 0, 0, 1}};
+  float s = size * 0.5f;
+  vec3 pos[6][4] = {{{-s, -s, s}, {s, -s, s}, {s, s, s}, {-s, s, s}},
+                    {{s, -s, -s}, {-s, -s, -s}, {-s, s, -s}, {s, s, -s}},
+                    {{-s, -s, -s}, {-s, -s, s}, {-s, s, s}, {-s, s, -s}},
+                    {{s, -s, s}, {s, -s, -s}, {s, s, -s}, {s, s, s}},
+                    {{-s, s, s}, {s, s, s}, {s, s, -s}, {-s, s, -s}},
+                    {{-s, -s, -s}, {s, -s, -s}, {s, -s, s}, {-s, -s, s}}};
+  vec2 uvs[4] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+  Vertex verts[24];
+  uint32_t indices[36];
+  uint32_t v = 0, idx = 0;
+  for (int f = 0; f < 6; f++) {
+    for (int i = 0; i < 4; i++) {
+      verts[v] = (Vertex){.color = {c[0], c[1], c[2], c[3]}};
+      glm_vec3_copy(pos[f][i], verts[v].pos);
+      glm_vec3_copy(norms[f], verts[v].normal);
+      glm_vec2_copy(uvs[i], verts[v].texCoord);
+      glm_vec4_copy(tangs[f], verts[v].tangent);
+      v++;
+    }
+    indices[idx++] = f * 4 + 0;
+    indices[idx++] = f * 4 + 1;
+    indices[idx++] = f * 4 + 2;
+    indices[idx++] = f * 4 + 0;
+    indices[idx++] = f * 4 + 2;
+    indices[idx++] = f * 4 + 3;
+  }
+  primitive_commit(&m, "Cube", verts, 24, indices, 36);
+}
+
+void circle(vec3 origin, float radius, Color color) {
+  Mesh m;
+  primitive_init_mesh(&m, "Circle", origin, color);
+
+  int segs = 32;
+  uint32_t v_count = segs + 2;
+  uint32_t i_count = segs * 3;
+  Vertex *verts = calloc(v_count, sizeof(Vertex));
+  uint32_t *indices = calloc(i_count, sizeof(uint32_t));
+
+  vec4 c = {color.r, color.g, color.b, color.a};
+  verts[0] = (Vertex){.pos = {0, 0, 0},
+                      .normal = {0, 1, 0},
+                      .texCoord = {0.5f, 0.5f},
+                      .color = {c[0], c[1], c[2], c[3]},
+                      .tangent = {1, 0, 0, 1}};
+  for (int i = 0; i <= segs; i++) {
+    float a = (float)i / segs * 6.2831853f;
+    float px = cosf(a) * radius, pz = sinf(a) * radius;
+    verts[1 + i] = (Vertex){
+        .pos = {px, 0, pz},
+        .normal = {0, 1, 0},
+        .texCoord = {(px / radius + 1.0f) * 0.5f, (pz / radius + 1.0f) * 0.5f},
+        .color = {c[0], c[1], c[2], c[3]},
+        .tangent = {1, 0, 0, 1}};
+  }
+  for (int i = 0; i < segs; i++) {
+    indices[i * 3 + 0] = 0;
+    indices[i * 3 + 1] = i + 2;
+    indices[i * 3 + 2] = i + 1;
+  }
+  primitive_commit(&m, "Circle", verts, segs + 2, indices, i_count);
+  free(verts);
+  free(indices);
+}
+
+void cylinder(vec3 origin, float height, float radius, Color color) {
+  Mesh m;
+  primitive_init_mesh(&m, "Cylinder", origin, color);
+
+  int segs = 32;
+  uint32_t max_v = (segs + 1) * 2 + (segs + 2) * 2;
+  uint32_t max_i = segs * 6 + segs * 3 * 2;
+  Vertex *verts = calloc(max_v, sizeof(Vertex));
+  uint32_t *indices = calloc(max_i, sizeof(uint32_t));
+  vec4 c = {color.r, color.g, color.b, color.a};
+  uint32_t v = 0, idx = 0;
+  float h = height * 0.5f;
+
+  for (int i = 0; i <= segs; i++) {
+    float u = (float)i / segs, a = u * 6.2831853f;
+    float px = cosf(a) * radius, pz = sinf(a) * radius;
+    verts[v] = (Vertex){.pos = {px, -h, pz},
+                        .normal = {px / radius, 0, pz / radius},
+                        .texCoord = {u, 1},
+                        .color = {c[0], c[1], c[2], c[3]},
+                        .tangent = {-pz / radius, 0, px / radius, 1}};
+    verts[v + 1] = (Vertex){.pos = {px, h, pz},
+                            .normal = {px / radius, 0, pz / radius},
+                            .texCoord = {u, 0},
+                            .color = {c[0], c[1], c[2], c[3]},
+                            .tangent = {-pz / radius, 0, px / radius, 1}};
+    v += 2;
+  }
+  for (int i = 0; i < segs; i++) {
+    uint32_t b = i * 2;
+    indices[idx++] = b;
+    indices[idx++] = b + 1;
+    indices[idx++] = b + 2;
+    indices[idx++] = b + 1;
+    indices[idx++] = b + 3;
+    indices[idx++] = b + 2;
+  }
+  uint32_t tc = v;
+  verts[v++] = (Vertex){.pos = {0, h, 0},
+                        .normal = {0, 1, 0},
+                        .texCoord = {0.5f, 0.5f},
+                        .color = {c[0], c[1], c[2], c[3]},
+                        .tangent = {1, 0, 0, 1}};
+  for (int i = 0; i <= segs; i++) {
+    float a = (float)i / segs * 6.2831853f;
+    float px = cosf(a) * radius, pz = sinf(a) * radius;
+    verts[v++] = (Vertex){
+        .pos = {px, h, pz},
+        .normal = {0, 1, 0},
+        .texCoord = {(px / radius + 1) * 0.5f, (pz / radius + 1) * 0.5f},
+        .color = {c[0], c[1], c[2], c[3]},
+        .tangent = {1, 0, 0, 1}};
+  }
+  for (int i = 0; i < segs; i++) {
+    indices[idx++] = tc;
+    indices[idx++] = tc + 2 + i;
+    indices[idx++] = tc + 1 + i;
+  }
+
+  uint32_t bc = v;
+  verts[v++] = (Vertex){.pos = {0, -h, 0},
+                        .normal = {0, -1, 0},
+                        .texCoord = {0.5f, 0.5f},
+                        .color = {c[0], c[1], c[2], c[3]},
+                        .tangent = {1, 0, 0, 1}};
+  for (int i = 0; i <= segs; i++) {
+    float a = (float)i / segs * 6.2831853f;
+    float px = cosf(a) * radius, pz = sinf(a) * radius;
+    verts[v++] = (Vertex){
+        .pos = {px, -h, pz},
+        .normal = {0, -1, 0},
+        .texCoord = {(px / radius + 1) * 0.5f, (1 - pz / radius) * 0.5f},
+        .color = {c[0], c[1], c[2], c[3]},
+        .tangent = {1, 0, 0, 1}};
+  }
+  for (int i = 0; i < segs; i++) {
+    indices[idx++] = bc;
+    indices[idx++] = bc + 1 + i;
+    indices[idx++] = bc + 2 + i;
+  }
+
+  primitive_commit(&m, "Cylinder", verts, v, indices, idx);
+  free(verts);
+  free(indices);
+}
+
+void cone(vec3 origin, float height, float radius, Color color) {
+  Mesh m;
+  primitive_init_mesh(&m, "Cone", origin, color);
+
+  int segs = 32;
+  uint32_t max_v = (segs + 1) * 2 + segs + 2;
+  uint32_t max_i = segs * 3 + segs * 3;
+  Vertex *verts = calloc(max_v, sizeof(Vertex));
+  uint32_t *indices = calloc(max_i, sizeof(uint32_t));
+  vec4 c = {color.r, color.g, color.b, color.a};
+  uint32_t v = 0, idx = 0;
+  float h = height * 0.5f;
+
+  for (int i = 0; i <= segs; i++) {
+    float u = (float)i / segs, a = u * 6.2831853f;
+    float px = cosf(a) * radius, pz = sinf(a) * radius;
+    vec3 n = {px, 0.5f * radius, pz};
+    glm_vec3_normalize(n);
+    verts[v] = (Vertex){.pos = {px, -h, pz},
+                        .normal = {n[0], n[1], n[2]},
+                        .texCoord = {u, 1},
+                        .color = {c[0], c[1], c[2], c[3]},
+                        .tangent = {-pz / radius, 0, px / radius, 1}};
+    verts[v + 1] = (Vertex){.pos = {0, h, 0},
+                            .normal = {n[0], n[1], n[2]},
+                            .texCoord = {u, 0},
+                            .color = {c[0], c[1], c[2], c[3]},
+                            .tangent = {-pz / radius, 0, px / radius, 1}};
+    v += 2;
+  }
+  for (int i = 0; i < segs; i++) {
+    uint32_t b = i * 2;
+    indices[idx++] = b;
+    indices[idx++] = b + 1;
+    indices[idx++] = b + 2;
+  }
+  uint32_t bc = v;
+  verts[v++] = (Vertex){.pos = {0, -h, 0},
+                        .normal = {0, -1, 0},
+                        .texCoord = {0.5f, 0.5f},
+                        .color = {c[0], c[1], c[2], c[3]},
+                        .tangent = {1, 0, 0, 1}};
+  for (int i = 0; i <= segs; i++) {
+    float a = (float)i / segs * 6.2831853f;
+    float px = cosf(a) * radius, pz = sinf(a) * radius;
+    verts[v++] = (Vertex){
+        .pos = {px, -h, pz},
+        .normal = {0, -1, 0},
+        .texCoord = {(px / radius + 1) * 0.5f, (1 - pz / radius) * 0.5f},
+        .color = {c[0], c[1], c[2], c[3]},
+        .tangent = {1, 0, 0, 1}};
+  }
+  for (int i = 0; i < segs; i++) {
+    indices[idx++] = bc;
+    indices[idx++] = bc + 2 + i;
+    indices[idx++] = bc + 1 + i;
+  }
+
+  primitive_commit(&m, "Cone", verts, v, indices, idx);
+  free(verts);
+  free(indices);
+}
+
+void uv_sphere(vec3 origin, float radius, int lats, int lons, Color color) {
+  Mesh m;
+  primitive_init_mesh(&m, "UV Sphere", origin, color);
+
+  uint32_t v_count = (lats + 1) * (lons + 1);
+  uint32_t i_count = lats * lons * 6;
+  Vertex *verts = calloc(v_count, sizeof(Vertex));
+  uint32_t *indices = calloc(i_count, sizeof(uint32_t));
+  vec4 c = {color.r, color.g, color.b, color.a};
+  uint32_t v = 0, idx = 0;
+
+  for (int i = 0; i <= lats; i++) {
+    float vt = (float)i / lats, phi = vt * 3.14159265f;
+    for (int j = 0; j <= lons; j++) {
+      float u = (float)j / lons, theta = u * 6.2831853f;
+      float px = sinf(phi) * cosf(theta) * radius;
+      float py = cosf(phi) * radius;
+      float pz = sinf(phi) * sinf(theta) * radius;
+      verts[v++] = (Vertex){.pos = {px, py, pz},
+                            .normal = {px / radius, py / radius, pz / radius},
+                            .texCoord = {u, vt},
+                            .color = {c[0], c[1], c[2], c[3]},
+                            .tangent = {-sinf(theta), 0, cosf(theta), 1}};
+    }
+  }
+  for (int i = 0; i < lats; i++) {
+    for (int j = 0; j < lons; j++) {
+      uint32_t p0 = i * (lons + 1) + j, p1 = p0 + 1,
+               p2 = (i + 1) * (lons + 1) + j, p3 = p2 + 1;
+      indices[idx++] = p0;
+      indices[idx++] = p1;
+      indices[idx++] = p2;
+      indices[idx++] = p1;
+      indices[idx++] = p3;
+      indices[idx++] = p2;
+    }
+  }
+  primitive_commit(&m, "UV Sphere", verts, v_count, indices, i_count);
+  free(verts);
+  free(indices);
+}
+
+void torus(vec3 origin, float major_radius, float minor_radius, int major_segs,
+           int minor_segs, Color color) {
+  Mesh m;
+  primitive_init_mesh(&m, "Torus", origin, color);
+
+  uint32_t v_count = (major_segs + 1) * (minor_segs + 1);
+  uint32_t i_count = major_segs * minor_segs * 6;
+  Vertex *verts = calloc(v_count, sizeof(Vertex));
+  uint32_t *indices = calloc(i_count, sizeof(uint32_t));
+  vec4 c = {color.r, color.g, color.b, color.a};
+  uint32_t v = 0, idx = 0;
+
+  for (int i = 0; i <= major_segs; i++) {
+    float u = (float)i / major_segs, a1 = u * 6.2831853f;
+    float cos1 = cosf(a1), sin1 = sinf(a1);
+    for (int j = 0; j <= minor_segs; j++) {
+      float vt = (float)j / minor_segs, a2 = vt * 6.2831853f;
+      float cos2 = cosf(a2), sin2 = sinf(a2);
+      float r = major_radius + minor_radius * cos2;
+      float px = r * cos1, py = minor_radius * sin2, pz = r * sin1;
+      float nx = cos2 * cos1, ny = sin2, nz = cos2 * sin1;
+      verts[v++] = (Vertex){.pos = {px, py, pz},
+                            .normal = {nx, ny, nz},
+                            .texCoord = {u, vt},
+                            .color = {c[0], c[1], c[2], c[3]},
+                            .tangent = {-sin1, 0, cos1, 1}};
+    }
+  }
+  for (int i = 0; i < major_segs; i++) {
+    for (int j = 0; j < minor_segs; j++) {
+      uint32_t p0 = i * (minor_segs + 1) + j, p1 = p0 + 1,
+               p2 = (i + 1) * (minor_segs + 1) + j, p3 = p2 + 1;
+      indices[idx++] = p0;
+      indices[idx++] = p1;
+      indices[idx++] = p2;
+      indices[idx++] = p1;
+      indices[idx++] = p3;
+      indices[idx++] = p2;
+    }
+  }
+  primitive_commit(&m, "Torus", verts, v_count, indices, i_count);
+  free(verts);
+  free(indices);
+}
+
+/// triangle_batched — implementation group
+static void triangle_batched(vec3 a, vec3 b, vec3 c, Color color) {
+  vec3 edge1, edge2, normal;
+  glm_vec3_sub(b, a, edge1);
+  glm_vec3_sub(c, a, edge2);
+  glm_vec3_cross(edge1, edge2, normal);
+  glm_vec3_normalize(normal);
+  vertex_with_normal(a, color, normal);
+  vertex_with_normal(b, color, normal);
+  vertex_with_normal(c, color, normal);
+}
+
+void bone(vec3 start, vec3 end, Color color) {
+  vec3 dir;
+  glm_vec3_sub(end, start, dir);
+  float len = glm_vec3_norm(dir);
+  if (len < 0.0001f)
+    return;
+  glm_vec3_scale(dir, 1.0f / len, dir);
+
+  vec3 up = {0.0f, 1.0f, 0.0f};
+  if (fabsf(dir[1]) > 0.99f) {
+    up[0] = 1.0f;
+    up[1] = 0.0f;
+  }
+  vec3 right, fwd;
+  glm_vec3_cross(dir, up, right);
+  glm_vec3_normalize(right);
+  glm_vec3_cross(right, dir, fwd);
+  glm_vec3_normalize(fwd);
+
+  float base_dist = len * 0.2f;
+  float radius = len * 0.1f;
+
+  vec3 base_center;
+  glm_vec3_scale(dir, base_dist, base_center); // Safely initialize from zero!
+  glm_vec3_add(start, base_center, base_center);
+
+  vec3 p[4];
+  for (int i = 0; i < 4; i++) {
+    float ang = (float)i * GLM_PI * 0.5f;
+    for (int k = 0; k < 3; k++)
+      p[i][k] = base_center[k] + right[k] * cosf(ang) * radius +
+                fwd[k] * sinf(ang) * radius;
+  }
+
+  for (int i = 0; i < 4; i++) {
+    int next = (i + 1) % 4;
+    line(start, p[i], color);   // Top pyramid
+    line(p[i], p[next], color); // Base square
+    line(p[i], end, color);     // Bottom pyramid
+  }
+}
+
+void sphere(vec3 center, float radius, int latDiv, int longDiv, Color color) {
+  uint32_t first = vertex_count;
+
+  float sin_lon[longDiv + 1];
+  float cos_lon[longDiv + 1];
+  for (int lon = 0; lon <= longDiv; ++lon) {
+    float phi = (float)lon / longDiv * 2.0f * GLM_PI;
+    sin_lon[lon] = sinf(phi);
+    cos_lon[lon] = cosf(phi);
+  }
+
+  for (int lat = 0; lat < latDiv; ++lat) {
+    float v1 = 1.0f - (float)lat / latDiv;
+    float v2 = 1.0f - (float)(lat + 1) / latDiv;
+    float theta1 = (float)lat / latDiv * GLM_PI;
+    float theta2 = (float)(lat + 1) / latDiv * GLM_PI;
+
+    float st1 = sinf(theta1), ct1 = cosf(theta1);
+    float st2 = sinf(theta2), ct2 = cosf(theta2);
+
+    for (int lon = 0; lon < longDiv; ++lon) {
+      float u1 = (float)lon / longDiv;
+      float u2 = (float)(lon + 1) / longDiv;
+
+      vec3 p0 = {center[0] + radius * st1 * cos_lon[lon],
+                 center[1] + radius * ct1,
+                 center[2] + radius * st1 * sin_lon[lon]};
+      vec3 p1 = {center[0] + radius * st2 * cos_lon[lon],
+                 center[1] + radius * ct2,
+                 center[2] + radius * st2 * sin_lon[lon]};
+      vec3 p2 = {center[0] + radius * st2 * cos_lon[lon + 1],
+                 center[1] + radius * ct2,
+                 center[2] + radius * st2 * sin_lon[lon + 1]};
+      vec3 p3 = {center[0] + radius * st1 * cos_lon[lon + 1],
+                 center[1] + radius * ct1,
+                 center[2] + radius * st1 * sin_lon[lon + 1]};
+
+      vec3 n0, n1, n2, n3;
+      glm_vec3_sub(p0, center, n0);
+      glm_vec3_normalize(n0);
+      glm_vec3_sub(p1, center, n1);
+      glm_vec3_normalize(n1);
+      glm_vec3_sub(p2, center, n2);
+      glm_vec3_normalize(n2);
+      glm_vec3_sub(p3, center, n3);
+      glm_vec3_normalize(n3);
+
+      vec4 t0 = {-sin_lon[lon], 0.0f, cos_lon[lon], 1.0f};
+      vec4 t1 = {-sin_lon[lon], 0.0f, cos_lon[lon], 1.0f};
+      vec4 t2 = {-sin_lon[lon + 1], 0.0f, cos_lon[lon + 1], 1.0f};
+      vec4 t3 = {-sin_lon[lon + 1], 0.0f, cos_lon[lon + 1], 1.0f};
+
+      // Reversed winding order to Counter-Clockwise to match glTF and Vulkan
+      // pipeline
+      vertex_full(p0, color, n0, (vec2){u1, v1}, t0);
+      vertex_full(p2, color, n2, (vec2){u2, v2}, t2);
+      vertex_full(p1, color, n1, (vec2){u1, v2}, t1);
+
+      vertex_full(p0, color, n0, (vec2){u1, v1}, t0);
+      vertex_full(p3, color, n3, (vec2){u2, v1}, t3);
+      vertex_full(p2, color, n2, (vec2){u2, v2}, t2);
+    }
+  }
+  mat4 identity;
+  glm_mat4_identity(identity);
+  emit_draw(first, vertex_count - first, identity);
+}
+
+/* Call after filling vertices for one primitive — records the draw call */
+void emit_draw(uint32_t firstVertex, uint32_t count, mat4 model) {
+  if (dynamic_draw_count >= MAX_DYNAMIC_MESHES)
+    return;
+  int slot = alloc_slot(model);
+  emit_draw_with_slot(firstVertex, count, slot);
+}
+
+void emit_draw_with_slot(uint32_t firstVertex, uint32_t count, int slot) {
+  if (slot < 0 || dynamic_draw_count >= MAX_DYNAMIC_MESHES)
+    return;
+
+  VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+  VkDrawIndexedIndirectCommand *cmds =
+      (VkDrawIndexedIndirectCommand *)((uint8_t *)
+                                           context.srcIndirectBufferMapped +
+                                       (frame_index * drawSize));
+  cmds[slot].indexCount = count;
+  cmds[slot].instanceCount = 1;
+  cmds[slot].firstIndex = 0;
+  uint32_t dynamicBase =
+      context.megaVertexBufferOffset + (frame_index * OBS_DYNAMIC_VERTEX_STRIDE(&context));
+  cmds[slot].vertexOffset = dynamicBase + firstVertex;
+  cmds[slot].firstInstance = slot;
+
+  dynamic_draw_count++;
+  context.indirectDrawCount = (uint32_t)scene->meshes.count + dynamic_draw_count;
+}
+
+void renderer_clear() {
+  vertex_count = 0;
+  dynamic_draw_count = 0;
+}
+
+uint32_t get_dynamic_vertex_count(void) { return vertex_count; }
+
+Vertex *get_dynamic_vertices(void) {
+  if (!ensure_dynamic_vertex_storage(vertex_count ? vertex_count : 1)) return NULL;
+  Vertex *dynVerts = (Vertex *)context.dynamicStagingMapped;
+  return &dynVerts[frame_index * OBS_DYNAMIC_VERTEX_STRIDE(&context)];
+}
+
+static void mesh_heap_sift_down(uint32_t *indices, size_t count, size_t root,
+                                const float *distances) {
+  while (root < count / 2) {
+    size_t child = root * 2 + 1;
+    if (child + 1 < count &&
+        distances[indices[child + 1]] < distances[indices[child]])
+      ++child;
+    if (distances[indices[root]] <= distances[indices[child]])
+      break;
+    uint32_t tmp = indices[root];
+    indices[root] = indices[child];
+    indices[child] = tmp;
+    root = child;
+  }
+}
+
+static void mesh_shell_sort(uint32_t *indices, size_t count,
+                            const float *distances) {
+  static const size_t gaps[] = {701, 301, 132, 57, 23, 10, 4, 1};
+  for (size_t g = 0; g < sizeof(gaps) / sizeof(gaps[0]); ++g) {
+    const size_t gap = gaps[g];
+    for (size_t i = gap; i < count; ++i) {
+      const uint32_t temp_index = indices[i];
+      const float temp_distance = distances[temp_index];
+      size_t j = i;
+      while (j >= gap && distances[indices[j - gap]] < temp_distance) {
+        indices[j] = indices[j - gap];
+        j -= gap;
+      }
+      indices[j] = temp_index;
+    }
+  }
+}
+
+static void mesh_heap_sort_far_to_near(uint32_t *indices, size_t count,
+                                       const float *distances) {
+  // A min-heap emits the nearest item at the back, leaving descending order.
+  for (size_t start = count / 2; start > 0;)
+    mesh_heap_sift_down(indices, count, --start, distances);
+
+  for (size_t end = count; end > 1;) {
+    --end;
+    uint32_t tmp = indices[0];
+    indices[0] = indices[end];
+    indices[end] = tmp;
+    mesh_heap_sift_down(indices, end, 0, distances);
+  }
+}
+
+enum { MESH_HEAPSORT_THRESHOLD = 2048 };
+
+void sort_meshes_by_alpha(Meshes *meshes, vec3 cameraPos) {
+  if (!meshes->draw_indices || meshes->count == 0)
+    return;
+
+  size_t write_idx = 0;
+  for (size_t i = 0; i < meshes->count; i++) {
+    uint32_t mesh_idx = meshes->draw_indices[i];
+    if (meshes->items[mesh_idx].alpha_mode != 2) {
+      if (i != write_idx) {
+        uint32_t tmp = meshes->draw_indices[write_idx];
+        meshes->draw_indices[write_idx] = meshes->draw_indices[i];
+        meshes->draw_indices[i] = tmp;
+      }
+      write_idx++;
+    }
+  }
+  opaqueMeshCount = (uint32_t)write_idx;
+  transparentMeshCount = (uint32_t)(meshes->count - write_idx);
+
+  size_t blend_count = meshes->count - write_idx;
+  if (blend_count <= 1)
+    return;
+
+  if (meshes->capacity > mesh_distances_capacity) {
+    float *distances =
+        realloc(mesh_distances, meshes->capacity * sizeof(*distances));
+    if (!distances)
+      return;
+    mesh_distances = distances;
+    mesh_distances_capacity = meshes->capacity;
+  }
+
+  uint32_t *blend = &meshes->draw_indices[write_idx];
+
+  // AAA Optimization: Pre-calculate distance exactly once per transparent mesh!
+  // Slashes massive redundant matrix array accesses inside the sorting loops.
+  for (size_t i = 0; i < blend_count; i++) {
+    uint32_t mesh_idx = blend[i];
+    Mesh *m = &meshes->items[mesh_idx];
+    mesh_distances[mesh_idx] = glm_vec3_distance2(
+        cameraPos, (vec3){m->model[3][0], m->model[3][1], m->model[3][2]});
+  }
+
+  // Preserve the existing path for modest blends; use heapsort for the
+  // benchmarked large cases without adding scratch storage.
+  if (blend_count < MESH_HEAPSORT_THRESHOLD)
+    mesh_shell_sort(blend, blend_count, mesh_distances);
+  else
+    mesh_heap_sort_far_to_near(blend, blend_count, mesh_distances);
+
+  opaqueMeshCount = write_idx;
+  transparentMeshCount = meshes->count - write_idx;
+}
+
+// WITH TEXTURES AND UNLIT
+void mesh(VkCommandBuffer cmd, Mesh *mesh) {
+  /* legacy direct-draw path — model/material data comes from SSBO for
+     indirect meshes; this path is only used for dynamic/morph meshes  */
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    context.graphicsPipelineTextured3D);
+  pushConstants.vertexBufferAddr =
+      megaVertexBufferAddr; // Dynamic vertices are pushed to the mega buffer!
+  vkCmdPushConstants(
+      cmd, context.pipelineLayoutTextured3D,
+      VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT |
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      0, sizeof(PushConstants), &pushConstants);
+
+  uint32_t first_vertex =
+      (mesh->megaBaseVertex != UINT32_MAX)
+          ? mesh->megaBaseVertex
+          : (context.megaVertexBufferOffset +
+             (frame_index * OBS_DYNAMIC_VERTEX_STRIDE(&context)) + mesh->dynamicBaseVertex);
+  obs_profile_count_draw(&context, 1, mesh->vertexCount, 0);
+  vkCmdDraw(cmd, mesh->vertexCount, 1, first_vertex, 0);
+}
+
+void mesh_update_morph(Mesh *mesh) {
+  (void)mesh;
+  /* Intentionally empty: weight uploads are now batched in flushMeshSSBO
+     via a single contiguous memcpy of the entire weight region.
+     AABB expansion is handled by the GPU refit compute pass.            */
+}
+
+void mesh_destroy(VkDevice device, Mesh *mesh) {
+  (void)device;
+  mesh_bone_overrides_clear(mesh);
+  if (mesh->morph_data) {
+    if (mesh->morph_data->weights)
+      free(mesh->morph_data->weights);
+    free(mesh->morph_data);
+    mesh->morph_data = NULL;
+  }
+  if (mesh->name) {
+    free(mesh->name);
+    mesh->name = NULL;
+  }
+  mesh->vertexCount = 0;
+}
+
+void meshes_init(Meshes *meshes) {
+  meshes->items = NULL;
+  meshes->draw_indices = NULL;
+  meshes->count = 0;
+  meshes->capacity = 0;
+}
+
+/// Mesh array publication — prepare allocations before GPU submission
+bool meshes_reserve(Meshes *meshes, size_t needed) {
+  if (!meshes) return false;
+  return obs_mesh_storage_reserve((void **)&meshes->items,
+                                  &meshes->draw_indices, &meshes->capacity,
+                                  meshes->count, needed, sizeof(Mesh),
+                                  NULL, NULL, NULL);
+}
+
+bool meshes_append_prepared(Meshes *meshes, Mesh *prepared, size_t count) {
+  if (!meshes || (count && !prepared) || meshes->count > meshes->capacity ||
+      count > meshes->capacity - meshes->count) return false;
+  for (size_t i = 0; i < count; ++i) prepared[i].foreign_identity = 0;
+  if (!obs_mesh_storage_append(meshes->items, meshes->draw_indices,
+                               &meshes->count, meshes->capacity, prepared,
+                               count, sizeof(Mesh))) return false;
+  if (count) {
+    if (meshes == &scene->meshes) scene_bump_mesh_revision(scene);
+    scene_topology_dirty = true;
+  }
+  return true;
+}
+
+void meshes_add(Meshes *meshes, Mesh mesh) {
+  if (!meshes || meshes->count == SIZE_MAX ||
+      !meshes_reserve(meshes, meshes->count + 1) ||
+      !meshes_append_prepared(meshes, &mesh, 1)) {
+    fprintf(stderr, "[Obsidian] mesh append rejected: out of storage\n");
+    mesh_destroy(context.device, &mesh);
+  }
+}
+
+void meshes_remove(Meshes *meshes, size_t index) {
+  if (index >= meshes->count)
+    return;
+  mesh_destroy(VK_NULL_HANDLE, &meshes->items[index]);
+  for (size_t i = index; i < meshes->count - 1; ++i)
+    meshes->items[i] = meshes->items[i + 1];
+  meshes->count--;
+  if (meshes == &scene->meshes) scene_bump_mesh_revision(scene);
+  for (size_t i = 0; i < meshes->count; i++) {
+    meshes->draw_indices[i] = (uint32_t)i;
+  }
+  scene_topology_dirty = true;
+}
+
+void meshes_draw(VkCommandBuffer cmd, Meshes *meshes) {
+  if (meshes->count == 0)
+    return;
+
+  VkPipeline bound_pipeline = VK_NULL_HANDLE;
+
+  /* sets 0/1/2 already bound in recordCommandBuffer before meshes_draw is
+   * called */
+
+  for (size_t i = 0; i < meshes->count; ++i) {
+    Mesh *m = &meshes->items[i];
+
+    /* Static meshes (in mega buffer) are drawn by the indirect pass —
+       only draw dynamic meshes (morph targets) here.                 */
+    if (m->megaBaseVertex != UINT32_MAX)
+      continue;
+
+    VkPipeline want_pipe = context.graphicsPipeline;
+    VkPipelineLayout want_layout = context.pipelineLayout;
+
+    if (want_pipe != bound_pipeline) {
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want_pipe);
+      bound_pipeline = want_pipe;
+    }
+
+    pushConstants.vertexBufferAddr =
+        megaVertexBufferAddr; // Dynamic vertices are pushed to the mega buffer!
+    vkCmdPushConstants(
+        cmd, want_layout,
+        VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT |
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0, sizeof(PushConstants), &pushConstants);
+
+    uint32_t first_vertex =
+        (m->megaBaseVertex != UINT32_MAX)
+            ? m->megaBaseVertex
+            : (context.megaVertexBufferOffset +
+               (frame_index * OBS_DYNAMIC_VERTEX_STRIDE(&context)) + m->dynamicBaseVertex);
+    obs_profile_count_draw(&context, 1, m->vertexCount, 0);
+    vkCmdDraw(cmd, m->vertexCount, 1, first_vertex, 0);
+  }
+}
+
+void meshes_destroy(VkDevice device, Meshes *meshes) {
+  if (meshes == &scene->meshes) scene_bump_mesh_revision(scene);
+  for (size_t i = 0; i < meshes->count; ++i) {
+    mesh_destroy(device, &meshes->items[i]);
+  }
+  free(meshes->items);
+  free(meshes->draw_indices);
+  meshes->items = NULL;
+  meshes->draw_indices = NULL;
+  meshes->count = 0;
+  meshes->capacity = 0;
+  scene_topology_dirty = true;
+}
+
+Mesh *get_mesh(const char *name) {
+  if (!name)
+    return NULL;
+
+  for (size_t i = 0; i < scene->meshes.count; i++) {
+    if (scene->meshes.items[i].name &&
+        strcmp(scene->meshes.items[i].name, name) == 0) {
+      return &scene->meshes.items[i];
+    }
+  }
+  return NULL;
+}
+
+// --- 2D Renderer ---
+
+// Batch structure for textured quads
+
+Vertex2D *vertices2D;
+uint32_t vertexCount2D = 0;
+vec4 renderer2D_clip_rect = {0.0f, 0.0f, 0.0f, 0.0f};
+static size_t vertex2D_capacity[MAX_FRAMES_IN_FLIGHT];
+static bool vertex2D_ready;
+enum { RENDERER2D_INITIAL_VERTICES = 4096 };
+
+/// renderer2D_apply_clip — implementation group
+static void renderer2D_apply_clip(Vertex2D *vertices, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    memcpy(vertices[i].clipRect, renderer2D_clip_rect,
+           sizeof(renderer2D_clip_rect));
+  }
+}
+
+void renderer2D_set_clip_rect(float x, float y, float width, float height) {
+  renderer2D_clip_rect[0] = x;
+  renderer2D_clip_rect[1] = y;
+  renderer2D_clip_rect[2] = width;
+  renderer2D_clip_rect[3] = height;
+}
+
+void renderer2D_clear_clip_rect(void) {
+  renderer2D_clip_rect[0] = 0.0f;
+  renderer2D_clip_rect[1] = 0.0f;
+  renderer2D_clip_rect[2] = 0.0f;
+  renderer2D_clip_rect[3] = 0.0f;
+}
+
+void renderer2D_init() {
+  vertex2D_ready = false;
+  memset(vertex2D_capacity, 0, sizeof(vertex2D_capacity));
+  vertices2D = NULL;
+  /* Allocate small, host-coherent buffers and grow only when a frame needs
+   * more geometry.  The frame slot's fence has completed before writes. */
+  for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    if (!create_mapped_buffer_checked(
+            context.device, context.physicalDevice,
+            RENDERER2D_INITIAL_VERTICES * sizeof(Vertex2D),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &context.vertexBuffer2D[i],
+            &context.vertexBufferMemory2D[i],
+            &context.vertexBuffer2DMapped[i])) {
+      fprintf(stderr,
+              "renderer2D: could not allocate streaming vertex buffer\n");
+      for (uint32_t j = 0; j < i; j++) {
+        vkUnmapMemory(context.device, context.vertexBufferMemory2D[j]);
+        vkDestroyBuffer(context.device, context.vertexBuffer2D[j], NULL);
+        vkFreeMemory(context.device, context.vertexBufferMemory2D[j], NULL);
+        context.vertexBuffer2D[j] = VK_NULL_HANDLE;
+        context.vertexBufferMemory2D[j] = VK_NULL_HANDLE;
+        context.vertexBuffer2DMapped[j] = NULL;
+        vertex2D_capacity[j] = 0;
+      }
+      return;
+    }
+    vertex2D_capacity[i] = RENDERER2D_INITIAL_VERTICES;
+  }
+  vertex2D_ready = true;
+}
+
+bool renderer2D_reserve(uint32_t additional_vertices) {
+  if (!vertex2D_ready || !vertices2D || frame_index >= MAX_FRAMES_IN_FLIGHT)
+    return false;
+  size_t current = vertexCount2D;
+  size_t maximum = MAX_VERTICES;
+  if (current > maximum || additional_vertices > maximum - current)
+    return false;
+  size_t required = current + additional_vertices;
+  size_t old_capacity = vertex2D_capacity[frame_index];
+  if (required <= old_capacity)
+    return true;
+
+  size_t next_capacity =
+      renderer2d_capacity_for(old_capacity, required, maximum);
+  if (next_capacity == 0 || next_capacity > SIZE_MAX / sizeof(Vertex2D))
+    return false;
+  VkBuffer new_buffer;
+  VkDeviceMemory new_memory;
+  void *new_mapped;
+  if (!create_mapped_buffer_checked(context.device, context.physicalDevice,
+                                    next_capacity * sizeof(Vertex2D),
+                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                    &new_buffer, &new_memory, &new_mapped)) {
+    return false;
+  }
+  if (vertexCount2D > 0)
+    memcpy(new_mapped, vertices2D, vertexCount2D * sizeof(Vertex2D));
+
+  /* This slot's fence was waited in obs_begin_frame before any draw calls. */
+  if (context.vertexBuffer2DMapped[frame_index])
+    vkUnmapMemory(context.device, context.vertexBufferMemory2D[frame_index]);
+  if (context.vertexBuffer2D[frame_index])
+    vkDestroyBuffer(context.device, context.vertexBuffer2D[frame_index], NULL);
+  if (context.vertexBufferMemory2D[frame_index])
+    vkFreeMemory(context.device, context.vertexBufferMemory2D[frame_index],
+                 NULL);
+  context.vertexBuffer2D[frame_index] = new_buffer;
+  context.vertexBufferMemory2D[frame_index] = new_memory;
+  context.vertexBuffer2DMapped[frame_index] = new_mapped;
+  vertex2D_capacity[frame_index] = next_capacity;
+  vertices2D = new_mapped;
+  return true;
+}
+
+void quad2D(vec2 position, vec2 size, Color color) {
+  if (!renderer2D_reserve(6))
+    return;
+
+  float x = position[0], y = position[1];
+  float w = size[0], h = size[1];
+
+  /* We pass 'color' to the unused border param so C doesn't complain about
+   * uninitialized fields */
+  Vertex2D quad[6] = {{{x, y},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{x + w, y},
+                       color,
+                       {1.0f, 0.0f},
+                       -1,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{x + w, y + h},
+                       color,
+                       {1.0f, 1.0f},
+                       -1,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{x, y},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{x + w, y + h},
+                       color,
+                       {1.0f, 1.0f},
+                       -1,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{x, y + h},
+                       color,
+                       {0.0f, 1.0f},
+                       -1,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color}};
+
+  renderer2D_apply_clip(quad, 6);
+  memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+  vertexCount2D += 6;
+}
+
+void quad2D_with_face(vec2 position, vec2 size, Color color,
+                      const ObsFaceShaderData *face_data) {
+  if (!renderer2D_reserve(6))
+    return;
+  float x = position[0], y = position[1];
+  float w = size[0], h = size[1];
+  Vertex2D quad[6] = {
+      {{x, y}, color, {0.0f, 0.0f}, -1, {w, h}, {0, 0, 0, 0}, 0, color},
+      {{x + w, y}, color, {1.0f, 0.0f}, -1, {w, h}, {0, 0, 0, 0}, 0, color},
+      {{x + w, y + h}, color, {1.0f, 1.0f}, -1, {w, h}, {0, 0, 0, 0}, 0, color},
+      {{x, y}, color, {0.0f, 0.0f}, -1, {w, h}, {0, 0, 0, 0}, 0, color},
+      {{x + w, y + h}, color, {1.0f, 1.0f}, -1, {w, h}, {0, 0, 0, 0}, 0, color},
+      {{x, y + h}, color, {0.0f, 1.0f}, -1, {w, h}, {0, 0, 0, 0}, 0, color}};
+  if (face_data) {
+    for (size_t i = 0; i < 6; i++) {
+      memcpy(quad[i].faceData0, face_data, sizeof(face_data->shader_id) * 4);
+      memcpy(quad[i].faceData1, &face_data->run_offset,
+             sizeof(face_data->run_offset) * 4);
+      memcpy(quad[i].faceEventData, &face_data->event_offset,
+             sizeof(face_data->event_offset) * 4);
+      memcpy(quad[i].faceParams, face_data->params, sizeof(face_data->params));
+      memcpy(quad[i].faceEvent, face_data->event, sizeof(face_data->event));
+    }
+  }
+  renderer2D_apply_clip(quad, 6);
+  memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+  vertexCount2D += 6;
+}
+
+void shaderQuad2D(vec2 position, vec2 size, int shaderId, vec4 customParams) {
+  if (!renderer2D_reserve(6))
+    return;
+  float x = position[0], y = position[1];
+  float w = size[0], h = size[1];
+  Color col = {1.0f, 1.0f, 1.0f, 1.0f}; // Default color
+  Vertex2D quad[6] = {
+      {{x, y},
+       col,
+       {0.0f, 0.0f},
+       shaderId,
+       {w, h},
+       {customParams[0], customParams[1], customParams[2], customParams[3]},
+       0.0f,
+       col},
+      {{x + w, y},
+       col,
+       {1.0f, 0.0f},
+       shaderId,
+       {w, h},
+       {customParams[0], customParams[1], customParams[2], customParams[3]},
+       0.0f,
+       col},
+      {{x + w, y + h},
+       col,
+       {1.0f, 1.0f},
+       shaderId,
+       {w, h},
+       {customParams[0], customParams[1], customParams[2], customParams[3]},
+       0.0f,
+       col},
+      {{x, y},
+       col,
+       {0.0f, 0.0f},
+       shaderId,
+       {w, h},
+       {customParams[0], customParams[1], customParams[2], customParams[3]},
+       0.0f,
+       col},
+      {{x + w, y + h},
+       col,
+       {1.0f, 1.0f},
+       shaderId,
+       {w, h},
+       {customParams[0], customParams[1], customParams[2], customParams[3]},
+       0.0f,
+       col},
+      {{x, y + h},
+       col,
+       {0.0f, 1.0f},
+       shaderId,
+       {w, h},
+       {customParams[0], customParams[1], customParams[2], customParams[3]},
+       0.0f,
+       col}};
+  renderer2D_apply_clip(quad, 6);
+  memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+  vertexCount2D += 6;
+}
+
+void exQuad2D(vec2 position, vec2 size, vec4 radii, float borderThickness,
+              Color borderColor, Color color) {
+  if (!renderer2D_reserve(6))
+    return;
+
+  float x = position[0], y = position[1];
+  float w = size[0], h = size[1];
+
+  Vertex2D quad[6] = {{{x, y},
+                       color,
+                       {0.0f, 0.0f},
+                       -2,
+                       {w, h},
+                       {radii[0], radii[1], radii[2], radii[3]},
+                       borderThickness,
+                       borderColor},
+                      {{x + w, y},
+                       color,
+                       {1.0f, 0.0f},
+                       -2,
+                       {w, h},
+                       {radii[0], radii[1], radii[2], radii[3]},
+                       borderThickness,
+                       borderColor},
+                      {{x + w, y + h},
+                       color,
+                       {1.0f, 1.0f},
+                       -2,
+                       {w, h},
+                       {radii[0], radii[1], radii[2], radii[3]},
+                       borderThickness,
+                       borderColor},
+                      {{x, y},
+                       color,
+                       {0.0f, 0.0f},
+                       -2,
+                       {w, h},
+                       {radii[0], radii[1], radii[2], radii[3]},
+                       borderThickness,
+                       borderColor},
+                      {{x + w, y + h},
+                       color,
+                       {1.0f, 1.0f},
+                       -2,
+                       {w, h},
+                       {radii[0], radii[1], radii[2], radii[3]},
+                       borderThickness,
+                       borderColor},
+                      {{x, y + h},
+                       color,
+                       {0.0f, 1.0f},
+                       -2,
+                       {w, h},
+                       {radii[0], radii[1], radii[2], radii[3]},
+                       borderThickness,
+                       borderColor}};
+
+  renderer2D_apply_clip(quad, 6);
+  memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+  vertexCount2D += 6;
+}
+
+void texture2D(vec2 position, vec2 size, Texture2D *texture, Color tint) {
+  if (!texture || !texture->loaded || !renderer2D_reserve(6)) {
+    if (!texture)
+      printf("texture2D: NULL texture\n");
+    else if (!texture->loaded)
+      printf("texture2D: texture not loaded\n");
+    return;
+  }
+
+  float x = position[0], y = position[1];
+  float w = size[0], h = size[1];
+
+  if (!texture->loaded)
+    return;
+
+  int32_t slot = (int32_t)texture->bindlessSlot;
+  Vertex2D quad[6] = {{{x, y},
+                       tint,
+                       {0.0f, 1.0f},
+                       slot,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       tint},
+                      {{x + w, y},
+                       tint,
+                       {1.0f, 1.0f},
+                       slot,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       tint},
+                      {{x + w, y + h},
+                       tint,
+                       {1.0f, 0.0f},
+                       slot,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       tint},
+                      {{x, y},
+                       tint,
+                       {0.0f, 1.0f},
+                       slot,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       tint},
+                      {{x + w, y + h},
+                       tint,
+                       {1.0f, 0.0f},
+                       slot,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       tint},
+                      {{x, y + h},
+                       tint,
+                       {0.0f, 0.0f},
+                       slot,
+                       {w, h},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       tint}};
+
+  renderer2D_apply_clip(quad, 6);
+  memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+  vertexCount2D += 6;
+}
+
+void circle2D(vec2 center, float radius, Color color) {
+  float d = radius * 2.0f;
+  vec2 pos = {center[0] - radius, center[1] - radius};
+  vec4 radii = {radius, radius, radius, radius};
+  exQuad2D(pos, (vec2){d, d}, radii, 0.0f, color, color);
+}
+
+void line2D(vec2 start, vec2 end, Color color) {
+  float thickness = 1.0f;
+  vec2 dir = {end[0] - start[0], end[1] - start[1]};
+  float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1]);
+  if (len < 0.0001f)
+    return;
+  dir[0] /= len;
+  dir[1] /= len;
+
+  vec2 perp = {-dir[1] * (thickness * 0.5f), dir[0] * (thickness * 0.5f)};
+
+  if (!renderer2D_reserve(6))
+    return;
+
+  Vertex2D quad[6] = {{{start[0] - perp[0], start[1] - perp[1]},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {0.0f, 0.0f},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{end[0] - perp[0], end[1] - perp[1]},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {0.0f, 0.0f},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{end[0] + perp[0], end[1] + perp[1]},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {0.0f, 0.0f},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{start[0] - perp[0], start[1] - perp[1]},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {0.0f, 0.0f},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{end[0] + perp[0], end[1] + perp[1]},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {0.0f, 0.0f},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color},
+                      {{start[0] + perp[0], start[1] + perp[1]},
+                       color,
+                       {0.0f, 0.0f},
+                       -1,
+                       {0.0f, 0.0f},
+                       {0.0f, 0.0f, 0.0f, 0.0f},
+                       0.0f,
+                       color}};
+  renderer2D_apply_clip(quad, 6);
+  memcpy(&vertices2D[vertexCount2D], quad, sizeof(quad));
+  vertexCount2D += 6;
+}
+
+void triangle_col(vec2 p0, Color c0, vec2 p1, Color c1, vec2 p2, Color c2) {
+  if (!renderer2D_reserve(3))
+    return;
+  Vertex2D tri[3] = {{{p0[0], p0[1]},
+                      c0,
+                      {0.0f, 0.0f},
+                      -1,
+                      {0.0f, 0.0f},
+                      {0.0f, 0.0f, 0.0f, 0.0f},
+                      0.0f,
+                      c0},
+                     {{p1[0], p1[1]},
+                      c1,
+                      {0.0f, 0.0f},
+                      -1,
+                      {0.0f, 0.0f},
+                      {0.0f, 0.0f, 0.0f, 0.0f},
+                      0.0f,
+                      c1},
+                     {{p2[0], p2[1]},
+                      c2,
+                      {0.0f, 0.0f},
+                      -1,
+                      {0.0f, 0.0f},
+                      {0.0f, 0.0f, 0.0f, 0.0f},
+                      0.0f,
+                      c2}};
+  renderer2D_apply_clip(tri, 3);
+  memcpy(&vertices2D[vertexCount2D], tri, sizeof(tri));
+  vertexCount2D += 3;
+}
+
+void renderer2D_upload() {
+  /* 2D vertices are written directly into this frame slot's mapped buffer. */
+}
+
+void renderer2D_draw(VkCommandBuffer cmd) {
+  if (vertexCount2D == 0)
+    return;
+
+  Obs2DPushConstants push;
+  glm_ortho(0.0f, (float)context.drawExtent.width,
+            (float)context.drawExtent.height, 0.0f, -1.0f, 1.0f,
+            push.projection);
+  push.frame[0] = (float)glfwGetTime();
+  push.frame[1] = (float)context.drawExtent.width;
+  push.frame[2] = (float)context.drawExtent.height;
+  push.frame[3] = 0.0f;
+  push.pointer[0] = renderer2D_pointer_position[0];
+  push.pointer[1] = renderer2D_pointer_position[1];
+  push.pointer[2] = 0.0f;
+  push.pointer[3] = 0.0f;
+
+  /* Unified 2D pipeline: set=0 is the bindless texture array.
+     Colored quads have textureIndex=-1 in the vertex data so the
+     shader skips sampling. Textured quads carry the bindless slot.
+     Everything is interleaved in one buffer — single draw call.    */
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    context.graphicsPipeline2D);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          context.pipelineLayoutTextured2D, 0, 1,
+                          &context.bindlessSet, 0, NULL);
+  vkCmdPushConstants(cmd, context.pipelineLayoutTextured2D,
+                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0, sizeof(push), &push);
+
+  VkDeviceSize offsets[] = {0};
+  vkCmdBindVertexBuffers(cmd, 0, 1, &context.vertexBuffer2D[frame_index],
+                         offsets);
+  obs_profile_count_draw(&context, 1, vertexCount2D, 0);
+  vkCmdDraw(cmd, vertexCount2D, 1, 0, 0);
+}
+
+void renderer2D_set_pointer_position(float x, float y) {
+  renderer2D_pointer_position[0] = x;
+  renderer2D_pointer_position[1] = y;
+}
+
+void renderer2D_clear(void) {
+  vertexCount2D = 0;
+  if (vertex2D_ready && frame_index < MAX_FRAMES_IN_FLIGHT)
+    vertices2D = context.vertexBuffer2DMapped[frame_index];
+  else
+    vertices2D = NULL;
+}
+
+// --- Texture Loading ---
+
+bool load_texture_from_rgba_with_format(VulkanContext *context,
+                                        unsigned char *rgba_data,
+                                        uint32_t width, uint32_t height,
+                                        Texture2D *texture, VkFormat format) {
+  bool ok =
+      alloc_texture_image(context, width, height, format, &texture->image,
+                          &texture->memory) &&
+      upload_pixels_to_image(
+          context, rgba_data, (VkDeviceSize)width * height * 4, texture->image,
+          width, height, format, VK_IMAGE_LAYOUT_UNDEFINED, &texture->loaded) &&
+      finalize_texture(context, texture, format,
+                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+  if (ok) {
+    texture->width = width;
+    texture->height = height;
+  }
+  return ok;
+}
+
+// Wrapper for backward compatibility
+bool load_texture_from_rgba(VulkanContext *context, unsigned char *rgba_data,
+                            uint32_t width, uint32_t height,
+                            Texture2D *texture) {
+  return load_texture_from_rgba_with_format(context, rgba_data, width, height,
+                                            texture, VK_FORMAT_R8G8B8A8_UNORM);
+}
+
+bool update_texture_from_rgba(VulkanContext *context, Texture2D *texture,
+                              unsigned char *rgba_data, int width, int height) {
+  if ((uint32_t)width != texture->width ||
+      (uint32_t)height != texture->height) {
+    if (texture->view)
+      vkDestroyImageView(context->device, texture->view, NULL);
+    if (texture->image)
+      vkDestroyImage(context->device, texture->image, NULL);
+    if (texture->memory) {
+      free_texture_vram(texture->memory);
+      texture->memory = VK_NULL_HANDLE;
+    }
+
+    texture->loaded = false; // Suspend rendering until upload completes
+    alloc_texture_image(context, width, height, VK_FORMAT_R8G8B8A8_UNORM,
+                        &texture->image, &texture->memory);
+    upload_pixels_to_image(context, rgba_data, (VkDeviceSize)width * height * 4,
+                           texture->image, width, height,
+                           VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED,
+                           &texture->loaded);
+
+    VkImageViewCreateInfo viewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = texture->image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    vkCreateImageView(context->device, &viewInfo, NULL, &texture->view);
+
+    VkDescriptorImageInfo imageDescInfo = {
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageView = texture->view,
+        .sampler = texture->sampler};
+    VkWriteDescriptorSet descriptorWrite = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = texture->descriptorSet,
+        .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .pImageInfo = &imageDescInfo};
+    vkUpdateDescriptorSets(context->device, 1, &descriptorWrite, 0, NULL);
+
+    texture->width = width;
+    texture->height = height;
+    return true;
+  }
+  texture->loaded = false;
+  return upload_pixels_to_image(
+      context, rgba_data, (VkDeviceSize)width * height * 4, texture->image,
+      width, height, VK_FORMAT_R8G8B8A8_UNORM,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &texture->loaded);
+}
+
+// Zero-copy direct-to-GPU upload helper. Reads from disk directly into Vulkan
+// mapped memory.
+static bool upload_file_to_image_direct(VulkanContext *ctx,
+                                        const char *filepath,
+                                        VkDeviceSize imageSize, VkImage image,
+                                        uint32_t w, uint32_t h, VkFormat fmt,
+                                        size_t file_offset, bool *loaded_flag) {
+  FILE *f = fopen(filepath, "rb");
+  if (!f)
+    return false;
+
+  if (file_offset > 0)
+    fseek(f, file_offset, SEEK_SET);
+
+  VkBuffer stagingBuf;
+  VkDeviceMemory stagingMem;
+  VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                            .size = imageSize,
+                            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+  if (vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf) != VK_SUCCESS) {
+    fclose(f);
+    return false;
+  }
+
+  VkMemoryRequirements req;
+  vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+  VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                              .allocationSize = req.size,
+                              .memoryTypeIndex = findMemoryType(
+                                  ctx->physicalDevice, req.memoryTypeBits,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+  if (vkAllocateMemory(ctx->device, &mai, NULL, &stagingMem) != VK_SUCCESS) {
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+    fclose(f);
+    return false;
+  }
+  vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+
+  void *mapped;
+  vkMapMemory(ctx->device, stagingMem, 0, imageSize, 0, &mapped);
+
+  // THE MAGIC: fread directly into Vulkan's PCIe-mapped staging buffer! Zero
+  // malloc! Zero memcpy!
+  size_t bytes_read = fread(mapped, 1, imageSize, f);
+  fclose(f);
+  vkUnmapMemory(ctx->device, stagingMem);
+
+  if (bytes_read != imageSize) {
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+    vkFreeMemory(ctx->device, stagingMem, NULL);
+    return false;
+  }
+
+  VkCommandBuffer cmd = begin_async_cmd(ctx);
+  transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  copyBufferToImage(cmd, stagingBuf, image, w, h);
+  transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  end_async_cmd(cmd);
+  submit_async_upload(ctx, stagingBuf, stagingMem, cmd, loaded_flag);
+  return true;
+}
+
+// Shared staging buffer upload helper — stages pixels, transitions, copies,
+// cleans up. Does NOT create image/view/sampler/descriptor — caller owns those.
+static bool upload_pixels_to_image(VulkanContext *ctx, unsigned char *pixels,
+                                   VkDeviceSize imageSize, VkImage image,
+                                   uint32_t w, uint32_t h, VkFormat fmt,
+                                   VkImageLayout srcLayout, bool *loaded_flag) {
+  VkBuffer stagingBuf;
+  VkDeviceMemory stagingMem;
+  VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                            .size = imageSize,
+                            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+  if (vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf) != VK_SUCCESS)
+    return false;
+
+  VkMemoryRequirements req;
+  vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+  VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                              .allocationSize = req.size,
+                              .memoryTypeIndex = findMemoryType(
+                                  ctx->physicalDevice, req.memoryTypeBits,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+  if (vkAllocateMemory(ctx->device, &mai, NULL, &stagingMem) != VK_SUCCESS) {
+    vkDestroyBuffer(ctx->device, stagingBuf, NULL);
+    return false;
+  }
+  vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+
+  void *mapped;
+  vkMapMemory(ctx->device, stagingMem, 0, imageSize, 0, &mapped);
+  memcpy(mapped, pixels, imageSize);
+  vkUnmapMemory(ctx->device, stagingMem);
+
+  VkCommandBuffer cmd = begin_async_cmd(ctx);
+  transitionImageLayout(cmd, image, fmt, srcLayout,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  copyBufferToImage(cmd, stagingBuf, image, w, h);
+  transitionImageLayout(cmd, image, fmt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  end_async_cmd(cmd);
+  submit_async_upload(ctx, stagingBuf, stagingMem, cmd, loaded_flag);
+  return true;
+}
+
+static bool alloc_texture_image_mips(VulkanContext *ctx, uint32_t w, uint32_t h,
+                                     uint32_t mipLevels, VkFormat fmt,
+                                     VkImage *image, VkDeviceMemory *memory) {
+  *image = VK_NULL_HANDLE;
+  *memory = VK_NULL_HANDLE;
+  VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                           .imageType = VK_IMAGE_TYPE_2D,
+                           .extent = {w, h, 1},
+                           .mipLevels = mipLevels,
+                           .arrayLayers = 1,
+                           .format = fmt,
+                           .tiling = VK_IMAGE_TILING_OPTIMAL,
+                           .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                           .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                    VK_IMAGE_USAGE_SAMPLED_BIT,
+                           .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                           .samples = VK_SAMPLE_COUNT_1_BIT};
+  if (vkCreateImage(ctx->device, &ici, NULL, image) != VK_SUCCESS)
+    return false;
+  VkMemoryRequirements req;
+  vkGetImageMemoryRequirements(ctx->device, *image, &req);
+  VkDeviceSize offset;
+  if (!alloc_texture_vram(ctx, req, memory, &offset)) {
+    vkDestroyImage(ctx->device, *image, NULL);
+    *image = VK_NULL_HANDLE;
+    return false;
+  }
+  if (vkBindImageMemory(ctx->device, *image, *memory, offset) != VK_SUCCESS) {
+    free_texture_vram(*memory);
+    vkDestroyImage(ctx->device, *image, NULL);
+    *image = VK_NULL_HANDLE;
+    *memory = VK_NULL_HANDLE;
+    return false;
+  }
+  return true;
+}
+
+static bool alloc_texture_image(VulkanContext *ctx, uint32_t w, uint32_t h,
+                                VkFormat fmt, VkImage *image,
+                                VkDeviceMemory *memory) {
+  *image = VK_NULL_HANDLE;
+  *memory = VK_NULL_HANDLE;
+  VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                           .imageType = VK_IMAGE_TYPE_2D,
+                           .extent = {w, h, 1},
+                           .mipLevels = 1,
+                           .arrayLayers = 1,
+                           .format = fmt,
+                           .tiling = VK_IMAGE_TILING_OPTIMAL,
+                           .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                           .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                    VK_IMAGE_USAGE_SAMPLED_BIT,
+                           .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                           .samples = VK_SAMPLE_COUNT_1_BIT};
+  if (vkCreateImage(ctx->device, &ici, NULL, image) != VK_SUCCESS)
+    return false;
+  VkMemoryRequirements req;
+  vkGetImageMemoryRequirements(ctx->device, *image, &req);
+  VkDeviceSize offset;
+  if (!alloc_texture_vram(ctx, req, memory, &offset)) {
+    vkDestroyImage(ctx->device, *image, NULL);
+    *image = VK_NULL_HANDLE;
+    return false;
+  }
+  if (vkBindImageMemory(ctx->device, *image, *memory, offset) != VK_SUCCESS) {
+    free_texture_vram(*memory);
+    vkDestroyImage(ctx->device, *image, NULL);
+    *image = VK_NULL_HANDLE;
+    *memory = VK_NULL_HANDLE;
+    return false;
+  }
+  return true;
+}
+
+static bool finalize_texture_mips(VulkanContext *ctx, Texture2D *texture,
+                                  VkFormat fmt, VkSamplerAddressMode addrMode,
+                                  uint32_t mipLevels) {
+  VkImageViewCreateInfo vci = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = texture->image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = fmt,
+      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1}};
+  if (vkCreateImageView(ctx->device, &vci, NULL, &texture->view) != VK_SUCCESS)
+    return false;
+  VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                             .magFilter = VK_FILTER_LINEAR,
+                             .minFilter = VK_FILTER_LINEAR,
+                             .addressModeU = addrMode,
+                             .addressModeV = addrMode,
+                             .addressModeW = addrMode,
+                             .anisotropyEnable = VK_TRUE,
+                             .maxAnisotropy = 16.0f,
+                             .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+                             .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                             .minLod = 0.0f,
+                             .maxLod = (float)mipLevels,
+                             .mipLodBias = 0.0f};
+  if (vkCreateSampler(ctx->device, &sci, NULL, &texture->sampler) != VK_SUCCESS)
+    return false;
+  VkDescriptorSetAllocateInfo dai = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = ctx->descriptorPool2D,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &ctx->descriptorSetLayout2D};
+  if (vkAllocateDescriptorSets(ctx->device, &dai, &texture->descriptorSet) !=
+      VK_SUCCESS)
+    return false;
+  VkDescriptorImageInfo dii = {.imageLayout =
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               .imageView = texture->view,
+                               .sampler = texture->sampler};
+  VkWriteDescriptorSet wds = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                              .dstSet = texture->descriptorSet,
+                              .dstBinding = 0,
+                              .descriptorType =
+                                  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                              .descriptorCount = 1,
+                              .pImageInfo = &dii};
+  vkUpdateDescriptorSets(ctx->device, 1, &wds, 0, NULL);
+  if (texture->bindlessSlot == 0) {
+    texture->bindlessSlot = ctx->bindlessTextureCount++;
+  }
+  if (texture->status != TEXTURE_STATUS_UPLOADING) {
+    bindlessRegisterTexture(ctx, texture->bindlessSlot, texture->view,
+                            texture->sampler);
+  }
+  return true;
+}
+
+// Attach a view + sampler + descriptor set to a texture whose image is already
+// uploaded.
+static bool finalize_texture(VulkanContext *ctx, Texture2D *texture,
+                             VkFormat fmt, VkSamplerAddressMode addrMode) {
+  VkImageViewCreateInfo vci = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = texture->image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = fmt,
+      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+  if (vkCreateImageView(ctx->device, &vci, NULL, &texture->view) != VK_SUCCESS)
+    return false;
+
+  VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                             .magFilter = VK_FILTER_LINEAR,
+                             .minFilter = VK_FILTER_LINEAR,
+                             .addressModeU = addrMode,
+                             .addressModeV = addrMode,
+                             .addressModeW = addrMode,
+                             .anisotropyEnable = VK_TRUE,
+                             .maxAnisotropy = 16.0f, // AAA Texture Sharpness
+                             .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+                             .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR};
+  if (vkCreateSampler(ctx->device, &sci, NULL, &texture->sampler) !=
+      VK_SUCCESS) {
+    vkDestroyImageView(ctx->device, texture->view, NULL);
+    return false;
+  }
+
+  VkDescriptorSetAllocateInfo dai = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = ctx->descriptorPool2D,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &ctx->descriptorSetLayout2D};
+  if (vkAllocateDescriptorSets(ctx->device, &dai, &texture->descriptorSet) !=
+      VK_SUCCESS) {
+    vkDestroySampler(ctx->device, texture->sampler, NULL);
+    vkDestroyImageView(ctx->device, texture->view, NULL);
+    return false;
+  }
+
+  VkDescriptorImageInfo dii = {.imageLayout =
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               .imageView = texture->view,
+                               .sampler = texture->sampler};
+  VkWriteDescriptorSet wds = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                              .dstSet = texture->descriptorSet,
+                              .dstBinding = 0,
+                              .descriptorType =
+                                  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                              .descriptorCount = 1,
+                              .pImageInfo = &dii};
+  vkUpdateDescriptorSets(ctx->device, 1, &wds, 0, NULL);
+
+  /* Register into bindless array */
+  if (texture->bindlessSlot == 0) {
+    texture->bindlessSlot = ctx->bindlessTextureCount++;
+  }
+
+  if (texture->status != TEXTURE_STATUS_UPLOADING) {
+    bindlessRegisterTexture(ctx, texture->bindlessSlot, texture->view,
+                            texture->sampler);
+  }
+
+  return true;
+}
+
+static bool load_texture_from_pixels(VulkanContext *ctx, stbi_uc *pixels, int w,
+                                     int h, Texture2D *texture) {
+  if (!pixels)
+    return false;
+  VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
+  bool ok =
+      alloc_texture_image(ctx, w, h, fmt, &texture->image, &texture->memory) &&
+      upload_pixels_to_image(ctx, pixels, (VkDeviceSize)w * h * 4,
+                             texture->image, w, h, fmt,
+                             VK_IMAGE_LAYOUT_UNDEFINED, &texture->loaded) &&
+      finalize_texture(ctx, texture, fmt, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+  if (ok) {
+    texture->width = w;
+    texture->height = h;
+  }
+  return ok;
+}
+
+int32_t texture_pool_add_embedded(VulkanContext *ctx,
+                                  const char *virtual_filename,
+                                  unsigned char *data, size_t data_size) {
+  if (textureCount >= MAX_TEXTURES) {
+    fprintf(stderr, "Texture pool full!\n");
+    return -1;
+  }
+  if (load_texture_ex(ctx, virtual_filename, data, data_size,
+                      &texturePool[textureCount])) {
+    printf("  -> Successfully queued embedded texture #%u\n", textureCount);
+    return textureCount++;
+  }
+  return -1;
+}
+
+// --- SVG High-Performance Caching ---
+
+// Generates: ~/.cache/obsidian/svg/assets_icons_Close_svg_32x32.orgb
+/// get_svg_cache_path — implementation group
+static const char *get_svg_cache_path(const char *original_path, int w, int h) {
+  static char cache_path[512];
+  const char *home = getenv("HOME");
+  if (!home)
+    home = "."; // Fallback
+
+  char dir_path[512];
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache", home);
+  mkdir(dir_path, 0777);
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian", home);
+  mkdir(dir_path, 0777);
+  snprintf(dir_path, sizeof(dir_path), "%s/.cache/obsidian/svg", home);
+  mkdir(dir_path, 0777);
+
+  // Strip leading './' or '/' to avoid creating hidden files in Linux/Unix
+  const char *start = original_path;
+  while (*start == '.' && *(start + 1) == '/')
+    start += 2;
+  while (*start == '/')
+    start++;
+
+  // Flatten original path to make a safe filesystem name
+  char safe_name[256];
+  strncpy(safe_name, start, sizeof(safe_name) - 1);
+  safe_name[sizeof(safe_name) - 1] = '\0';
+  for (int i = 0; safe_name[i]; i++) {
+    if (safe_name[i] == '/' || safe_name[i] == '\\' || safe_name[i] == '.')
+      safe_name[i] = '_';
+  }
+
+  snprintf(cache_path, sizeof(cache_path), "%s/%s_%dx%d.orgb", dir_path,
+           safe_name, w, h);
+  return cache_path;
+}
+
+int32_t texture_pool_add_svg(VulkanContext *ctx, const char *filename,
+                             int width, int height) {
+  if (textureCount >= MAX_TEXTURES) {
+    fprintf(stderr, "Texture pool full! Cannot load SVG %s\n", filename);
+    return -1;
+  }
+
+  // Our deterministic key is the cache file path generated from the filename +
+  // resolution
+  const char *cache_file = get_svg_cache_path(filename, width, height);
+  size_t size = (size_t)width * height * 4;
+  VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
+
+  Texture2D *tex = &texturePool[textureCount];
+
+  // 1. Try blazing-fast ZERO-COPY binary cache read
+  if (alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory)) {
+    // Attempt to read from disk DIRECTLY into the mapped Vulkan staging buffer
+    if (upload_file_to_image_direct(ctx, cache_file, size, tex->image, width,
+                                    height, fmt, 0, &tex->loaded)) {
+      // UI Icons must use CLAMP_TO_EDGE, not REPEAT, to prevent edge bleeding!
+      if (finalize_texture(ctx, tex, fmt,
+                           VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)) {
+        fprintf(stdout,
+                "\033[32m[SVG] Cache Hit (ZERO-COPY to GPU): %s\033[0m\n",
+                cache_file);
+        tex->width = width;
+        tex->height = height;
+        return textureCount++;
+      }
+    }
+
+    // Cache miss or read failure: clean up the image to prepare for
+    // rasterization
+    vkDestroyImage(ctx->device, tex->image, NULL);
+    free_texture_vram(tex->memory);
+    tex->image = VK_NULL_HANDLE;
+    tex->memory = VK_NULL_HANDLE;
+  }
+
+  // 2. Cache Miss: Parse and Rasterize via NanoSVG
+  fprintf(stdout, "\033[33m[SVG] Cache Miss. Rasterizing: %s at %dx%d\033[0m\n",
+          filename, width, height);
+  unsigned char *pixels = malloc(size);
+  NSVGimage *image = nsvgParseFromFile(filename, "px", 96.0f);
+  if (!image) {
+    fprintf(stderr, "[SVG] Failed to parse SVG: %s\n", filename);
+    free(pixels);
+    return -1;
+  }
+
+  NSVGrasterizer *rast = nsvgCreateRasterizer();
+  if (!rast) {
+    nsvgDelete(image);
+    free(pixels);
+    return -1;
+  }
+
+  // Scale to fit target dimensions exactly while maintaining aspect ratio
+  float scale = MIN((float)width / image->width, (float)height / image->height);
+  float tx = (width - image->width * scale) * 0.5f;
+  float ty = (height - image->height * scale) * 0.5f;
+
+  memset(pixels, 0, size); // Clear to fully transparent
+  nsvgRasterize(rast, image, tx, ty, scale, pixels, width, height, width * 4);
+
+  nsvgDeleteRasterizer(rast);
+  nsvgDelete(image);
+
+  // 3. Save raw RGBA binary for instant loading next time
+  FILE *f = fopen(cache_file, "wb");
+  if (f) {
+    fwrite(pixels, 1, size, f);
+    fclose(f);
+  }
+
+  // 4. Upload to Vulkan using standard pixel upload
+  bool ok =
+      alloc_texture_image(ctx, width, height, fmt, &tex->image, &tex->memory) &&
+      upload_pixels_to_image(ctx, pixels, size, tex->image, width, height, fmt,
+                             VK_IMAGE_LAYOUT_UNDEFINED, &tex->loaded) &&
+      finalize_texture(ctx, tex, fmt, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+
+  free(pixels);
+
+  if (ok) {
+    tex->width = width;
+    tex->height = height;
+    return textureCount++;
+  }
+
+  return -1;
+}
+
+static bool load_texture_dds(VulkanContext *ctx, const char *filepath,
+                             Texture2D *texture) {
+  FILE *f = fopen(filepath, "rb");
+  if (!f)
+    return false;
+
+  uint32_t magic;
+  if (fread(&magic, 4, 1, f) != 1 || magic != DDS_MAGIC) {
+    fclose(f);
+    return false;
+  }
+
+  DDS_HEADER header;
+  fread(&header, sizeof(DDS_HEADER), 1, f);
+
+  uint32_t mipMapCount = header.dwMipMapCount > 0 ? header.dwMipMapCount : 1;
+  VkFormat format = VK_FORMAT_UNDEFINED;
+  uint32_t blockSize = 16;
+
+  if (header.ddspf.dwFourCC == 0x30315844) { // "DX10"
+    DDS_HEADER_DXT10 dx10;
+    fread(&dx10, sizeof(DDS_HEADER_DXT10), 1, f);
+    if (dx10.dxgiFormat == 98 || dx10.dxgiFormat == 99) {
+      format = VK_FORMAT_BC7_UNORM_BLOCK;
+      blockSize = 16;
+    } else if (dx10.dxgiFormat == 83 || dx10.dxgiFormat == 84) {
+      format = VK_FORMAT_BC5_UNORM_BLOCK;
+      blockSize = 16;
+    } else if (dx10.dxgiFormat == 77 || dx10.dxgiFormat == 78) {
+      format = VK_FORMAT_BC3_UNORM_BLOCK;
+      blockSize = 16;
+    } else if (dx10.dxgiFormat == 71 || dx10.dxgiFormat == 72) {
+      format = VK_FORMAT_BC1_RGB_UNORM_BLOCK;
+      blockSize = 8;
+    }
+  } else if (header.ddspf.dwFourCC == 0x35545844) { // "DXT5"
+    format = VK_FORMAT_BC3_UNORM_BLOCK;
+    blockSize = 16;
+  } else if (header.ddspf.dwFourCC == 0x31545844) { // "DXT1"
+    format = VK_FORMAT_BC1_RGB_UNORM_BLOCK;
+    blockSize = 8;
+  }
+
+  if (format == VK_FORMAT_UNDEFINED) {
+    fclose(f);
+    return false;
+  }
+
+  size_t dataOffset = ftell(f);
+  fseek(f, 0, SEEK_END);
+  size_t dataSize = ftell(f) - dataOffset;
+  fseek(f, dataOffset, SEEK_SET);
+
+  if (!alloc_texture_image_mips(ctx, header.dwWidth, header.dwHeight,
+                                mipMapCount, format, &texture->image,
+                                &texture->memory)) {
+    fclose(f);
+    return false;
+  }
+
+  VkBuffer stagingBuf;
+  VkDeviceMemory stagingMem;
+  VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                            .size = dataSize,
+                            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+  vkCreateBuffer(ctx->device, &bci, NULL, &stagingBuf);
+  VkMemoryRequirements req;
+  vkGetBufferMemoryRequirements(ctx->device, stagingBuf, &req);
+  VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                              .allocationSize = req.size,
+                              .memoryTypeIndex = findMemoryType(
+                                  ctx->physicalDevice, req.memoryTypeBits,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+  vkAllocateMemory(ctx->device, &mai, NULL, &stagingMem);
+  vkBindBufferMemory(ctx->device, stagingBuf, stagingMem, 0);
+
+  void *mapped;
+  vkMapMemory(ctx->device, stagingMem, 0, dataSize, 0, &mapped);
+  fread(mapped, 1, dataSize, f);
+  vkUnmapMemory(ctx->device, stagingMem);
+  fclose(f);
+
+  VkCommandBuffer cmd = begin_async_cmd(ctx);
+
+  VkImageMemoryBarrier barrier = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = texture->image,
+      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipMapCount, 0, 1},
+      .srcAccessMask = 0,
+      .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+                       &barrier);
+
+  VkBufferImageCopy *regions = malloc(mipMapCount * sizeof(VkBufferImageCopy));
+  uint32_t offset = 0;
+  uint32_t mipW = header.dwWidth;
+  uint32_t mipH = header.dwHeight;
+  for (uint32_t i = 0; i < mipMapCount; i++) {
+    regions[i] = (VkBufferImageCopy){
+        .bufferOffset = offset,
+        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1},
+        .imageExtent = {mipW, mipH, 1}};
+    uint32_t blocksW = (mipW + 3) / 4;
+    uint32_t blocksH = (mipH + 3) / 4;
+    offset += blocksW * blocksH * blockSize;
+    if (mipW > 1)
+      mipW /= 2;
+    if (mipH > 1)
+      mipH /= 2;
+  }
+  vkCmdCopyBufferToImage(cmd, stagingBuf, texture->image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipMapCount,
+                         regions);
+  free(regions);
+
+  barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
+                       NULL, 1, &barrier);
+
+  end_async_cmd(cmd);
+  submit_async_upload(ctx, stagingBuf, stagingMem, cmd, &texture->loaded);
+
+  if (finalize_texture_mips(ctx, texture, format,
+                            VK_SAMPLER_ADDRESS_MODE_REPEAT, mipMapCount)) {
+    texture->width = header.dwWidth;
+    texture->height = header.dwHeight;
+    return true;
+  }
+  return false;
+}
+
+bool load_texture_ex(VulkanContext *ctx, const char *filename,
+                     unsigned char *mem_data, size_t mem_size,
+                     Texture2D *texture) {
+  char dds_path[512];
+  strncpy(dds_path, filename, sizeof(dds_path) - 1);
+  char *ext = strrchr(dds_path, '.');
+  if (ext)
+    strcpy(ext, ".dds");
+
+  if (!mem_data && ext && load_texture_dds(ctx, dds_path, texture)) {
+    fprintf(stdout,
+            "\033[36m[TEXTURE] AAA Pipeline: Zero-Copy Local DDS Loaded -> "
+            "%s\033[0m\n",
+            dds_path);
+    texture->status = TEXTURE_STATUS_READY;
+    return true;
+  }
+
+  const char *dds_cache = get_texture_cache_path(dds_path, false);
+  if (ext && load_texture_dds(ctx, dds_cache, texture)) {
+    fprintf(stdout, "\033[32m[TEXTURE] Cache Hit (JIT DDS): %s\033[0m\n",
+            dds_cache);
+    texture->status = TEXTURE_STATUS_READY;
+    return true;
+  }
+
+  const char *cache_path = get_texture_cache_path(filename, false);
+  FILE *f = fopen(cache_path, "rb");
+  if (f) {
+    OtexHeader header;
+    if (fread(&header, sizeof(OtexHeader), 1, f) == 1 &&
+        header.magic == 0x5845544F) {
+      fclose(f);
+      fprintf(stdout, "\033[32m[TEXTURE] Cache Hit (ZERO-COPY): %s\033[0m\n",
+              cache_path);
+      if (alloc_texture_image(ctx, header.width, header.height, header.format,
+                              &texture->image, &texture->memory)) {
+        if (upload_file_to_image_direct(ctx, cache_path, header.data_size,
+                                        texture->image, header.width,
+                                        header.height, header.format,
+                                        sizeof(OtexHeader), &texture->loaded)) {
+          if (finalize_texture(ctx, texture, header.format,
+                               VK_SAMPLER_ADDRESS_MODE_REPEAT)) {
+            texture->width = header.width;
+            texture->height = header.height;
+            texture->status = TEXTURE_STATUS_READY;
+            return true;
+          }
+        }
+      }
+    } else {
+      fclose(f);
+    }
+  }
+
+  if (mem_data) {
+    int w, h, ch;
+    unsigned char *pixels = stbi_load_from_memory(mem_data, (int)mem_size, &w,
+                                                  &h, &ch, STBI_rgb_alpha);
+    if (!pixels)
+      return false;
+    bool ok = load_texture_from_pixels(ctx, pixels, w, h, texture);
+    stbi_image_free(pixels);
+    if (ok)
+      texture->status = TEXTURE_STATUS_READY;
+    return ok;
+  }
+
+  fprintf(stdout,
+          "\033[33m[TEXTURE] Cache Miss. Queueing Background Cook: %s\033[0m\n",
+          filename);
+
+  // Instant metadata parsing for Editor UI sizing
+  int w = 1, h = 1, ch;
+  if (stbi_info(filename, &w, &h, &ch)) {
+    texture->width = w;
+    texture->height = h;
+  } else {
+    texture->width = 1;
+    texture->height = 1;
+  }
+
+  texture->status = TEXTURE_STATUS_QUEUED_FOR_COOKING;
+
+  // Pre-allocate bindless slot to eliminate gray flickering
+  if (texture->bindlessSlot == 0) {
+    texture->bindlessSlot = ctx->bindlessTextureCount++;
+    bindlessRegisterTexture(ctx, texture->bindlessSlot, dummyWhiteTexture.view,
+                            dummyWhiteTexture.sampler);
+  }
+
+  int32_t tIdx = (int32_t)(texture - texturePool);
+
+  strncpy(texturePoolPaths[tIdx], filename, 511);
+  texturePoolIsRoughness[tIdx] = false;
+
+  pthread_mutex_lock(&cooker_mutex);
+  uint32_t next = (cooker_tail + 1) % MAX_COOKER_JOBS;
+  if (next != cooker_head) {
+    strncpy(cooker_queue[cooker_tail].filepath, filename, 511);
+    cooker_queue[cooker_tail].pool_index = tIdx;
+    cooker_queue[cooker_tail].is_roughness = false;
+    cooker_tail = next;
+    pthread_cond_signal(&cooker_cond);
+  }
+  pthread_mutex_unlock(&cooker_mutex);
+
+  return true;
+}
+
+bool load_texture(VulkanContext *ctx, const char *filename,
+                  Texture2D *texture) {
+  return load_texture_ex(ctx, filename, NULL, 0, texture);
+}
+
+void destroy_texture(VulkanContext *context, Texture2D *texture) {
+  if (texture->sampler)
+    vkDestroySampler(context->device, texture->sampler, NULL);
+  if (texture->view)
+    vkDestroyImageView(context->device, texture->view, NULL);
+  if (texture->image)
+    vkDestroyImage(context->device, texture->image, NULL);
+  if (texture->memory) {
+    free_texture_vram(texture->memory);
+    texture->memory = VK_NULL_HANDLE;
+  }
+
+  texture->sampler = VK_NULL_HANDLE;
+  texture->view = VK_NULL_HANDLE;
+  texture->image = VK_NULL_HANDLE;
+  texture->memory = VK_NULL_HANDLE;
+  texture->descriptorSet = VK_NULL_HANDLE;
+  texture->loaded = false;
+}
+
+/// 3D TEXTURES
+
+void renderer_shutdown() {}
+
+/// LINE
+
+// --- Line Renderer ---
+typedef struct {
+  uint32_t first;
+  uint32_t count;
+  float width;
+} LineBatch;
+static LineBatch lineBatches[128];
+static uint32_t lineBatchCount = 0;
+static float currentLineWidth = 2.0f;
+
+static Vertex *lineVertices;
+static size_t lineVertexCapacity;
+uint32_t lineVertexCount = 0;
+static VkBuffer lineVertexBuffer[MAX_FRAMES_IN_FLIGHT];
+static VkDeviceMemory lineVertexBufferMemory[MAX_FRAMES_IN_FLIGHT];
+static void *lineVertexBufferMapped[MAX_FRAMES_IN_FLIGHT];
+static uint64_t lineVertexBufferAddr[MAX_FRAMES_IN_FLIGHT];
+static size_t lineGpuCapacity[MAX_FRAMES_IN_FLIGHT];
+static bool lineUploadReady;
+
+void line_renderer_init(VkDevice dev, VkPhysicalDevice physDev,
+                        VkCommandPool cmdPool, VkQueue queue) {
+  device = dev;
+  physicalDevice = physDev;
+  commandPool = cmdPool;
+  graphicsQueue = queue;
+  lineUploadReady = false;
+}
+
+void line(vec3 start, vec3 end, Color color) {
+  if (lineVertexCount + 2 >= MAX_LINE_VERTICES)
+    return;
+
+  if (lineVertexCount + 2 > lineVertexCapacity) {
+    size_t capacity = lineVertexCapacity ? lineVertexCapacity * 2 : 64;
+    if (capacity > MAX_LINE_VERTICES) capacity = MAX_LINE_VERTICES;
+    Vertex *vertices = realloc(lineVertices, capacity * sizeof(Vertex));
+    if (!vertices) return;
+    memset(vertices + lineVertexCapacity, 0,
+           (capacity - lineVertexCapacity) * sizeof(Vertex));
+    lineVertices = vertices;
+    lineVertexCapacity = capacity;
+  }
+
+  if (lineBatchCount == 0 ||
+      fabsf(lineBatches[lineBatchCount - 1].width - currentLineWidth) > 0.01f) {
+    if (lineBatchCount >= 128)
+      return; // Safeguard
+    lineBatches[lineBatchCount].first = lineVertexCount;
+    lineBatches[lineBatchCount].count = 0;
+    lineBatches[lineBatchCount].width = currentLineWidth;
+    lineBatchCount++;
+  }
+
+  vec4 colorVec4 = {color.r, color.g, color.b, color.a};
+  vec3 normal = {0.0f, 1.0f, 0.0f}; // Default normal
+
+  // Add to line vertex buffer
+  glm_vec3_copy(start, lineVertices[lineVertexCount].pos);
+  glm_vec4_copy(colorVec4, lineVertices[lineVertexCount].color);
+  glm_vec3_copy(normal, lineVertices[lineVertexCount].normal);
+  glm_vec2_copy((vec2){0.0f, 0.0f}, lineVertices[lineVertexCount].texCoord);
+  lineVertexCount++;
+
+  glm_vec3_copy(end, lineVertices[lineVertexCount].pos);
+  glm_vec4_copy(colorVec4, lineVertices[lineVertexCount].color);
+  glm_vec3_copy(normal, lineVertices[lineVertexCount].normal);
+  glm_vec2_copy((vec2){0.0f, 0.0f}, lineVertices[lineVertexCount].texCoord);
+  lineVertexCount++;
+
+  lineBatches[lineBatchCount - 1].count += 2;
+}
+
+void line_set_width(float width) { currentLineWidth = width; }
+
+void line_renderer_upload() {
+  lineUploadReady = false;
+  if (lineVertexCount == 0)
+    return;
+  if (lineVertexCount > lineGpuCapacity[frame_index]) {
+    size_t capacity = lineGpuCapacity[frame_index]
+        ? lineGpuCapacity[frame_index] : 64;
+    while (capacity < lineVertexCount) capacity *= 2;
+    if (capacity > MAX_LINE_VERTICES) capacity = MAX_LINE_VERTICES;
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    void *mapped;
+    if (!create_mapped_buffer_checked(device, physicalDevice,
+          capacity * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+          &buffer, &memory, &mapped))
+      return;
+    VkBufferDeviceAddressInfo info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = buffer};
+    uint64_t address = vkGetBufferDeviceAddress(device, &info);
+    if (!address) {
+      vkUnmapMemory(device, memory);
+      vkDestroyBuffer(device, buffer, NULL);
+      vkFreeMemory(device, memory, NULL);
+      return;
+    }
+    /* obs_begin_frame has retired this frame slot before CPU submission. */
+    if (lineVertexBufferMapped[frame_index])
+      vkUnmapMemory(device, lineVertexBufferMemory[frame_index]);
+    if (lineVertexBuffer[frame_index])
+      vkDestroyBuffer(device, lineVertexBuffer[frame_index], NULL);
+    if (lineVertexBufferMemory[frame_index])
+      vkFreeMemory(device, lineVertexBufferMemory[frame_index], NULL);
+    lineVertexBuffer[frame_index] = buffer;
+    lineVertexBufferMemory[frame_index] = memory;
+    lineVertexBufferMapped[frame_index] = mapped;
+    lineVertexBufferAddr[frame_index] = address;
+    lineGpuCapacity[frame_index] = capacity;
+  }
+  memcpy(lineVertexBufferMapped[frame_index], lineVertices,
+         lineVertexCount * sizeof(Vertex));
+  lineUploadReady = true;
+}
+
+void line_renderer_draw(VkCommandBuffer cmd) {
+  if (lineVertexCount == 0 || !lineUploadReady)
+    return;
+
+  // Lines must allocate a dedicated unlit slot so they don't inherit
+  // transforms/materials from gl_DrawID 0 (which would be the first mesh in the
+  // scene)
+  Material oldMat = currentMaterial;
+  Material lineMat;
+  memset(&lineMat, 0, sizeof(Material));
+  lineMat.baseColorFactor[0] = 1.0f;
+  lineMat.baseColorFactor[1] = 1.0f;
+  lineMat.baseColorFactor[2] = 1.0f;
+  lineMat.baseColorFactor[3] = 1.0f;
+  lineMat.isUnlit = 1;
+  lineMat.alphaMode = 2;
+  lineMat.albedoIndex = -1;
+  lineMat.normalMapIndex = -1;
+  lineMat.metallicRoughIndex = -1;
+  lineMat.aoIndex = -1;
+  lineMat.emissiveIndex = -1;
+  set_material(&lineMat);
+
+  mat4 identity;
+  glm_mat4_identity(identity);
+  int slot = alloc_slot(identity);
+  if (slot < 0) {
+    set_material(&oldMat);
+    return;
+  }
+
+  // Write a dummy indirect command with 0 instances so the compute culler
+  // safely ignores it
+  VkDeviceSize drawSize = (16384 + 4096) * sizeof(VkDrawIndexedIndirectCommand);
+  VkDrawIndexedIndirectCommand *cmds =
+      (VkDrawIndexedIndirectCommand *)((uint8_t *)
+                                           context.srcIndirectBufferMapped +
+                                       (frame_index * drawSize));
+  cmds[slot].indexCount = 0;
+  cmds[slot].instanceCount = 0;
+  cmds[slot].firstIndex = 0;
+  cmds[slot].vertexOffset = 0;
+  cmds[slot].firstInstance = 0;
+
+  dynamic_draw_count++;
+  context.indirectDrawCount = (uint32_t)scene->meshes.count + dynamic_draw_count;
+
+  set_material(&oldMat);
+
+  extern uint64_t jointSSBOAddr[MAX_FRAMES_IN_FLIGHT];
+  extern uint64_t megaMorphBufferAddr;
+  extern uint64_t morphWeightAddr[MAX_FRAMES_IN_FLIGHT];
+  pushConstants.meshIndex = slot;
+  pushConstants.vertexBufferAddr = lineVertexBufferAddr[frame_index];
+  pushConstants.jointBufferAddr = jointSSBOAddr[frame_index];
+  pushConstants.morphBufferAddr = megaMorphBufferAddr;
+  pushConstants.morphWeightAddr = morphWeightAddr[frame_index];
+  vkCmdPushConstants(
+      cmd, context.pipelineLayout,
+      VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT |
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      0, sizeof(PushConstants), &pushConstants);
+
+  // Loop through batches and explicitly set the dynamic line width per batch!
+  for (uint32_t i = 0; i < lineBatchCount; i++) {
+    vkCmdSetLineWidth(cmd, lineBatches[i].width);
+    obs_profile_count_draw(&context, 1, lineBatches[i].count, 0);
+    vkCmdDraw(cmd, lineBatches[i].count, 1, lineBatches[i].first, 0);
+  }
+}
+
+void line_renderer_clear() {
+  lineUploadReady = false;
+  lineVertexCount = 0;
+  lineBatchCount = 0;
+  currentLineWidth = 2.0f;
+}
+
+void line_renderer_shutdown() {
+  for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    if (lineVertexBuffer[i]) {
+      vkUnmapMemory(device, lineVertexBufferMemory[i]);
+      vkDestroyBuffer(device, lineVertexBuffer[i], NULL);
+      vkFreeMemory(device, lineVertexBufferMemory[i], NULL);
+      lineVertexBuffer[i] = VK_NULL_HANDLE;
+      lineVertexBufferMemory[i] = VK_NULL_HANDLE;
+    }
+    lineVertexBufferMapped[i] = NULL;
+    lineVertexBufferAddr[i] = 0;
+    lineGpuCapacity[i] = 0;
+  }
+  free(lineVertices);
+  lineVertices = NULL;
+  lineVertexCapacity = 0;
+  line_renderer_clear();
+}

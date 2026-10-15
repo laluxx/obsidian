@@ -1,0 +1,24 @@
+;;; source-staging-contract.mon --- requires live Obsidian's Monad object space Observes the asynchronous file I/O boundary; NOT a native candidate proof.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract source-staging-contract
+
+;;; Commentary:
+
+source-staging-contract.mon — requires live Obsidian's Monad object space
+
+;;; Code:
+(define (source-staging-contract)
+  (and (>= (source-worker?) 0)
+       (<= (source-worker?) 1)
+       (>= (source-staged?) 0)
+       (<= (source-staged?) 1)
+       (or (= (source-worker?) 1) (= (source-staged?) 0))))
+
+(define (source-staging-observation)
+  (list (source-worker?)
+        (source-staged?)
+        (publish-queued)
+        (publish-coalesced)
+        (reload-phase)))

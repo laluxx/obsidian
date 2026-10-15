@@ -1,0 +1,142 @@
+#+TITLE: Obsidian M-x and key help
+#+STARTUP: overview
+
+=M-x= opens the shared Vertico selector. It lists every command registered
+with Monad's =defcommand= form, plus native and Monad actions available in the
+current keymap context (overriding map, local maps, then global map). Shadowed
+bindings are omitted; a declared command is not duplicated by its key binding.
+Selecting a declared command invokes its procedure. Selecting a key-bound
+native action invokes that action.
+
+The same selector surface handles =C-h k= key help, =C-h v= variable help,
+interactive text prompts, and file/scene-buffer completion. Marginalia label
+policies live in =modules/obsidian/marginalia.mon=; the host appends details
+with bounded formatting. Variable candidates show their inferred type, current
+value, and available documentation. Scene-buffer annotations report whether
+that glTF load used a validated OMDL cache hit, along with mesh/instance counts
+and the source path.
+
+The live Monad module owns the presentation options:
+
+| Variable | Default | Meaning |
+| =vertico-width= | =640= | Preferred width in pixels; clipped to the viewport margins. |
+| =vertico-count= | =10= | Maximum visible candidate lines; reduced only if the viewport cannot fit them. |
+| =vertico-position= | =0= | =0= places the selector at the bottom; =1= places it at the top. |
+| =vertico-scroll-margin= | =4= | Rows to keep below the selection before Vertico scrolls; clamped to the visible row count. |
+| =vertico-resize-fixelwise= | =f= | =f= snaps header dragging to full line heights; =t= resizes pixel by pixel. |
+| =vertico-cycle= | =0= | Nonzero enables next/previous wrapping at the list ends. |
+
+Change them in the Monad REPL or editor module, for example:
+
+#+begin_src monad
+(set! vertico-width 720)
+(set! vertico-count 12)
+(set! vertico-position 1)
+(set! vertico-scroll-margin 4)
+(set! vertico-resize-fixelwise t)
+#+end_src
+
+The renderer reads the compiled option cells at activation; it does not run
+Monad evaluation in the frame loop. Drag the Vertico header to grow or shrink
+the candidate area; the default resize mode changes only after each complete
+line-height of pointer movement.
+
+The project root =init.mon= is loaded after the built-in editor commands and
+keymaps. Put project-specific options and bindings there. The built-in
+keymap and command definitions live in =modules/obsidian/editor.mon=;
+=modules/obsidian/language.mon= supplies the interactive command vocabulary.
+Use =defcommand= to declare a named interactive Monad procedure:
+
+#+begin_src monad
+(defcommand greet (name -> String) (interactive "sName: ")
+  name)
+#+end_src
+
+The supported interaction codes are =p= (numeric prefix, default 1), =P=
+(numeric prefix or nil), =r= (active editor region as two buffer offsets),
+=s= (string), =n= (strict integer), =b= (existing buffer name), =B= (buffer
+name or arbitrary string), and =f= (file path). Text arguments use the shared
+Vertico reader. Scene documents are the current engine's buffers; =C-x b=
+selects an open scene and =C-x f= opens a scene file from the current working
+directory.
+Filesystem tree expansion and search snapshots live in Monad's
+=filesystem-tree-state=; the selected row is =filesystem-tree-selected-index=.
+Monad transitions handle expand/collapse, search expansion, and restoring the
+pre-search tree. The native host supplies filesystem paths, directory scans,
+row drawing, pointer hit testing, and file activation.
+=C-s= opens filesystem search and expands a collapsed tree panel so the results
+remain visible; =C-g= cancels search and restores the saved tree state. The
+filesystem tree starts at =./assets= when present and falls back to the working
+directory when that project folder is absent.
+Native C actions remain invokable through active key bindings; they do not
+have separate unbound interactive declarations.
+
+=C-h k= opens key help for the current context. It shows effective bindings
+with override/local/frame/global precedence and no shadowed chords. =C-h c=
+remains an alias. =C-h v= lists live Monad variables with type and value
+annotations.
+
+Transform commands are also Monad keymap bindings. =g= starts translation;
+=g x 2= constrains the active transform to X and snaps motion in 2-meter
+steps. =g 1= selects 1-meter translation snapping. =g 0= moves the active
+object origin to world zero. =C-g= cancels an active transform and restores
+its pre-transform state. =f= smoothly frames the current selection while
+preserving the camera's view direction on the first press.
+
+=C-x 5 2= creates an animated editor frame; =C-x 5 0= closes the current
+non-primary frame; =C-x 5 1= closes other frames; =C-x 5 o= focuses the next
+frame; =C-x 5 b/f= selects or opens a scene in a new frame. Each frame keeps
+its camera, scene-buffer selection, workspace panels, and frame-local =C-g=
+binding. =C-g= or the window close button starts the close transition; the
+frame keymap is released when the frame is destroyed. The primary window
+continues to own application shutdown.
+
+Monad libraries can open focused 2D tool windows. =window-open!= takes a
+title, pixel width and height (each 64–4096), a one-argument draw procedure,
+and a seven-argument input procedure; it returns an =ObsidianMonadWindow=
+capability. Keep that capability to close the window with =window-close!=.
+Every frame calls the draw procedure with the capability. Draw operations are
+valid only during that window's draw callback:
+
+#+begin_src monad
+(define (tool-draw window)
+  (window-background! window 0.06 0.08 0.12 1.0)
+  (window-rect! window 12.0 12.0 96.0 48.0 0.9 0.2 0.1 1.0)
+  (window-circle! window 150.0 38.0 18.0 0.2 0.8 0.4 1.0)
+  (window-line! window 12.0 80.0 190.0 80.0 0.2 0.5 1.0 1.0)
+  (window-text! window "Tool window" 12.0 112.0 1.0 1.0 1.0 1.0))
+
+(define (tool-input window event code action mods x y)
+  (if (and (equal? event "key") (= code 256))
+      (window-close! window)
+      0))
+
+(define tool-window
+  (window-open! "My tool" 480 320 tool-draw tool-input))
+#+end_src
+
+Drawing coordinates start at the top-left; text's =y= is its baseline. All
+colors are RGBA components in =[0,1]=. =window-rect!= takes =x y width height
+r g b a=; =window-circle!= takes =center-x center-y radius r g b a=;
+=window-line!= takes =x1 y1 x2 y2 r g b a=; and =window-text!= takes text,
+=x y r g b a=.
+
+Input is delivered only while that tool window is selected. The callback's
+arguments are =(window event code action mods x y)=. Event names are ="key"=,
+="char"=, ="mouse-button"=, ="mouse-move"=, and ="scroll"=. Key and mouse
+actions use GLFW press/release/repeat values; =mods= is the GLFW modifier
+bitmask. Mouse positions are framebuffer pixels from the top-left. For
+=scroll=, =x= and =y= hold the horizontal and vertical offsets. For
+=mouse-move=, =code=, =action=, and =mods= are zero; unused fields for other
+events are also zero.
+
+The editor source bundle loads =monad/obsidian/widgets.mon=, a Monad-owned
+vertical row toolkit. =widget-label= creates a non-interactive text row;
+=widget-button= creates a selectable row with an application action ID and
+label. =widget-render!= draws the rows and highlights the selected button
+index. The toolkit also exposes row height, inset, and RGBA color variables for
+custom Monad layouts. Store focus and application state in Monad; handle
+keyboard and mouse events in the tool's Monad input callback, then call the
+window drawing primitives or =widget-render!= from its draw callback. Action
+IDs are data for the application callback to dispatch; C supplies only the
+window, renderer and platform input delivery.

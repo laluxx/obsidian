@@ -1,0 +1,55 @@
+#+TITLE: Obsidian — Embedded Monad Incremental Cycle 19
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Optimize the host callback binding hot path while removing its remaining
+keymap-allocation failure window. Preserve a single Monad-owned scripting
+runtime; do not duplicate QTT or JIT semantics in C.
+
+* DONE Changes
+
+- =src/platform/keychords.[ch]=: privately prepared keymap images, checked
+  generation swap, single-pass script-binding removal, stack-only notation
+  parser, allocation-prepared direct Monad binding updates.
+- =src/monad/live_binding_txn.[ch]=: prepared transaction completion with
+  distinct preparation failure and post-preparation commit hooks.
+- =src/monad/bindings.c=: uses prepared image commit; frame callback is
+  installed at the same owner-thread checkpoint; adds
+  =(binding-commits)= and =(binding-rejections)= diagnostics.
+- =modules/obsidian/live-publication.mon=: Monad language helper
+  =(binding-publication-health)=.
+- =tests/native/keymap_image.c= executes the real platform implementation
+  with isolated interface fixtures, plus optional microbenchmark.
+- =tests/native/live_binding_txn.c= extends the journal regressions.
+- =Makefile=: runs keymap image tests in =make test=; adds =bench-keymap=.
+- New design document =docs/HOST-CALLBACK-IMAGES.org=.
+
+* Verification
+
+- =make test-native=: PASS (all available native components).
+- =make test MONADC_ROOT=/mnt/data/obsidian_cycle18_work/sdk=: PASS,
+  including SDK-compatible double tests; live Monad runner skipped.
+- Real keymap implementation: 10,000 replacement/abort cycles PASS.
+- Journal: 100,000 prior cases + prepared commit/rejection cases PASS.
+- ASan/UBSan standalone keymap/journal tests PASS.
+- =make bench-keymap=: local O2 microbenchmark in the architecture doc.
+- Real Monad JIT/game window/GPU/physics runtime NOT verified.
+
+* Limitations
+
+No independent native candidate API in the provided SDK. A successful native
+publication can precede host image preparation failure; therefore the
+compiler/host pair is still not an atomic transaction. Our host swap avoids
+allocations but old callback cleanup may execute runtime release hooks.
+
+* Next
+
+1. Compiler candidate compilation, contract validation and commit with host
+   resource preflight *before* publication; engine must not fake a compiler
+   image or proof.
+2. Real compiler + Vulkan runtime callback swap test; ASan/TSan, fault
+   injection and sustained frame-time measurements.
+3. Micro-optimize per-frame foreign scalar conversions and batched scene
+   iteration using genuine performance profiles, not microbench guesses.

@@ -1,0 +1,88 @@
+#+TITLE: Obsidian — Cycle 28: Versioned OMDL Envelope and Cache Integrity
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+Cycle 28 is a changed-files-only overlay on the complete Cycle 27 worktree.
+It implements a *portable v2 envelope* (not a portable mesh representation)
+with content identity, ABI gating and streaming CRC64 validation before any
+cached geometry reaches the renderer. Old OMDL files recook automatically.
+
+* Changes
+
+** Portable envelope and checksums
+
+- =src/assets/omdl_cache.[ch]= implements 64-byte little-endian headers,
+  checked length/source/ABI/version/reserved fields, bounded streaming
+  payload checksumming and exact trailing-byte rejection.
+- The existing OMDL native array payload is retained. The native-ABI
+  signature covers element sizes and selected alignment/offset/endianness
+  descriptors, preventing known incompatible layouts from loading.
+- Incompatible, stale or corrupted caches are ordinary cache misses.
+  A failed cache writer still preserves the previously published cache via
+  the Cycle 27 temporary-file/rename protocol.
+- CRC64-ECMA lookup-table implementation replaces bit-at-a-time CRC in the
+  cache codec's hot integrity path; all tables are immutable constants.
+
+** Source-content identity
+
+- The glTF/GLB document is hashed before parsing and after decoded buffers
+  load, allowing a rewrite during the parse interval to disable cache use.
+- The source digest includes the glTF document and all decoded cgltf buffers,
+  not just mesh/node counts or modification timestamps.
+- External texture files remain independently managed by texture loading.
+
+** Tooling and tests
+
+- Expanded =tests/native/omdl_cache.c=: 2,000 v2 round trips; altered source,
+  ABI, payload, version, reserved bytes, malformed counts after recomputing
+  checksum, short/extended files, legacy v1 file and changed source file.
+- =make test= runs these as part of =test-native=.
+- New =make bench-omdl-digest= uses 8 MiB pseudorandom data and three
+  iterations per method at GCC =-O3=, checking CRC equivalence.
+- The loader keeps the native scene graph, not the temporary =cgltf_data=,
+  and frees parsed glTF data after cache-hit and cache-miss paths.
+
+* Evidence
+
+- =make test-native=: PASS on the available headless C tests.
+- =make test=: PASS for available native and tooling tests; SDK/real
+  MonadC/Vulkan integrations reported SKIP, not PASS.
+- OMDL codec =-fsanitize=address,undefined= with leak detection: PASS.
+- CPU-only CRC64 microbenchmark: 78.0 MiB/s reference bitwise versus
+  318.8 MiB/s table-driven (4.09x) in this container. This is NOT engine
+  frame time, file I/O throughput or a general cross-hardware guarantee.
+- Local rerun of =make bench-omdl-digest=: 144.3 MiB/s reference versus
+  461.0 MiB/s table-driven (3.19x) in this container. This varies from the
+  original run and remains a microbenchmark, not engine frame or disk I/O.
+- =make test-native= and =make test=: PASS; Monad and live-frame integration
+  runners were explicitly skipped because none were configured.
+- Full Vulkan/Jolt engine build: PASS after correcting the stale
+  =GLTFInstance.gltf_data = cgltf_data*= assignment exposed by compilation.
+- Startup smoke initialized Vulkan on an NVIDIA GeForce RTX 3060, editor
+  systems, and Jolt; it was stopped after 10 seconds. No OMDL glTF
+  cache-hit/miss load path ran during that smoke.
+- Live cached/uncached scene parity: NOT VERIFIED.
+
+* Remaining correctness/engineering work
+
+1. A genuinely portable v2+ payload needs field-wise schemas; native struct
+   serialization remains tied to the matching ABI.
+2. GPU upload reservations are still append-only and not rolled back on
+   late upload failure. No allocation transaction is claimed.
+3. An external writer could mutate an already opened cache inode after
+   checksum verification; immutable snapshots remain necessary.
+4. External texture cache/source data need independent content checking.
+5. Run complete Vulkan glTF cache-hit/miss parity, fault injection, golden
+   skin/morph/animation scenes and measured memory/VRAM usage.
+6. File/ABI/cache digests are non-cryptographic: no adversarial authenticity
+   guarantee is claimed.
+
+* Next
+
+- Replace native payload structs with explicit portable per-field codecs.
+- Add checked immutable geometry source snapshots or GPU upload rollback
+  through renderer-owned reservations, without exposing raw GPU handles to
+  Monad scripts.
+- Prove native/Vulkan runtime and QTT foreign-object lifetimes end to end.

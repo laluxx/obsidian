@@ -1,0 +1,199 @@
+#+TITLE: Obsidian x Monad embedding — cycles 1–3 contract
+#+STARTUP: overview
+
+* Source and API
+
+The bridge takes its lifecycle, dynamic binding, and host reference conventions
+from Glemax's =monad_host.c=, =monad_image.c= and =lispcore.c=.  It uses the
+MonadC embed API directly: there is no invented Lua/Scheme/Elisp layer.
+
+- C exports =obs_monad_engine_start/stop/ready= and source/file loaders.
+- Boot environment variable: =OBSIDIAN_MONAD_BOOT=.
+- F5 queues a configured module reload; the event loop performs the work
+  after GLFW callback dispatch. This still synchronously stalls the loop.
+  Do not use this in production yet.
+- The direct native symbol =obsidian_camera_step_mm= is looked up with
+  =monad_find_i64_function= after a published module is loaded.
+- Host references: =obsidian.scene=, =obsidian.camera= and
+  =obsidian.node= (borrowed, opaque). Node refs expire on topology edits.
+- Thread rule: engine event-loop thread only.
+- Lifetime rule: generation increment on every runtime start; old foreign
+  values are rejected after shutdown/reopen.
+- Key dispatch: =obs-bind-key= stores a retained Monad procedure in the
+  existing keymap.  On close, the host unbinds Monad-owned closures before
+  freeing the object space.
+
+* Foreign operations (cycle 1)
+
+| Monad binding            | Arity | Contract                           |
+|--------------------------+-------+------------------------------------|
+| obs-engine-api-version   |     0 | Host ABI number                    |
+| obs-current-scene        |     0 | Borrow a Scene foreign object      |
+| obs-scene-node-count     |     1 | Read bounded node count            |
+| obs-scene-node-name      |     2 | Read node name by index            |
+| obs-scene-node-parent    |     2 | Read parent node index             |
+| obs-scene-node-visible?  |     2 | Read scene hierarchy UI visibility |
+| obs-current-camera       |     0 | Borrow a Camera foreign object     |
+| obs-camera-x/y/z         |     1 | Read camera position components    |
+| obs-camera-speed         |     1 | Read camera movement speed         |
+| obs-camera-set-position  |     4 | Finite bounded Float position      |
+| obs-camera-set-speed     |     2 | Finite nonnegative Float speed     |
+| obs-bind-key             |     2 | Bind compiled Monad procedure      |
+| obs-unbind-key           |     1 | Unbind Monad-owned chord only      |
+
+* Live demo
+
+From Obsidian root directory with MonadC built alongside:
+
+#+begin_src sh
+OBSIDIAN_MONAD_BOOT=monad/obsidian/live-demo.mon ./obsidian
+#+end_src
+
+Press =C-M-<right>= to execute the compiled native
+=obsidian_camera_step_mm : Int -> Int= policy, applying its millimetre step
+to the legacy camera.  This direct ABI path is based on Glemax host tests.
+The =obs-bind-key= dynamic object-space bridge exists in source but is NOT
+yet proven callable from compiled Monad modules.  Do not conflate the two.
+Edit =monad/obsidian/live-demo.mon= then press F5 to attempt live reload.
+Reload state can be queried in C through =obs_monad_engine_reload_report=;
+scripts may request reload with =obs-monad-request-reload= and check
+=obs-monad-reload-state= (0 never, 1 published, 2 failed).
+
+* Monad tests
+
+Monad test modules are in =tests/monad/=.
+=native-camera-policy.mon= exercises the verified Glemax-style compiled
+Int -> Int ABI; the foreign-object tests target the dynamic host API and
+still require a compatible compiled/live image integration.  The next cycle must connect
+them to an automated in-engine test runner and verify all outcomes including
+reloads and invalid/stale handle rejection.  They are not claimed to pass.
+
+* Constraints
+
+Do not call Monad from a miniaudio callback or Vulkan driver callback.  No
+runtime reflection on per-vertex or per-audio-sample hot paths.  Mutation is
+bounded and issued on the owning engine thread; cross-thread events will need
+an explicit mailbox.  Any expanded FFI must specify ownership and effects.
+
+* Cycle 2 host operations
+
+| Binding                     | Arity | Ownership and effect              |
+|-----------------------------+-------+-----------------------------------|
+| obs-scene-node              | 2     | Borrow opaque Node by index       |
+| obs-node-index/name/parent  | 1     | Read live Node, reject stale      |
+| obs-node-first-child        | 1     | Read first child index            |
+| obs-node-visible?           | 1     | Read UI hierarchy visibility      |
+| obs-node-set-visible        | 2     | Write UI visibility only          |
+| obs-scene-mesh-count        | 1     | Read scene mesh count             |
+| obs-scene-sdf-count         | 1     | Read scene SDF count              |
+| obs-camera-yaw/pitch        | 1     | Read current angles               |
+| obs-camera-set-angles       | 3     | Validate both and update          |
+| obs-camera-translate        | 4     | Atomic bounded XYZ delta          |
+| obs-key-down?               | 1     | Read last sampled key state       |
+| obs-mouse-down?             | 1     | Read last sampled mouse state     |
+| obs-cursor-x/y              | 0     | Read pointer coordinates          |
+| obs-frame-delta-ms          | 0     | Read frame delta (Int ms)         |
+| obs-monad-request-reload    | 0     | Enqueue boot module reload        |
+| obs-monad-reload-state      | 0     | Read coarse publication status    |
+
+* Runtime antialiasing control
+
+The renderer capability returned by =render= exposes =render-antialiasing=
+and =render-antialiasing!=. The getter returns =nil= for 1x/off or the active
+integer sample count. The setter accepts only =nil=, =2=, =4=, or =8=; it
+rejects invalid counts and modes unsupported by any active window's color and
+depth formats. A successful change waits for device work to quiesce, rebuilds
+sample-dependent pipelines and per-window attachments, then affects the next
+recorded frame. The setter is owner-thread-only and forbidden during module
+publication. It may block while the GPU becomes idle; this is a correctness
+transition, not a frame-time-free operation.
+
+#+begin_src monad
+(define render-controls (render))
+(render-antialiasing! render-controls 4)
+(render-antialiasing render-controls) ; => 4
+(render-antialiasing! render-controls nil)
+#+end_src
+
+The multisample color target resolves to the presentable image. A multisample
+depth target resolves with =MAX= into the existing single-sample depth image,
+which remains the HZB input. Transparent and UI passes load and resolve the
+same multisample targets. Shadow rendering remains 1x. No driver-side
+downgrade is reported as success.
+
+** Structural lifetime contract
+
+The engine's SceneTree stores SceneNode objects in a compacted fixed array.
+Deletion may swap the final node into a removed position. Any raw SceneNode*
+held by a script would therefore risk silently referring to the wrong node.
+=scene_tree_bump_revision= is called on scene init/cleanup, node append and
+editor node removal, and monotonically changes across resets. The dynamic
+=obsidian.node= foreign reference carries this revision along with runtime
+identity. Calls check the tag, epoch and membership in the current node
+array before reading or mutating. Handles expire conservatively even on an
+unrelated node append. A future stable entity-ID registry can reduce this.
+
+** Reload checkpoint and limitations
+
+The engine's example =beginFrame= path now polls events and processes pending
+reload work *before* calling =obs_begin_frame=. Embedders using the lower-level
+=obs_begin_frame= must call =obs_poll_events= themselves. No compile occurs
+from a GLFW callback, but the checkpoint is synchronous and can stall frame
+latency. Calls from audio, GPU driver and foreign threads remain unsupported.
+An unsuccessful module publication disables previously resolved native symbol
+addresses; this is *not* transactional rollback of a live image. Rebinding
+native symbols and retained closures requires integration stress tests.
+
+** Native vs dynamic Monad boundary
+
+=monad/obsidian/gameplay.mon= and =tests/monad/native-gameplay-policy.mon=
+use native Monad =(module Main)= and typed =Int -> Int= definitions.
+Other experimental =monad/obsidian/= files address the object-space
+procedures and are not claimed executable through native module compilation.
+The required native/dynamic bridge remains OBS-C005/OBS-C012. These examples
+must not be mistaken for a new application-specific Scheme interpreter or
+for evidence of compiler-level host object support.
+
+* Cycle 3: shared capability registry and resource foreign objects
+
+=foreign.[ch]= owns dynamic host registration, owner-thread enforcement and
+reference validation. Legacy scene/camera/input callbacks remain registered
+by their original tables until runtime compatibility is demonstrated; new
+subsystems use =obs_host_register=. All object identities remain *borrowed*:
+
+| Type                       | Lifetime                                 | Operations |
+|----------------------------+------------------------------------------+------------|
+| =obsidian.mesh=            | mesh array structural revision + runtime | scene-mesh, mesh-index/name/visible?/set-visible/material-index |
+| =obsidian.sdf=             | SDF array structural revision + runtime  | scene-sdf, sdf-type/roughness/metallic/set-material |
+| =obsidian.gltf-instance=   | instance array structural revision       | scene-gltf[-count], gltf-mesh-start/count, gltf-animation-count/joint-count |
+| =obsidian.render-policy=   | engine runtime generation                | render-policy, render-ao?/ibl?/culling-frozen? |
+
+Callbacks compare foreign pointer *values* with addresses in the current
+live array, after checking tags and epochs. They do not dereference script
+pointers. Structural changes invalidate all borrowed handles for the affected
+array, including unchanged elements. SDF material updates validate both
+values before writing and use the existing =flushSdfSSBO= path. Mesh
+visibility updates mark the corresponding GPU slot dirty. The renderer
+capability gives no access to device memory, synchronization, pipelines,
+shader compilation or Vulkan dispatch.
+
+New façade examples =monad/obsidian/assets.mon= and =render.mon= are
+experimental; =tests/monad/foreign-resources-contract.mon= is a *Monad*
+contract suite, not a passing test run. As of Cycle 3, compiled MonadC's
+ability to resolve dynamic object-space procedures remains unverified.
+
+* Applying an incremental cycle
+
+From the directory *containing* the local =obsidian/= folder:
+
+#+begin_src sh
+# Extract newer files over your already-merged Cycle 2 tree.
+tar -xzf obsidian-monad-cycle3-incremental-20261011.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE3-MANIFEST.sha256
+#+end_src
+
+The patch does not delete files. If an old generated
+=obsidian/tests/font-unicode= ELF is present, remove it manually only if you
+intend to regenerate that local test program. No cleanup command is performed
+by archive extraction.

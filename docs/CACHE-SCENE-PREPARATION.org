@@ -1,0 +1,46 @@
+#+TITLE: Obsidian — Cache-hit scene preparation and publication boundary
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Invariants
+
+1. Reading the cache header or material metadata must not append a live mesh.
+2. Prepared mesh records own their =name= and morph-weight allocations until
+   scene publication (move) or explicit disposal.
+3. GPU geometry base offsets are not valid while source data is being staged.
+4. Both the mesh array and its draw-index array must be reserved before GPU
+   work; a single allocation failure changes neither live pointer.
+5. A cache load's parent-first node order and runtime animation scratch are
+   allocated and validated before GPU submission.
+6. Only confirmed GPU completion permits texture resolution and final live
+   scene append. The last append performs no allocations and is a single
+   structural scene revision event.
+7. No result from these C-side checks is a QTT proof. The Monad compiler
+   continues to own language-level resource and lifetime certifications.
+
+* Current dependency boundary
+
+#+begin_example
+cgltf parse and buffer load
+  -> OMDL v2 cache and graph validation
+  -> cache-hit mesh staging + reserved scene array capacity
+  -> checked synchronous Vulkan geometry transfer
+  -> patch GPU addresses, resolve cached texture pool entries
+  -> allocation-free mesh batch append, construct live GLTFInstance/tree
+#+end_example
+
+=ObsPendingSceneLoad= remains a separate owner for a truly private asynchronous
+payload. The present =load_gltf= does NOT yet construct such a payload: texture
+and physics subsystems still have global state and the animation/UI tree is
+published through legacy code.
+
+* Required next gates
+
+- Stage texture/descriptor allocations and physics bodies privately and add
+  failure-atomic cancellation.
+- Provide one allocator authority between the legacy mega-buffer appenders
+  and pending GPU reservations.
+- Prepare a complete candidate (including final tree/instance storage) before
+  asynchronous submission, then commit only at the engine safe point.
+- Verify Vulkan fences, resource retirement, malformed glTF and missing fonts/
+  textures, repeated cache hits/misses, and QTT-scoped scene foreign handles.

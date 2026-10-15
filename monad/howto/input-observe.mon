@@ -1,0 +1,30 @@
+;;; input-observe.mon --- sample pointer position once per frame, no chords
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto input-observe
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/input-observe.mon ./obsidian
+Read-only input: cursor coordinates are host-sampled state, never an
+event stream. Key chords belong to bind-key!; see key-command.mon.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (observe-frame f)
+  (begin
+    (list (cursor-x) (cursor-y) (frame-number f))
+    True))
+
+(on-frame! observe-frame)

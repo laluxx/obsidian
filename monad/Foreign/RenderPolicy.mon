@@ -1,0 +1,33 @@
+;;; RenderPolicy.mon --- Foreign methods for high-level renderer policy
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign renderer
+
+;;; Code:
+
+module Foreign.RenderPolicy
+  [RenderPolicy ◯ current ao? ibl? culling-frozen? ao! ibl! culling-frozen!]
+
+type ◯ :: {RenderPolicy}
+
+define current :: IO ◯
+  (obs-render-policy)
+
+method ao? :: ◯ -> Bool
+  policy -> render-ao? policy
+
+method ibl? :: ◯ -> Bool
+  policy -> render-ibl? policy
+
+method culling-frozen? :: ◯ -> Bool
+  policy -> render-culling-frozen? policy
+
+method ao! :: ◯ -> Bool -> ()
+  policy enabled -> render-ao! policy enabled
+
+method ibl! :: ◯ -> Bool -> ()
+  policy enabled -> render-ibl! policy enabled
+
+method culling-frozen! :: ◯ -> Bool -> ()
+  policy frozen -> render-culling-frozen! policy frozen

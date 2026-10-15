@@ -1,0 +1,22 @@
+Cycle 61 applied files:
+
+Makefile
+README.md
+TODO.org
+docs/CYCLE61-PATCH-FILES.txt
+docs/CYCLE61-REPORT.org
+docs/CYCLE60-REPORT.org
+src/editor/add_menu.c
+src/editor/editor.c
+src/editor/sdf_appearance_clipboard.c
+src/editor/sdf_appearance_clipboard.h
+src/graphics/renderer.h
+src/monad/sculpt_api.c
+src/platform/input.c
+src/scene/sdf_inspector.c
+src/scene/sdf_inspector.h
+src/scene/sdf_sculpt.c
+src/scene/sdf_sculpt.h
+tests/fixtures/agent_engine_contract.h
+tests/native/sculpt_api.c
+tests/native/sdf_appearance_clipboard.c

@@ -1,0 +1,39 @@
+;;; animate-mesh.mon --- Rotate the first live scene mesh at a frame-rate-independent rate.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto animate-mesh
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm delta_millipixels)
+  delta_millipixels)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  delta_millipixels * 10)
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  delta_millipixels * 10)
+
+(define (animate-first-mesh f)
+  (if (> (mesh-count (scene)) 0)
+      (begin
+        (transform-rotate! (transform (mesh 0))
+                           0.0 1.0 0.0 (* (frame-delta f) 0.6))
+        True)
+      True)
+  True)
+
+| TODO
+define animate-first-mesh :: Mesh -> ()
+  f | > (mesh-count (scene)) 0 ->
+    transform-rotate! (transform (mesh 0))
+      0.0 1.0 0.0 ((frame-delta f) * 0.6) _-> ()
+
+
+(on-frame! animate-first-mesh)

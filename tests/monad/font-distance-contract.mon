@@ -1,0 +1,23 @@
+;;; font-distance-contract.mon --- MSDF median identity in typed Monad, independent of Vulkan.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract font-distance-contract
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+(module Main)
+(define (msdf-min [a : Int] [b : Int] -> Int)
+  (if (< a b) a b))
+(define (msdf-max [a : Int] [b : Int] -> Int)
+  (if (> a b) a b))
+(define (msdf-median [a : Int] [b : Int] [c : Int] -> Int)
+  (msdf-max (msdf-min a b) (msdf-min (msdf-max a b) c)))
+(define (msdf-test-sorted [unused : Int] -> Int)
+  (if (and (= (msdf-median 1 2 3) 2)
+           (= (msdf-median 3 1 2) 2)
+           (= (msdf-median 2 3 1) 2)
+           (= (msdf-median 7 7 1) 7)) 1 0))

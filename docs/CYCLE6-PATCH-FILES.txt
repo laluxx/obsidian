@@ -1,0 +1,26 @@
+# Apply on top of Cycle 5; no deletions required.
+Makefile
+README.md
+TODO.org
+docs/CYCLE6-REPORT.org
+docs/LANGUAGE.org
+modules/obsidian/assets.mon
+modules/obsidian/camera.mon
+modules/obsidian/language.mon
+modules/obsidian/live-world.mon
+modules/obsidian/render.mon
+modules/obsidian/scene.mon
+src/editor/editor.c
+src/graphics/font.c
+src/graphics/font.h
+src/monad/asset_api.c
+src/monad/bindings.c
+src/monad/camera_api.c
+src/monad/input_api.c
+src/monad/mesh_api.c
+src/monad/render_api.c
+src/monad/scene_api.c
+src/monad/sdf_api.c
+tests/monad/cycle6-error-contract.mon
+tests/monad/cycle6-language-contract.mon
+tests/monad/cycle6-macro-contract.mon

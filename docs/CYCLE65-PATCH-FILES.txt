@@ -1,0 +1,8 @@
+Makefile
+TODO.org
+docs/CYCLE65-PATCH-FILES.txt
+docs/CYCLE65-REPORT.org
+src/scene/sdf_inspector.c
+src/scene/sdf_inspector.h
+tests/native/scene_gesture.c
+tests/native/sdf_undo_transactions.c

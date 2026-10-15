@@ -1,0 +1,29 @@
+;;; native-certificates-contract.mon --- Cycle 11 — integration-gated native-image evidence queries.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract native-certificates-contract
+
+;;; Commentary:
+
+A real embedded Monad runner must execute these; reading the file does
+not count as a passed test. Type/proof counts are compiler-owned evidence.
+
+;;; Code:
+(define (verify-certificates-interface)
+  (let ([e (native-export-count)]
+        [q (native-resource-proof-count)]
+        [i (native-inferred-count)])
+    (and (>= e 0)
+         (>= q 0)
+         (>= i 0)
+         (>= (native-catalog-epoch) 0))))
+
+;;; Post-publication diff is bounded and observable, not a QTT certificate.
+(define (verify-abi-transition-interface)
+  (and (>= (native-abi-unknown) 0)
+       (>= (native-abi-changes) 0)
+       (>= (native-export-removals) 0)
+       (>= (native-proof-drift) 0)
+       (>= (native-cert-fingerprint-removed) 0)
+       (>= (native-transition-complete?) 0)))

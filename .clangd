@@ -1,0 +1,16 @@
+CompileFlags:
+  Add:
+    - "-I."
+    - "-Ivendor"
+    - "-Ivendor/joltc/include"
+    - "-I/usr/include/freetype2"
+    - "-Isrc/app"
+    - "-Isrc/assets"
+    - "-Isrc/physics"
+    - "-Isrc/audio"
+    - "-Isrc/core"
+    - "-Isrc/editor"
+    - "-Isrc/graphics"
+    - "-Isrc/monad"
+    - "-Isrc/platform"
+    - "-Isrc/scene"

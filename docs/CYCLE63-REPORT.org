@@ -1,0 +1,61 @@
+#+TITLE: Obsidian Cycle 63 — Whole-command selected-object undo
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Delivered vertical slice
+
+With F8 enabled, =Ctrl+Alt+Z= undoes the newest active original command group
+touching the selected SDF object. Newer edits to unrelated objects remain.
+The normal =Ctrl+Z= chronological history and =Ctrl+Shift+Z= redo keep their
+existing meanings. Multi-object command groups are indivisible.
+
+The same engine-owner journal operation is exposed through the compiled
+Monad host binding =sdf-inspect-undo-selected!= and the public C agent API
+=obs_agent_scene_undo_selected=. Each entry point uses existing owner and
+mutation/effect admission.
+
+* Implementation
+
+- =src/scene/sdf_inspector.[ch]= selects the latest active original group by
+  scene ticket, preflights every group member, and reuses the existing
+  inverse-record publisher. Conflicts do not partially change scene state.
+- Chronological undo skips original groups deactivated by selected-object
+  undo. The undo count omits inactive original groups.
+- =src/platform/input.c= adds F8-scoped =Ctrl+Alt+Z=, guarded against modal
+  editor ownership, viewport drags and active property gestures.
+- The Monad host and external C agent route into the same journal; no mutable
+  scene pointers or second history are added to the public API.
+- The new native fixture compiles production inspector, SDF ticket and GPU
+  frame-slot publication sources together.
+
+* Verification
+
+Observed in this checkout:
+
+- =make test-sdf-selective-undo= — PASS: interleaved objects, inactive-history
+  traversal, group atomicity, out-of-band conflicts, active group refusal,
+  scene epoch reset, bounded history and mapped frame-slot state.
+- =make -j2 test= — PASS for available native/tooling suites, including the
+  production Monad callback, public agent C API, Cycle 53 undo semantics and
+  Cycle 63 regression. Real Monad integration runners were skipped because
+  their environment variables are unset.
+- =python3 tests/build-contract.py= — PASS.
+- The focused selected-object fixture passes Clang AddressSanitizer and
+  UndefinedBehaviorSanitizer with leak detection enabled.
+- Modified production objects (=agent_engine.c=, =sculpt_api.c=,
+  =input.c= and =sdf_inspector.c=) compile successfully.
+- Full executable link remains blocked by an unrelated active antialiasing
+  change in =src/graphics/vulkan_setup.c=: calls to the static multisample
+  attachment helpers precede their declarations. No fix to that separate
+  change is included in Cycle 63.
+- Actual GLFW shortcut behavior, rendered Vulkan output and compiled MonadC
+  source execution remain unverified by source-bound fixtures.
+
+* Remaining acceptance
+
+On a configured workstation, edit multiple objects, use =Ctrl+Alt+Z= on an
+older object's edit, continue with chronological undo, and verify grouped
+conflict refusal, explicit redo, Vulkan validation and compiled Monad
+behavior. The journal is bounded and volatile; this feature does not
+implement mesh/topology deletion undo or Emacs text-region selective undo.
+

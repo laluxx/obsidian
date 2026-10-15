@@ -1,0 +1,68 @@
+;;; material-transform-contract.mon --- Cycle 24: require a real embedded Monad host and a scene with mesh 0.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract material-transform-contract
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+(define (cycle24-raises? thunk)
+  (catch True
+    (lambda () (thunk) False)
+    (lambda (condition data) True)))
+
+(define (cycle24-material-transform-contract)
+  (let* ([m (mesh 0)]
+         [p (material m)]
+         [t (transform m)]
+         [old-rough (material-roughness p)]
+         [old-metal (material-metallic p)]
+         [old-red (material-red p)]
+         [old-green (material-green p)]
+         [old-blue (material-blue p)]
+         [old-alpha (material-alpha p)]
+         [old-x (transform-x t)]
+         [old-y (transform-y t)]
+         [old-z (transform-z t)])
+    (material-factors! p 0.25 0.75)
+    (let ([factors-ok (and (= (material-roughness p) 0.25)
+                           (= (material-metallic p) 0.75))])
+      (material-factors! p old-rough old-metal)
+      (material-color! p 0.25 0.5 0.75 1.0)
+      (let ([color-ok (and (= (material-red p) 0.25)
+                           (= (material-green p) 0.5)
+                           (= (material-blue p) 0.75)
+                           (= (material-alpha p) 1.0))])
+        (material-color! p old-red old-green old-blue old-alpha)
+        (let ([invalid? (cycle24-raises?
+                         (lambda () (material-factors! p -0.1 0.5)))])
+          (let ([atomic? (and (= (material-roughness p) old-rough)
+                              (= (material-metallic p) old-metal))])
+            (transform-position! t 1.0 2.0 3.0)
+            (let ([position-ok (and (= (transform-x t) 1.0)
+                                    (= (transform-y t) 2.0)
+                                    (= (transform-z t) 3.0))])
+              (transform-position! t old-x old-y old-z)
+              (let ([bad-color? (cycle24-raises?
+                                 (lambda () (material-color! p 0.25 0.5 2.0 1.0)))]
+                    [bad-position? (cycle24-raises?
+                                    (lambda ()
+                                      (transform-position! t 1.0 1.0e100 3.0)))])
+                (and factors-ok color-ok invalid? atomic? position-ok
+                     bad-color? bad-position?
+                     (= (material-red p) old-red)
+                     (= (material-green p) old-green)
+                     (= (material-blue p) old-blue)
+                     (= (material-alpha p) old-alpha)
+                     (= (transform-x t) old-x)
+                     (= (transform-y t) old-y)
+                     (= (transform-z t) old-z)
+                     (cycle24-raises? (lambda () (material-roughness t)))
+                     (cycle24-raises? (lambda () (transform-x p))))))))))))
+
+(if (cycle24-material-transform-contract)
+    True
+    (error "Cycle 24 material/transform capability contract failed"))

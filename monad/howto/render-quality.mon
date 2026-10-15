@@ -1,0 +1,38 @@
+;;; render-quality.mon --- runtime antialiasing through the render policy
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto render-quality
+
+;;; Commentary:
+
+Run: OBSIDIAN_MONAD_BOOT=monad/howto/render-quality.mon ./obsidian
+Status: DOCUMENTS INTENT. nil means 1x/off; only exactly 2, 4 or 8 request
+multisampling, negotiated against device limits. Unsupported requests fail
+without changing the active mode; never mutated during publication.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define policy (render))
+
+(define request-4x (render-antialiasing! policy 4))
+
+(define (current-mode)
+  (render-antialiasing policy))
+
+(define (quality-frame f)
+  (if (= (frame-number f) 1)
+      (begin (request-4x) True)
+      True))
+
+(on-frame! quality-frame)

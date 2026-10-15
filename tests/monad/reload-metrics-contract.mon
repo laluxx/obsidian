@@ -1,0 +1,28 @@
+;;; reload-metrics-contract.mon --- Reload metrics contract= — engine-hosted integration (not standalone).
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract reload-metrics-contract
+
+;;; Commentary:
+
+Reads the same persistent Monad object-space used by the legacy C engine.
+A harness must load this file after initializing the embed host.
+
+;;; Code:
+(define (obsidian-test-reload-metrics)
+  (let* ([attempts (obs-reload-attempts)]
+         [ok (obs-reload-published)]
+         [failed (obs-reload-failed)]
+         [p95 (obs-reload-p95-us)]
+         [p99 (obs-reload-p99-us)]
+         [last (obs-reload-last-us)])
+    (and (>= attempts 0)
+         (>= ok 0)
+         (>= failed 0)
+         (= attempts (+ ok failed))
+         (>= p95 0)
+         (>= p99 p95)
+         (>= last 0))))
+(unless (obsidian-test-reload-metrics)
+  (error "Obsidian reload metrics contract failed"))

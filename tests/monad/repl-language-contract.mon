@@ -1,0 +1,18 @@
+;;; repl-language-contract.mon --- Cycle 9 — live environment references from the existing Monad object space.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract repl-language-contract
+
+;;; Commentary:
+
+Compile/run only with an actual embedded Monad test runner. Do not count
+loading this text file as passing native/QTT integration.
+
+;;; Code:
+(define (repl-live-generation)
+  (reload-generation))
+
+(define (repl-can-edit?)
+  (and (= (reload-phase) 1)
+       (= (reload-active-calls) 0)))

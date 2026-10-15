@@ -1,0 +1,161 @@
+;;; snake.mon --- Snake played in the engine viewport, SDF edition
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto snake game
+
+;;; Commentary:
+
+Run: OBSIDIAN_MONAD_BOOT=monad/howto/snake.mon ./obsidian
+Arrows or WASD steer, R restarts after death. Green spheres form the snake
+on a 14x14 board; the red sphere is food. Each meal raises the eat tone;
+walls kill. Score has no text binding yet (see text-print.mon): it sounds
+as pitch. Status: DOCUMENTS INTENT, plus one real finding filed in
+docs/MONADC-API-REQUESTS.org: module set! state inside a frame callback is
+a type error (on-frame! wants Frame -> Bool, the callback infers
+? -io-> Bool), so playable games await effectful callbacks or a host
+state store. Mixed Int/Float arithmetic needs literal or annotated shapes;
+see cell-x/cell-z.
+
+;;; Code:
+
+(module Main)
+(import Audio.Synth)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+;;; Board
+
+(define board-cells 14)
+
+(define max-length 25)
+
+(define half-board 7)
+
+;;; Int/Float never mix implicitly: (Float n) casts like core/Math/Angle.mon,
+;;; and numeric helpers keep [c : Int] -> Float pins because untyped params
+;;; leave (-) unresolvable. This is the single annotated shape in the set.
+(define (cell-x [c : Int] -> Float)
+  (* (Float (- c half-board)) 0.7))
+
+(define (cell-z [r : Int] -> Float)
+  (* (Float (- r half-board)) 0.7))
+
+;;; Mutable game state
+
+(define head-c 7)
+
+(define head-r 7)
+
+(define dir-c 1)
+
+(define dir-r 0)
+
+(define food-c 10)
+
+(define food-r 7)
+
+(define score 0)
+
+(define alive True)
+
+(define staged False)
+
+;;; Rules
+
+(define (outside? c r)
+  (or (< c 0) (>= c board-cells) (< r 0) (>= r board-cells)))
+
+(define (place-board)
+  (begin
+    (camera-position! (camera) 0.0 14.0 0.01)
+    (camera-angles! (camera) 0.0 -80.0)
+    (sdf-sphere! (cell-x head-c) 0.0 (cell-z head-r)
+                 0.30 0.88 0.96 0.74)
+    (sdf-sphere! (cell-x food-c) 0.0 (cell-z food-r)
+                 0.30 0.94 0.44 0.41)
+    True))
+
+(define (eat-meal)
+  (begin
+    (set! score (+ score 1))
+    (audio-play-samples!
+      (render-sine-note-ms (+ 440.0 (* score 30.0)) 120))
+    (set! food-c (% (+ (* (frame-tick) 11) 7) board-cells))
+    (set! food-r (% (+ (* (frame-tick) 5) 3) board-cells))
+    (sdf-move! (sdf-ticket 1)
+               (cell-x food-c) 0.0 (cell-z food-r))
+    (sdf-tint! (sdf-ticket 1) 0.94 0.44 0.41)
+    True))
+
+(define (die)
+  (begin
+    (set! alive False)
+    (sdf-tint! (sdf-ticket 0) 1.0 0.0 0.0)
+    (audio-play-samples! (render-sine-note-ms 110.0 400))
+    True))
+
+(define (step-head)
+  (begin
+    (set! head-c (+ head-c dir-c))
+    (set! head-r (+ head-r dir-r))
+    (if (outside? head-c head-r)
+        (die)
+        (begin
+          (sdf-move! (sdf-ticket 0)
+                     (cell-x head-c) 0.0 (cell-z head-r))
+          (if (and (= head-c food-c) (= head-r food-r))
+              (eat-meal)
+              True)))))
+
+;;; Input
+
+(define (steer-frame f)
+  (begin
+    (if (key-down? 265)
+        (begin (set! dir-c 0) (set! dir-r -1) True)
+        True)
+    (if (key-down? 264)
+        (begin (set! dir-c 0) (set! dir-r 1) True)
+        True)
+    (if (key-down? 263)
+        (begin (set! dir-c -1) (set! dir-r 0) True)
+        True)
+    (if (key-down? 262)
+        (begin (set! dir-c 1) (set! dir-r 0) True)
+        True)
+    (if (and (not alive) (key-down? 82))
+        (begin
+          (set! head-c 7) (set! head-r 7)
+          (set! dir-c 1) (set! dir-r 0)
+          (set! score 0) (set! alive True)
+          (sdf-tint! (sdf-ticket 0) 0.88 0.96 0.74)
+          True)
+        True)))
+
+;;; Run
+
+(define (frame-tick)
+  (/ (frame-number (current-frame)) 5))
+
+(define (snake-frame f)
+  (begin
+    (if (not staged)
+        (begin (set! staged True) (place-board))
+        True)
+    (steer-frame f)
+    (if (and alive (= (% (frame-number f) 5) 0))
+        (step-head)
+        True)))
+
+(define (current-frame)
+  (frame))
+
+(on-frame! snake-frame)

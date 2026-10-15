@@ -1,0 +1,86 @@
+#+TITLE: Obsidian — Off-thread Monad compiler preflight contract
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* The implemented boundary
+
+=OBSIDIAN_MONAD_PREFLIGHT=1= opts into a compiler-owned, thread-affine
+=monad_compiler_session_t= on the existing source-stage worker. This is an
+actual call to the public =monad_compiler_check_source= API from
+=embed/include/monad/compiler.h= (ABI version 1). It is NOT a fabricated
+candidate-compile or commit interface. Without the setting, the worker
+continues to perform only bounded disk reads.
+
+#+begin_example
+File watcher -> bounded request ticket -> source worker
+    |                               | owned source bytes
+    |                               +-- optional isolated compiler check
+    |                                   | copied, bounded diagnostics
+    v                                   v
+owner thread: compare ticket + path + device/inode/size/mtime/ctime
+    | callbacks drained, source is still current
+    v
+monad_load_source (real QTT verification, native compile, atomic publication)
+#+end_example
+
+The optional semantic check is never permitted to mutate Obsidian, the live
+Monad image, the object space, window, renderer, foreign object registry, or
+physics. It creates and destroys its compiler session on the worker itself.
+A snapshot owns any copied diagnostic code/message, so the owner never reads
+borrowed compiler memory. Worker source bytes are transferred under a mutex.
+
+* Crucial semantic distinctions
+
+- *Accepted preflight* means that this isolated session returned no error
+  diagnostics for the checked source. It does NOT mean the source is natively
+  emit-able, QTT resource-certified, linkable to the current live environment,
+  or safe to publish.
+- *Diagnostic preflight* does NOT veto owner-thread publication: the isolated
+  session may lack the dynamic environment, imports, or current definitions.
+  MonadC =monad_load_source= remains authoritative.
+- *Unavailable preflight* means the optional session could not initialize or
+  its check operation failed. Bytes may still be independently valid.
+- The C source-stage worker never calls the live =monad_t=, and the compiler
+  session is NEVER shared across threads or with the editor.
+- No native image is compiled off-thread. No QTT-certified candidate is
+  published from a worker. Owner-thread native compilation is STILL synchronous.
+
+* Configuration and observability
+
+#+begin_src sh
+OBSIDIAN_MONAD_WATCH=1 OBSIDIAN_MONAD_PREFLIGHT=1 \
+  OBSIDIAN_MONAD_BOOT=modules/obsidian/live-world.mon ./obsidian
+#+end_src
+
+Use =:preflight= in the GPU REPL or the host-provided Monad functions:
+
+#+begin_src scheme
+(preflight-status)      ; 0 disabled, 1 accepted, 2 diagnostics, 3 unavailable
+(preflight-diagnostics) ; diagnostic count from last staged BOOT source
+(preflight-us)          ; monotonic worker elapsed time in microseconds
+(source-preflight)      ; list wrapper in modules/obsidian/live-reload.mon
+#+end_src
+
+The REPL also displays the first bounded diagnostic message. The report is
+reset on engine open; it reflects the last *completed and consumed* BOOT
+snapshot, not necessarily the currently active compiled module.
+
+* Verification
+
+- =make test-native=: source worker thread confinement, cancellation/supersession,
+  owned reports, diagnostic and session-init failure handling.
+- =make test-semantic-preflight=: test doubles with the exact compiler.h API,
+  validating ABI declarations, session/source/report ownership and worker
+  thread affinity; no real Monad type inference is claimed.
+- =make test-repl-abi=: strict source syntax against supplied public SDK.
+- ASan/UBSan on the two new headless tests.
+- =tests/monad/semantic-preflight-contract.mon=: live embedded runtime gate,
+  explicitly unverified without an actual runner.
+
+* Required compiler work (not implemented here)
+
+ABI-001/002/003 in =docs/MONADC-API-REQUESTS.org= remain essential for full
+native candidate compilation, independent QTT certification, cancellation,
+ABI/state migration, bounded commit and retired-image accounting. A source
+check cannot be promoted to publication authority. Tests must separately
+prove frame CPU/GPU p95/p99, image reclamation and state preservation.

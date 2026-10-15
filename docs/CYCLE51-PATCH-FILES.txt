@@ -1,0 +1,17 @@
+Makefile
+README.md
+TODO.org
+docs/AGENT-ABI.org
+docs/CYCLE51-PATCH-FILES.txt
+docs/CYCLE51-REPORT.org
+docs/SDF-SCULPTURE.org
+modules/obsidian/sculpture.mon
+obsidian_agent.h
+src/app/agent_engine.c
+src/monad/sculpt_api.c
+src/scene/sdf_sculpt.c
+src/scene/sdf_sculpt.h
+tests/integration/agent_sculpture.c
+tests/native/agent_engine.c
+tests/native/sculpt_api.c
+tests/native/sdf_sculpt.c

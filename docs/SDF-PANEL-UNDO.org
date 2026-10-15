@@ -1,0 +1,49 @@
+#+TITLE: SDF Property Inspector — Journal Integration and UI Storage Contracts
+#+DATE: 2026-10-12
+
+* Owner and identity
+
+=src/editor/sdf_property_bridge.[ch]= resolves the existing shared sphere
+capability token with =obs_sculpt_ticket_at=. It uses the one
+=obs_sdf_inspector= command history and its scene epoch, never a UI-owned
+persistent index or copy of undo records. The bridge refuses an active
+speculative gesture, rather than allowing a sidebar input to steal the
+viewport selection while a transaction is open.
+
+* Pointer lifetime is essential
+
+The existing =field_vec4_color= opens =colorpicker_open(..., c, c, ...)=.
+The picker retains =c= as =target_color= through subsequent frames.
+=field_float= and =field_vec3= also compare address identities while dragging.
+Passing a stack-local copy of a sphere color or transform would introduce
+use-after-scope and broken drag identity. Cycle 57 uses stable, file-static
+=ObsSdfPanelProxy= storage with ticket rebinding and conditional copying from
+the live primitive when no control/picker is active. This is an intentional
+exception to the default preference for ephemeral UI state.
+
+The picker is closed on a ticket change *only* when its target is the SDF
+proxy. Other editor drags are not indiscriminately cleared.
+
+* Undo / conflict behavior
+
+An input change passes checked float-quantized position or RGBA/PBR values to
+=obs_sdf_property_apply=, which admits the existing current scene object and
+uses the same pure numeric preflight as =obs_sdf_inspector_edit=, then
+calls =obs_sdf_inspector_edit= with the combined property mask. Invalid
+field values do not even change inspector selection. No property
+covered by the mask may be written to =scene.sdfs= by the editor before this
+returns successfully. Emacs-like undo-only, ordinary undo and redo retain the
+Cycle 53 semantics, including conflict checks and bounded history.
+
+The SDF inspector also contains many legacy direct mutations outside this
+journal (radius, CSG, emissive, etc.). These are explicitly NOT reversible
+in this cycle. Automatic field-drag transaction grouping is also deferred.
+
+* Evidence
+
+=tests/native/sdf_property_bridge.c= links the actual sphere creation,
+capability tokens, inspector journal, bridge and SDF GPU-slot sync source;
+it exercises 1,500 resets plus undo/redo, invalid input and active gestures.
+=tests/integration/sdf_viewport_runtime.c= additionally exercises the bridge
+against a sphere created by compiled Monad, with real Vulkan frame stepping.
+The integration test is strict and remains unrun without that full stack.

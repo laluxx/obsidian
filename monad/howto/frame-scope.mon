@@ -1,0 +1,41 @@
+;;; frame-scope.mon --- frame-scoped scene views and renderer telemetry
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto frame-scope
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/frame-scope.mon ./obsidian
+Borrows the frame, then the scene view through it: both expire at
+endFrame and are rejected afterwards (see the frame lifetime contract).
+Enables CPU instrumentation once, then reports slot, wall milliseconds
+and last-frame vertex counts. Clock/dispatch reads live in
+frame-telemetry.mon and dispatch-watch.mon.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (scope-frame f)
+  (begin
+    (if (= (frame-number f) 1)
+        (begin (frame-profile! True) True)
+        True)
+    (list (frame-active?)
+          (frame-slot f)
+          (frame-ms)
+          (frame-last-vertices)
+          (frame-scene-mesh-count (frame-scene f)))
+    True))
+
+(on-frame! scope-frame)

@@ -1,0 +1,49 @@
+#+TITLE: Obsidian — Cycle 32: GPU flight ownership
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+Cycle 32 adds an allocation-free, ticketed owner for prepared geometry upload
+batches and connects it to the existing Vulkan submit/fence path. This is
+completion-lifecycle groundwork; uploads remain synchronous and the loader
+still returns only after fence completion. It does not implement asynchronous
+scene loading.
+
+* Integration
+
+- =ObsGeometryFlight= moves ownership of a prepared batch into an explicit
+  PREPARED / IN_FLIGHT / SIGNALED / UNKNOWN journal. Tickets are monotonic and
+  reject stale operations.
+- Publication requires a signaled fence observation. Cancellation is only
+  allowed before submission. UNKNOWN completion retains the batch until a
+  fence, queue-idle, or device-idle proof permits recovery.
+- Vulkan quarantine now keeps the flight with its command buffer, fence, and
+  staging handles. Shutdown recovery retires the flight only after confirmed
+  quiescence.
+- Preserved Cycle 31's poison guards on all legacy mega-buffer allocator entry
+  points and its poison reset only after successful device idle. The Cycle 32
+  archive removed those protections; applying that deletion would permit
+  writes into destinations after unknown GPU completion.
+- The synchronous =megaGeometryUploadCacheBatch= and
+  =megaGeometryUploadCookedBatch= APIs are unchanged.
+
+* Verification
+
+- Cycle 32 archive manifest verified in an isolated extraction.
+- =make test-native=: PASS, including 50,000 flight lifetime/state cases.
+- =make test=: PASS; Monad and live-frame runners explicitly skipped because
+  their runner environment variables were unset.
+- Cycle 32 flight tests under ASan+UBSan: PASS.
+- =make -j$(nproc)=: PASS; full engine linked.
+- Runtime startup selected an NVIDIA GeForce RTX 3060 and initialized Vulkan.
+
+* Limits
+
+- No asynchronous fence pump, disjoint pending-scene reservations, or
+  nonblocking scene publication. The current transfer still waits on its
+  fence.
+- No fault injection, Vulkan validation-layer run, device-loss simulation, or
+  GPU performance measurement. CPU state tests do not prove Vulkan recovery.
+- Next step: model independent pending scene reservations and staging
+  ownership without publishing destinations before GPU completion.

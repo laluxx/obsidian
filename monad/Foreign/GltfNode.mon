@@ -1,0 +1,38 @@
+;;; GltfNode.mon --- Foreign methods for scene-owned glTF nodes
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign gltf node
+
+;;; Code:
+
+import Foreign.GltfInstance
+
+module Foreign.GltfNode
+  [GltfNode ◯ at index name offset-x offset-y offset-z offset! clear-offset!]
+
+type ◯ :: {GltfNode}
+
+define at :: GltfInstance -> Int -> ◯
+  gltf index -> gltf-node gltf index
+
+method index :: ◯ -> Int
+  node -> gltf-node-index node
+
+method name :: ◯ -> String
+  node -> gltf-node-name node
+
+method offset-x :: ◯ -> Float
+  node -> gltf-node-offset-x node
+
+method offset-y :: ◯ -> Float
+  node -> gltf-node-offset-y node
+
+method offset-z :: ◯ -> Float
+  node -> gltf-node-offset-z node
+
+method offset! :: ◯ -> Float -> Float -> Float -> ()
+  node x y z -> gltf-node-offset! node x y z
+
+method clear-offset! :: ◯ -> ()
+  node -> gltf-node-offset-clear! node

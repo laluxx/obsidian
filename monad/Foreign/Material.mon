@@ -1,0 +1,37 @@
+;;; Material.mon --- Foreign methods for borrowed mesh material views
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign material pbr
+
+;;; Code:
+
+module Foreign.Material
+  [Material ◯ metallic roughness red green blue alpha factors! color!]
+
+type ◯ :: {Material}
+type Material = ◯
+
+method metallic :: ◯ -> Float
+  material -> material-metallic material
+
+method roughness :: ◯ -> Float
+  material -> material-roughness material
+
+method red :: ◯ -> Float
+  material -> material-red material
+
+method green :: ◯ -> Float
+  material -> material-green material
+
+method blue :: ◯ -> Float
+  material -> material-blue material
+
+method alpha :: ◯ -> Float
+  material -> material-alpha material
+
+method factors! :: ◯ -> Float -> Float -> Unit
+  material roughness metallic -> material-factors! material roughness metallic
+
+method color! :: ◯ -> Float -> Float -> Float -> Float -> Unit
+  material r g b a -> material-color! material r g b a

@@ -1,0 +1,89 @@
+#+TITLE: Obsidian Material and Transform foreign views — Cycle 24
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Actual storage model
+
+The renderer stores PBR factors and both world =model= and =local_transform=
+matrices *inside Mesh*. The =Material= in =renderer.h= is a distinct,
+immediate-mode material configuration, not a scene-owned material object.
+Accordingly =obsidian.material= is a *typed view of a mesh's PBR fields*;
+=obsidian.transform= is a *typed view of its world-model matrix*. Neither
+owns GPU resources, allocates a new material, or exposes a C pointer. A
+=Mesh.materialIndex= remains an integer hint to the asset/material table; no
+independent, stable material-table identity is claimed in this cycle.
+
+* Type and lifetime contract
+
+The public syntax is =(material (mesh i))= and =(transform (mesh i))=, with
+aliases =mesh-material= and =mesh-transform=. Underneath, the host borrows
+the existing stable =ObsIdentityRegistry= token with a *distinct Monad nominal
+foreign type*. Each call resolves the token through the current Mesh scene
+view, validates its generation, engine runtime incarnation and owner thread.
+Unrelated mesh array relocation and swap-compaction preserve the view. The
+views expire on destruction of the *owning mesh*, scene reset, or runtime
+incarnation change. The script cannot free the underlying resource.
+
+* Supported operations
+
+| Public procedure     | Contract |
+|----------------------+----------|
+| =material=           | Mesh -> typed PBR view |
+| =material-roughness= | View -> finite engine value (read-only) |
+| =material-metallic=  | View -> engine value (read-only) |
+| =material-red/green/blue/alpha= | View -> RGBA component |
+| =material-factors!=  | View, roughness, metallic; both finite [0,1] |
+| =material-color!=    | View, R, G, B, A; all finite [0,1] |
+| =transform=          | Mesh -> typed world transform view |
+| =transform-x/y/z=    | View -> world-model translation component |
+| =transform-position!=| View, X, Y, Z; finite and float-representable |
+
+No setter partially modifies a Mesh when any argument is invalid. No-op
+updates skip GPU dirtiness. Actual changes call =markMeshDirty=, which marks
+all in-flight mesh SSBO slots; the existing Vulkan update path copies model
+and PBR factors on the corresponding frame. Changed world positions also call
+=physics_set_transform= so an attached rigid body does not overwrite the
+scripted position on the next physics step; this follows the existing editor
+teleport path and clears that body's linear/angular velocity. The update path
+is asynchronous in the sense of existing frame buffering, *not* an atomic GPU
+transaction.
+
+* Effect limits and animation ownership
+
+All writes go through =obs_monad_effect_allowed(WRITE | GPU, ENGINE, false)=.
+This engine-side runtime guard is not a QTT compile-time proof and cannot
+replace verified compiler effect signatures. REPL loads cannot perform live
+GPU/scene mutations during publication.
+
+World-model translation can be overwritten by animation or an editor gizmo
+that owns a mesh's transform. This cycle intentionally does *not* promise a
+persistent skeletal/glTF node transform. Future work should expose typed
+=OmdlNode= transforms and animation authority/ownership separately, then
+make it impossible to accidentally write into a conflicting ownership phase.
+
+* Developer-facing Monad
+
+#+begin_src scheme
+(define m (mesh 0))
+(define p (material m))
+(material-factors! p 0.35 0.7)
+(material-color! p 0.8 0.2 0.1 1.0)
+(define t (transform m))
+(transform-position! t 2.0 0.0 -3.0)
+
+;;; Helpers in modules/obsidian/material.mon:
+(mesh-pbr! m 0.35 0.7)
+(mesh-color! m 0.8 0.2 0.1 1.0)
+(mesh-position! m 2.0 0.0 -3.0)
+#+end_src
+
+* Verification and boundaries
+
+The pure numeric mutation layer is exercised by =make test-native= with
+valid/invalid transitions and 50,000 deterministic randomized updates.
+The new foreign adapter can be *syntax checked* against the real Monad SDK
+headers and minimal graphics declarations, but that is not live execution.
+=tests/monad/material-transform-contract.mon= is an engine-host integration
+fixture and requires a scene containing mesh 0 and actual eval/assertion
+support. QTT-based ownership/effect proofs, Vulkan rendering correctness,
+real JIT execution, and node-level transforms remain open gates.

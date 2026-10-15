@@ -1,0 +1,157 @@
+#+TITLE: Obsidian — Prepared Callback Images and Keymap Performance
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Contract and authority
+
+Obsidian remains the *host* and MonadC is the authority for native images,
+QTT proofs, memory and code-generation lifetimes. This cycle only makes host
+callback publication less failure-prone and reduces native keymap overhead.
+It does not add compiler staged images, host-side QTT certification or
+transactional rollback after an in-place compiler publication.
+
+* Publication pipeline
+
+1. During =monad_load_source=, =on-frame!= and =bind-key!= append retained
+   procedure values to a bounded =ObsLiveBindingTxn= journal; no live map is
+   modified during registration.
+2. On a *rejected* compiler publication, abort releases the journal and
+   leaves existing key bindings and frame callback untouched.
+3. On *accepted* publication, =obs_live_txn_finish_prepared= calls the host
+   prepare callback. This constructs a privately allocated keymap array,
+   transfers (borrows) native engine bindings, excludes old Monad-script
+   bindings, resolves all new bind/unbind operations in order, and retains
+   new Monad procedure values. Conflicts with native bindings, malformed
+   notation and allocation failure reject the prepared image. In that
+   case the existing host map remains operational, despite the compiler
+   image already having been published.
+4. Once preparation succeeds, an owner-thread =keychord_commit_monad_image=
+   swaps the binding-array pointer and count without allocating; it bumps
+   keymap cache generations and retires old Monad bindings after the swap.
+   =on-frame!= is installed/cleared by the same owner-thread commit.
+5. A rejected preparation never frees/replaces a native binding borrowed
+   from the live map. A successful swap transfers native-binding ownership
+   to the new live array and avoids freeing their metadata twice.
+
+The short commit has **no explicit host allocations** (malloc/calloc/realloc/
+strdup). Old callbacks can execute destructors or runtime release hooks
+*after the swap*, and freeing old resources still costs CPU time. Therefore
+this is neither a fixed-duration commit nor an atomic compiler+host update.
+The callback journal also still has a fixed 128-operation capacity.
+
+The native keymap regression wraps malloc/calloc/realloc/strdup and asserts
+zero calls while the real =keychord_commit_monad_image= path runs. Its Monad
+release functions are deterministic test doubles; this proves the host keymap
+swap does not allocate, not that a real runtime destructor is bounded or
+allocation-free.
+
+* Key lifetime and cache invariants
+
+- A prepared image records =lookup_generation=. If owner-thread code changes
+  the keymap between prepare and commit, commitment fails rather than
+  replacing a newer map. The integration treats a mismatch at the exclusive
+  safe point as a broken invariant; this branch remains a fail-closed abort.
+- =keymap_stack_generation= and =lookup_generation= invalidate native
+  key/command lookup caches on swap. A stale overriding binding pointer into
+  the old array is explicitly invalidated before the array is released.
+- Repeated bind of the same notation in a journal is last-wins; an unbind
+  cancels an earlier journal binding without touching the live map.
+- Native and editor-owned bindings cannot be commandeered by Monad.
+- Script-owned callback references are retained and released exactly once
+  across failed preparations, duplicate registrations and successful swaps.
+- During preparation, non-script binding data are borrowed, NOT owned by
+  the candidate array. Only the live owner thread can mutate keymaps.
+
+* Optimizations
+
+** Allocation-free key notation parsing
+
+=src/platform/keychords.c= no longer uses =strdup=+global =strtok= for
+parsing. Each of four tokens is parsed from a fixed stack buffer. Overlong
+and excess-token chords are rejected, not silently truncated. Parsing
+remains bounded and is safe from unrelated strtok usage.
+
+** Linear managed-script cleanup
+
+=keychord_remove_managed_monad= does one forward pass, compacts survivors
+once, and invalidates generation caches once. The previous loop in
+=obs_monad_discard_live_bindings= rescanned/parses/compacted for each
+script-owned binding, which could become quadratic in binding count.
+
+** Fail-before-mutation direct binding
+
+The non-transactional =keychord_bind_monad_named= path now allocates new
+command metadata before releasing the previous retained procedure; failed
+rebind allocation cannot silently discard the existing command.
+
+** Lazy chord-clock sampling
+
+=keychord_process_key= and =keychord_process_key_with_stack= now read
+=glfwGetTime()= only when a press starts or advances a multi-key chord.
+Single-key hits, non-press misses, and release/repeat handling do not need
+chord timing and avoid the call. A chord-prefix start still records its
+timestamp; each subsequent chord key still samples time for timeout checks.
+The keymap regression counts these calls, and the dispatch microbenchmark
+reports timer reads for its bound-key workload.
+
+* Reproducible headless tests
+
+#+begin_src sh
+make test
+make bench-keymap
+#+end_src
+
+=tests/native/keymap_image.c= compiles the REAL =keychords.c= source with
+header-only GLFW/Vulkan/Monad test fixtures (not full graphics or JIT).
+It checks native-binding preservation, duplicate key operations, bad chords,
+failed prepare, generation mismatch, abort, retained values and 10,000
+replacement cycles. The journal test also exercises prepared-commit/reject.
+Both are part of =make test= and can run under ASan/UBSan independently.
+
+=make bench-keymap= additionally measures the production
+=keychord_process_key_with_stack= path with a local-map native PRESS binding:
+101 batches of 10,000 events. It reports p50/p95 batch time per event,
+lookup-cache hits, and allocator calls/requested bytes during dispatch. Timer
+reads occur once per batch, not once per key, so the percentile describes
+batch-to-batch variability rather than individual-event tail latency.
+The target prints both a normal, unprofiled build and a counter-enabled
+profiled build; compare the former for dispatch timing and use the latter for
+cache-hit counts.
+
+Allocator wrappers count malloc/calloc/realloc/strdup calls and requested
+bytes; they do not report allocator metadata, retained keymap size, RSS, or
+allocations through unwrapped APIs. A zero count means those wrapped
+allocators were not called on this native dispatch path. The fixture has no
+Vulkan, OS input delivery, or real Monad runtime: this is a host-side dispatch
+measurement, not end-to-end input latency. Repeat on the target machine
+before drawing optimization conclusions.
+
+Lookup/repeat hit counters compile only with =OBS_KEYCHORD_PROFILE= (enabled
+for the headless keymap test target). Normal engine builds do not increment
+profiling counters on lookup hits; their public counter accessors return zero.
+Do not use the instrumented microbenchmark timing as an uninstrumented
+production-cycle estimate.
+
+Recorded local headless O2 microbench (not engine FPS):
+
+| Operation | Mean measured time |
+|-----------+--------------------|
+| Prepare+commit 16 bindings, 3000 iterations | 2.49 us/cycle |
+| Repeated unbind of 16 managed bindings | 0.832 us/cycle |
+| Single-pass removal of 16 managed bindings | 0.448 us/cycle |
+
+Single measurement on this container; CPU, allocator and scheduler affect
+all values. Re-run with =make bench-keymap= on the target system. No GPU or
+actual MonadC frame-latency inference is justified from these numbers.
+
+* Unresolved compiler and runtime responsibilities
+
+- MonadC's candidate compile/verify/commit is still missing, so the host
+  currently prepares *after* MonadC publishes, not before. Fully atomic
+  image+callback switching is therefore not achieved.
+- Host foreign-object mutation is runtime-guarded rather than certified by
+  compiler-authored QTT effect, ownership and region proofs.
+- No in-engine keypress/frame stress, Jolt, Vulkan or 6h memory soak has run.
+- Complete path should eventually preallocate/verify host resources before
+  compiler candidate publication and reclaim old native images after the
+  compiler's quiescence protocol.

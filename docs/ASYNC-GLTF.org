@@ -1,0 +1,70 @@
+#+TITLE: Obsidian — Asynchronous glTF scene-loading contract
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Public engine API
+
+=obs_gltf_async_init(owner, scene, context)= binds one engine owner and Vulkan
+bridge. =obs_gltf_async_request(owner, path)= accepts a source path and returns
+its monotonic ticket without opening/decoding source files or calling Vulkan.
+=obs_gltf_async_poll(owner, ticket)= drives the pipeline at owner-thread frame
+checkpoints; never calls =vkWaitForFences=, =vkDeviceWaitIdle= or a blocking
+worker join. =obs_gltf_async_cancel(owner, ticket)= marks cancellation; an
+in-flight upload still retains all resources until a confirmed fence signal.
+
+* State transitions
+
+=PREPARING= -> =UPLOADING= -> =TEXTURES= -> =PUBLISHED= for supported
+source-matching OMDL v2 cache hits.
+
+Terminal outcomes: =FAILED= (invalid/missing OMDL cache, failed preparation,
+submission rejection or texture failure), =NEEDS_COOK= (the cache is
+unavailable but the glTF source parses and passes bounded source validation),
+=CANCELLED= (explicit request, supersession or scene revision conflict).
+=QUARANTINED= means an accepted GPU submission or commit has unknown
+completion; no CPU/GPU owner may be freed until real quiescence is proved.
+Stale tickets cannot affect later requests.
+
+There is one active worker/GPU owner and one bounded, superseding next request.
+A pending later request does not cause the current GPU command to be freed.
+Successful publication APPENDS a prepared glTF instance and mesh batch to the
+existing scene at an owner-thread checkpoint; it does not replace all scene
+objects or invalidate the visible old scene while preparing.
+
+* Lifetime and ownership
+
+- All parsing and CPU records remain private to the worker candidate.
+- Vulkan descriptors/textures are acquired only on the owner thread through
+  the Cycle 39 acquire/release contract, never via a no-op release wrapper.
+- GPU transfer uses the existing single-flight, verified-fence adapter.
+- Reference leases move into the published GLTFInstance and are released by
+  =scene_cleanup= after GPU quiescence; rejected candidates release leases.
+- GPU command and staging memory remain quarantined after uncertain status.
+- Commit pre-reserves mesh/instance/tree storage and refuses stale structural
+  epochs; activation transfers ownership with no new allocations.
+- =obs_gltf_async_shutdown_quiesced= may block joining the worker only during
+  shutdown after successful =vkDeviceWaitIdle=. It refuses unsafe cleanup.
+
+* Availability
+
+On cache miss the worker first checks for an existing source-matching OMDL v2
+cache, then cooks supported static glTF geometry and material metadata into an
+owned CPU candidate. The existing owner-thread path acquires its texture
+leases, uploads geometry, waits on verified fences without blocking, and
+publishes only after textures are ready. No Vulkan or live-scene work runs on
+the cooker thread.
+
+The cold cooker supports static triangle scenes with external URI textures,
+material factors, and the handled material extensions. It rejects skins,
+animations, sparse accessors, unsupported primitive/material texture features,
+embedded image data, and sources beyond its bounded geometry/input limits.
+The chess asset is covered by the native cook regression. Run it through the
+engine with:
+
+#+begin_src sh
+OBSIDIAN_ASYNC_GLTF=assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf make run
+#+end_src
+
+This proves the asynchronous cold-cook path when exercised on a configured
+GPU host; native cooker coverage alone does not prove Vulkan publication or
+visual rendering correctness.

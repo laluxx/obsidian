@@ -1,0 +1,33 @@
+#+TITLE: Obsidian face-text shader payloads
+#+STARTUP: overview
+
+* Host interface
+
+=character_ex= accepts an =ObsFaceShaderData= payload copied to each vertex
+of a glyph quad. See =src/graphics/font.h= and =src/graphics/renderer.h= for
+the current C declarations, and =shaders/2D.frag= for shader behavior.
+
+| Shader input | Payload |
+|--------------+---------|
+| =fragFaceData0= | Shader ID, logical buffer position, line, column |
+| =fragFaceData1= | Face-run offset, codepoint, flags, event kind |
+| =fragFaceEventData= | Event offset, count, serial, anchor |
+| =fragFaceParams= | Four caller-provided values |
+| =fragFaceEvent.x/y= | Event time and duration |
+
+Event kinds are none, insert, or delete. The host retains a bounded snapshot
+of removed glyphs for a deletion event's duration. Use logical positions for
+effects that must survive text insertion/deletion; pixel coordinates describe
+only the current drawing placement.
+
+* Frame and pointer inputs
+
+=pc.frame.x= supplies current time in seconds. =pc.pointer.xy= supplies the
+screen-space pointer position; negative x indicates unavailable pointer data.
+The host updates it on pointer motion through
+=renderer2D_set_pointer_position=; subsequent 2D draws receive the latest
+position.
+
+This payload belongs to the existing 2D bitmap text path. Future MSDF atlas
+work must preserve its host contract or explicitly version the interface.
+See [[file:MSDF.org][MSDF integration requirements]] and [[file:ARCHITECTURE.org][subsystem ownership]].

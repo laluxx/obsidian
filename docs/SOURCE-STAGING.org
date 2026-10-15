@@ -1,0 +1,96 @@
+#+TITLE: Obsidian — Bounded asynchronous source snapshots (Cycle 14)
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Architecture and deliberately narrow scope
+
+A dedicated pthread performs only filesystem I/O for =OBSIDIAN_MONAD_BOOT=
+changes. It does *not* access MonadC, QTT, the engine scene, GLFW or Vulkan.
+
+#+begin_example
+watcher / explicit reload
+    | owner thread: enqueue generation ticket
+    v
+source_stage worker: open regular file, max 16 MiB, read, verify inode/size/mtime
+    | owned immutable UTF-8-source byte buffer (NULs rejected)
+    v
+owner-thread checkpoint: compare ticket, path and file revision
+    | native callbacks drained, no active publication
+    v
+monad_load_source (still SYNCHRONOUS compile + compiler atomic publication)
+#+end_example
+
+There is no extra VM, compiler instance, JIT image, or QTT reinterpretation.
+The stage artifact is a *source snapshot*, not a native code candidate. MonadC
+remains authoritative for type inference, quantity/resource evidence, native
+functions and publication/reclamation semantics.
+
+* Ownership and concurrency
+
+- One persistent worker, one queued request and one completed snapshot.
+- Each request has the monotonic BOOT queue ticket as its identity.
+- New changes overwrite queued requests; results of superseded in-flight reads
+  are discarded without being handed to the engine.
+- A pthread mutex protects transfer of owned heap storage. The engine never
+  dereferences worker buffers while the worker owns them. The worker never
+  enters the compiler/object space or engine world.
+- =close= wakes and joins the worker and disposes any completed snapshot.
+  Shutdown can still wait for an OS file read to finish.
+- The worker rejects files larger than 16 MiB, nonregular files, embedded
+  NUL bytes, failed/short reads and inode/size/mtime changes while reading.
+  An owner-thread revision check immediately before compilation catches most
+  post-read edits and atomic-renamed saves. File metadata is not a
+  cryptographic content identity: adversarial same-stat rewriting requires a
+  stronger hash/content-authority contract.
+- Source staging failure is reported, never passed to MonadC, and does not
+  invalidate an older published image.
+- If a worker cannot be created, the existing synchronous module loader
+  remains available as a compatibility fallback; this is explicitly slower.
+
+* Scheduling and fairness
+
+=obs_publish_queue_begin_ready= accepts a lane-readiness mask. A pending BOOT
+request without completed source bytes does not block a ready REPL request. A
+new file-watcher revision is acknowledged once *enqueued*, so subsequent
+frames do not keep assigning a new ticket to an unchanged pending file. A
+newer disk edit can still produce a new revision and supersede the worker job.
+
+=:cancel-boot= removes a queued request. A worker may finish the obsolete
+file read, but an unmatched ticket cannot enter publication. This does not
+interrupt a running compiler call. =source-worker?= and =source-staged?= are
+read-only diagnostics available to Monad scripts.
+
+* Compiler APIs still required (not implemented by this cycle)
+
+1. Compile an immutable source unit to a *native* candidate off the render
+   thread, in compiler-managed isolated state.
+2. Compiler-authored QTT/effect/loan/ABI verification against the *complete*
+   target native image, with persistent state migration obligations.
+3. Pre-verified candidate commit at a bounded owner-thread safe point, plus
+   explicit discard/cancellation of superseded candidates.
+4. Compiler-managed code retirement (including pinned call readers), memory
+   accounting and publication receipts.
+
+The current =monad_prepare_source= offers semantic preparation, not staged
+machine code. =monad_load_source= still compiles synchronously at the engine
+checkpoint. Thus there is *no* nonblocking compile or transactional game-state
+migration claim.
+
+* Tests and performance gates
+
+- =make test-native=: worker snapshot and queue-readiness integration test.
+  Includes missing file, NUL, empty file, atomic rename, stale references,
+  1000 supersessions, size limit and clean worker shutdown.
+- =make test=: includes available SDK declaration tests; live Monad/Vulkan
+  tests are explicitly skipped unless configured.
+- ASan+UBSan run of =tests/native/source_stage.c=; native code syntax checked
+  against uploaded MonadC headers and camera API fixture.
+- Real engine module reload, frame pacing, shader/glyph rendering and memory
+  behavior under sustained edit storms: UNVERIFIED. Need actual hardware and
+  full MonadC/Vulkan runtime for p50/p95/p99 engine measurements.
+
+* Next cycle
+
+Prioritize genuine compiler candidate APIs (ABI-001/002/003) and integration
+with this source owner. Follow with dependency-graph invalidation, typed
+persistent-state migration, and real failure-injection under live rendering.

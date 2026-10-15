@@ -1,0 +1,43 @@
+;;; node-tree.mon --- walk the scene hierarchy: names, parents, children, visibility
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto node-tree
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/node-tree.mon ./obsidian
+Borrows mirror (mesh i): (node i) is engine-owned and generation-checked,
+never a pointer. Roots report parent -1. Stale borrows fail closed.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (describe-node i)
+  (begin
+    (node-index (node i))
+    (obs-node-name (node i))
+    (obs-node-parent (node i))
+    (node-first-child (node i))
+    (node-visible? (node i))))
+
+(define (tree-frame f)
+  (if (> (node-count (scene)) 0)
+      (begin
+        (describe-node 0)
+        (if (= (frame-number f) 2)
+            (begin (node-visible! (node 0) True) True)
+            True))
+      True))
+
+(on-frame! tree-frame)

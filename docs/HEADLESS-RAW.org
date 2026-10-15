@@ -1,0 +1,128 @@
+#+TITLE: Headless raw image rendering
+#+STARTUP: overview
+
+Run one deterministic engine frame without GLFW, a display server, or a
+surface:
+
+#+begin_src sh
+./obsidian --headless-raw /tmp/frame.rgba --width 1280 --height 720
+#+end_src
+
+Compile and publish a Monad source unit inside the engine host, run its typed
+camera-policy entry, then capture the image:
+
+#+begin_src sh
+./obsidian --eval '(module Main)
+(define (obsidian_camera_step_mm [current : Int] -> Int)
+  (+ current 500))' \
+  --output /tmp/frame.rgba --width 1280 --height 720
+#+end_src
+
+=--eval= takes Monad module/source-unit text, not an interpreter expression.
+The source must define the typed =obsidian_camera_step_mm : Int -> Int= policy.
+The engine publishes the unit through its existing native-module runtime,
+invokes that function through the existing checked camera-policy bridge, then
+captures the frame. Compilation, publication, or missing-entry failures return
+nonzero and do not write the image. This is one headless frame with the
+deterministic sample draw callback; it is not yet a general scene-construction
+or multi-frame agent API.
+The equivalent legacy form is =--headless-raw PATH --eval SOURCE=.
+
+The output is headerless, tightly packed =VK_FORMAT_R8G8B8A8_UNORM= pixels,
+four bytes per pixel, in Vulkan image row order. File size is exactly
+=width * height * 4=. Width and height default to 800x600 and must be in
+=1..8192=. The command renders the engine's deterministic sample scene (3D
+cube, axis lines, and a red 2D quad) through the production render graph and
+copies the GPU color target into host-visible coherent memory. It does not
+create a GLFW window or surface and does not include editor UI or run the
+interactive application loop.
+
+Middle-button orbit uses the compiled Monad policy in
+=monad/obsidian/editor-orbit.mon=. The host supplies GLFW cursor events and
+applies the validated camera update; Monad owns screen-delta direction and
+sensitivity. Custom =OBSIDIAN_MONAD_BOOT= modules must export both typed
+=obsidian_middle_orbit_yaw_urad : Int -> Int= and
+=obsidian_middle_orbit_pitch_urad : Int -> Int= functions for orbit input.
+
+Run the deterministic headless interaction fixture with:
+
+#+begin_src sh
+make test-headless-middle-orbit
+#+end_src
+
+The Monad fixture validates positive, negative and zero deltas. The engine
+drives those policies through the production drag/camera path and checks press
+anchoring, reversibility, release, pitch clamp, yaw wrap, and raw-image output.
+
+Embedding C hosts can use =obs_headless_init(width, height)= and
+=obs_headless_render_raw(path, draw_callback, userdata)= to issue their own
+engine draw calls into the same offscreen frame. Call =cleanup(&context)=
+after rendering to release the Vulkan resources.
+
+The path uses the same GPU pipeline/resource setup as the windowed engine,
+but skips WSI acquisition and presentation. It waits for the submitted fence
+before writing the raw file; image generation remains GPU-rendered, while
+readback and file I/O are synchronous by design for deterministic testing.
+
+Example conversion for inspection:
+
+#+begin_src sh
+convert -size 1280x720 -depth 8 RGBA:/tmp/frame.rgba /tmp/frame.png
+#+end_src
+
+* Cycle 47: bounded headless agent jobs
+
+The existing source-unit compiler/renderer path also accepts a module file and
+multiple actual GPU frames, with a machine-readable success receipt:
+
+#+begin_src sh
+./obsidian --eval-file monad/obsidian/live-demo.mon \
+  --frames 120 --output /tmp/obsidian-frame.rgba \
+  --agent-report /tmp/obsidian-frame.json --width 640 --height 480
+#+end_src
+
+=--eval-file= uses the existing owner-thread =obs_monad_load_file= contract:
+regular file, at most 16 MiB, complete/stable read and no embedded NUL bytes.
+It is mutually exclusive with =--eval=; both require a compiled typed
+=obsidian_camera_step_mm : Int -> Int= export. That policy is resolved and
+*checked* on each of the 1..10000 requested frames. A missing native pin,
+rejected policy result or an unsuccessful submission fails the job, rather
+than silently generating a success report. A single published image is used
+throughout the job; no compilation occurs in the frame loop.
+
+The final image is produced using Obsidian's real offscreen Vulkan frame path.
+Each preceding step invokes the same native renderer and waits for its output
+fence because readback is enabled; this trades throughput for a bounded,
+sequential observation loop. Monad frame callbacks run through the existing
+host frame tick. This is NOT fixed-delta simulation, a general expression
+interpreter, an editor scene API, or a proof of live QTT borrow safety.
+
+The raw output is published by writing to a private temporary sibling,
+syncing that file, then renaming over the destination. A failed write does
+not truncate a prior raw image. The report is emitted *after* the final raw
+image was committed, with JSON fields:
+
+#+begin_src json
+{"schema":"obsidian.headless.v1","status":"ok","width":640,"height":480,"frames":120,"format":"rgba8-unorm","bytes":1228800,"source":"file","image":"/tmp/obsidian-frame.rgba"}
+#+end_src
+
+The prior report path is removed at job start, preventing a stale success
+report from being mistaken for the current run after an error. The report is
+absent on compilation, policy, driver, or readback failure. The report itself
+is atomically replaced; however, its replacement is NOT transactional with
+image replacement, nor does this guarantee durability of the directory entry
+on a sudden power failure. The raw image may exist if report writing fails.
+Avoid passing identical paths for =--agent-report= and =--output=.
+
+Headless CPU/IO admission and status tests:
+
+#+begin_src sh
+make build/tests/headless-job
+build/tests/headless-job
+make test
+#+end_src
+
+These native tests exercise the *production* frame sequencing, receipt and
+atomic file writer using a fake callback where Vulkan would be invoked.
+A full linked Vulkan/MonadC binary test including real image evidence is
+still required to certify end-to-end graphics and compiler behavior.

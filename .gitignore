@@ -1,0 +1,23 @@
+**/joltc/build/
+**/joltc/lib/
+**/joltc/bin/
+
+*.o
+*.so
+*.a
+obsidian
+assets/fonts/*.h
+*.d
+
+# Generated or cached local test executables / editor files
+tests/font-unicode
+*.swp
+*~
+.#*
+__pycache__/
+*.py[cod]
+
+# Generated local benchmark / test artifacts
+/build/
+*.spv
+*.spv.h

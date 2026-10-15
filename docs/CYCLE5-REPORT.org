@@ -1,0 +1,65 @@
+#+TITLE: Obsidian — Cycle 5 (Embedded Monad, Font Hygiene and Performance)
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Implementation
+
+- =src/monad/hotreload_stats.[ch]=: bounded ring of CPU-side module-load
+  durations; deterministic rolling p50/p95/p99 statistics.
+- =src/monad/hotreload_api.[ch]=: six owner-thread-only dynamic procedure
+  bindings in the existing Monad object space.
+- =src/monad/runtime.c=: fail closed on failed image publication, measure
+  actual sync compiler time; never keep native code pointers across loads.
+- =src/monad/bindings.c=: expire old Monad-owned key closures before loading
+  replacement source, retaining C keybindings and the single dispatcher.
+- =src/graphics/font_utf8.[ch]=: safe scalar decoder with ASCII fast path;
+  malformed UTF-8 advances one byte to avoid infinite loops/out-of-bounds.
+- =src/graphics/font.c=: preflight glyph loading before UV construction,
+  batch atlas upload per text call rather than use missing glyph pixels,
+  two-phase atlas growth allocation, conditional opt-in font profiling,
+  correct upload failure handling, and guard against oversized glyphs.
+- =Makefile=: portable =-O2= optimized default, overridable =OPT_LEVEL= and
+  =CPU_FLAGS= for local builds; =test=, =test-native=, =test-monad=,
+  =test-all= and =bench-font= targets.
+- Six new Monad fixtures plus three small native seam tests, and a reproducible
+  headless CPU scan benchmark.
+
+* Verification in this environment
+
+- [X] C23 native unit tests (UTF-8 incl. 20,000 generated cases, reload metrics,
+      reload watcher). See =make test= output.
+- [X] Headless UTF-8 scan benchmark collected (see =docs/perf/=).
+- [X] API-shaped fixture C syntax checks of new/revised Monad host C files.
+- [X] Incremental overlay reapplication and SHA-256 file manifest.
+- [ ] Real MonadC module compilation and execution through QTT/native image.
+- [ ] Full engine Vulkan build, GPU text benchmark or msdfgen integration.
+- [ ] Long-running reload stress and typed rollback with compiler-side staging.
+
+* Performance reality
+
+The headless benchmark measures UTF-8 scanning only; it is NOT a measure of
+Vulkan font throughput. Font submission preflight adds a lookup pass on the
+steady-state hot path; benchmark its cost under real workloads and replace it
+with a prepared glyph-run cache or per-frame immutable atlas snapshot if
+measurements show a regression. Do not assume the cycle improved FPS.
+
+* Known risks
+
+- Atlas image lifetime remains coupled to the existing immediate renderer;
+  old Vulkan command buffers may still reference the retired texture on
+  atlas expansion. Proper GPU-fence retirement is not implemented.
+- Synchronous full-atlas upload still exists; dirty-rectangle async staging
+  and page-local, versioned bindless slots are required for peak performance.
+- Fallback font discovery uses Fontconfig on the first missing glyph and may
+  introduce visible latency; schedule/prewarm without invoking Fontconfig
+  on a real-time render callback.
+
+* Local benchmark samples
+
+=make bench-font BENCH_ITERATIONS=10000= (Intel Xeon Platinum 8573C,
+GCC =-O3= scanner only): ASCII median 22.853ms for 39.06 MiB scanned
+(1709.3 MiB/s); mixed Unicode median 35.578ms for 39.05 MiB
+(1097.7 MiB/s). Moving the decoder's hot path to =static inline= improved
+ASCII scan throughput in the same local setup from a previous 799.9 MiB/s
+measurement (not a controlled hardware benchmark). This is not a GPU
+rendering benchmark or an engine FPS result.

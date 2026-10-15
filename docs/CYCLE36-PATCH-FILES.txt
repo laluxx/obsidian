@@ -1,0 +1,10 @@
+Makefile
+TODO.org
+docs/CACHE-SCENE-PREPARATION.org
+docs/CYCLE36-REPORT.org
+src/assets/gltf_loader.c
+src/graphics/renderer.c
+src/graphics/renderer.h
+src/scene/mesh_storage.c
+src/scene/mesh_storage.h
+tests/native/mesh_storage.c

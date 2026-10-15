@@ -1,0 +1,72 @@
+#+TITLE: Obsidian — Cycle 41: async glTF cache-miss source preparation
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+Continue the production async loader from Cycle 40 while avoiding a false
+claim that the legacy, globally stateful glTF geometry cooker is thread-safe.
+This cycle provides a genuine private CPU source inspection of cache misses,
+and makes the unresolved cooking requirement visible to the caller.
+
+This is NOT completion of general async glTF loading. An uncached source is
+validated, but it does NOT yet produce GPU-ready geometry, materials, skins or
+animation uploads. The supported async publication path remains OMDL v2 hits.
+
+* Implemented
+
+** Engine-independent source inventory
+
+=src/assets/gltf_source_plan.[ch]= uses actual =cgltf_parse_file=,
+=cgltf_load_buffers=, =cgltf_validate= and accessor reads, without access to
+=Scene=, the texture pool, Vulkan, and the old cooker staging globals.
+
+It checks input/document size, bounded decoded buffer totals, primitive type,
+POSITION accessor, triangle/index counts and index ranges. It captures node,
+mesh, primitive, material image, skin, animation and morph usage counts. Its
+fingerprint covers document bytes (including materials) and decoded buffer
+bytes, and checks document stability across analysis. Hashing is non-cryptographic
+and does not prove stable external buffers if mutated concurrently.
+
+** Production controller integration
+
+On OMDL cache preparation rejection, the worker now checks the real source.
+Valid uncached sources report =OBS_GLTF_ASYNC_NEEDS_COOK=; invalid sources
+still fail; neither is admitted to the GPU or made visible. Results are
+read only after the worker has completed and been joined with a nonblocking
+check. The main loop logs the pending cooker requirement once, rather than
+polling a terminal ticket forever. Existing visible scene remains untouched.
+
+The status is intentionally NOT named READY: a parsed source is not an
+uploadable geometry candidate.
+
+* Verification and limits
+
+- =make test=: PASS, including the real cgltf source-plan fixtures, actual
+  async-controller body with mocked scene/GPU dependencies, and available
+  Monad/native-contract tests.
+- Both Cycle 41 test executables pass AddressSanitizer and
+  UndefinedBehaviorSanitizer with leak detection enabled.
+- =make -j$(getconf _NPROCESSORS_ONLN)= compiled and linked the full engine.
+  Existing unused-variable warnings remain in =src/app/main.c=.
+- NVIDIA GeForce RTX 3060 runtime smoke with uncached
+  =assets/gltf/trees.glb= logged terminal =NEEDS_COOK=, 142 primitives and
+  26,488 triangles; scene stayed unchanged. The process was stopped by the
+  35-second timeout, so graceful shutdown and visual output were not verified.
+- Startup also logged a missing =JetBrainsMono-Regular.ttf= before continuing
+  with Noto Sans Mono; this is outside Cycle 41.
+- No GPU frame-time benchmark or complete uncached cooking acceptance.
+- Fingerprinting is non-cryptographic; external buffer files are not checked
+  for mutation across the whole analysis window. The parser's configured
+  bounds cap input sizes, not worst-case CPU time for every legal asset.
+
+* Required next implementation
+
+1. Extract the real cooker into a per-request CPU context (no global
+   =omdl_*=, =s_staged_meshes= or texture-pool calls) and produce the same
+   private eight-stream =ObsGltfCacheCandidate= on cache misses.
+2. Use the existing =ObsPendingSceneLoad= and retained leases for that result.
+3. Confirm meshlet / morph / joints parity against the synchronous cooker,
+   including animations and skinned textured assets.
+4. Test the running engine with Vulkan validation layers and record frame
+   timings, failure cleanup and physical resource retirement.

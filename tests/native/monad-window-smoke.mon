@@ -1,0 +1,118 @@
+(define obsidian-window-smoke-draw-count 0)
+(define obsidian-window-smoke-key-count 0)
+(define obsidian-window-smoke-mouse-count 0)
+(define obsidian_widget_smoke_activation_count 0)
+(define obsidian_widget_smoke_last_action 0)
+(define obsidian_widget_smoke_candidate 0)
+(define obsidian_widget_smoke_selected 0)
+(define obsidian_widget_smoke_key_count 0)
+(define obsidian_widget_smoke_last_key 0)
+(define obsidian_widget_smoke_mouse_count 0)
+(define obsidian_widget_smoke_mouse_hit -2)
+(define obsidian_widget_smoke_tree
+  (list (widget-label "Actions")
+        (widget-button "first" "First action")
+        (widget-button "second" "Second action")))
+
+(define (obsidian-window-smoke-draw window)
+  (set! obsidian-window-smoke-draw-count
+        (+ obsidian-window-smoke-draw-count 1))
+  (window-background! window 0.06 0.08 0.12 1.0)
+  (window-rect! window 12.0 12.0 96.0 48.0 0.9 0.2 0.1 1.0)
+  (window-circle! window 150.0 38.0 18.0 0.2 0.8 0.4 1.0)
+  (window-line! window 12.0 80.0 190.0 80.0 0.2 0.5 1.0 1.0)
+  (window-text! window "Monad tool window" 12.0 112.0 1.0 1.0 1.0 1.0))
+
+(define (obsidian-window-smoke-input window event code action mods x y)
+  (if (equal? event "key")
+      (set! obsidian-window-smoke-key-count
+            (+ obsidian-window-smoke-key-count 1))
+      0)
+  (if (equal? event "mouse-button")
+      (set! obsidian-window-smoke-mouse-count
+            (+ obsidian-window-smoke-mouse-count 1))
+      0)
+  (if (and (equal? event "key") (= code 256))
+      (window-close! window)
+      0))
+
+(define (obsidian_window_smoke_open ignored)
+  (window-open! "Monad tool window smoke" 320 240
+                obsidian-window-smoke-draw
+                obsidian-window-smoke-input)
+  0)
+
+(define (obsidian_window_smoke_draw_count ignored)
+  obsidian-window-smoke-draw-count)
+
+(define (obsidian_window_smoke_key_count ignored)
+  obsidian-window-smoke-key-count)
+
+(define (obsidian_window_smoke_mouse_count ignored)
+  obsidian-window-smoke-mouse-count)
+
+(define (obsidian_widget_smoke_record_action action-id)
+  (set! obsidian_widget_smoke_candidate
+        (if (equal? action-id "first")
+            41
+            (if (equal? action-id "second") 42 -1)))
+  (if (equal? action-id "first")
+      (begin
+        (set! obsidian_widget_smoke_activation_count
+              (+ obsidian_widget_smoke_activation_count 1))
+        (set! obsidian_widget_smoke_last_action 41))
+      (if (equal? action-id "second")
+          (begin
+            (set! obsidian_widget_smoke_activation_count
+                  (+ obsidian_widget_smoke_activation_count 1))
+            (set! obsidian_widget_smoke_last_action 42))
+          0)))
+
+(define (obsidian_widget_smoke_draw window)
+  (window-background! window 0.06 0.08 0.12 1.0)
+  (widget-render! window obsidian_widget_smoke_tree 320
+                  obsidian_widget_smoke_selected))
+
+(define (obsidian_widget_smoke_input window event code action mods x y)
+  (if (and (equal? event "key") (= action 1) (= code 256))
+      (window-close! window)
+      0)
+  (if (and (equal? event "key") (= action 1))
+      (begin
+        (set! obsidian_widget_smoke_key_count
+              (+ obsidian_widget_smoke_key_count 1))
+        (set! obsidian_widget_smoke_last_key code))
+      0)
+  (if (and (equal? event "mouse-button") (= code 0) (= action 1))
+      (set! obsidian_widget_smoke_mouse_count
+            (+ obsidian_widget_smoke_mouse_count 1))
+      0)
+  (set! obsidian_widget_smoke_selected
+        (if (= action 1)
+            (widget-input obsidian_widget_smoke_tree
+                          obsidian_widget_smoke_selected
+                          (if (equal? event "key") 0 1)
+                          (list code x y 320))
+            obsidian_widget_smoke_selected))
+  (let ([transition obsidian_widget_smoke_selected])
+    (let ([action-id
+            (if (= action 1)
+                (widget-input-action
+                  obsidian_widget_smoke_tree transition
+                  (if (equal? event "key") 0 1)
+                  (list code x y 320))
+                False)])
+      (if (and (equal? event "mouse-button") (= code 0) (= action 1))
+          (set! obsidian_widget_smoke_mouse_hit
+                (if action-id obsidian_widget_smoke_selected -1))
+          0)
+      (if action-id
+          (obsidian_widget_smoke_record_action action-id)
+          0)))
+  0)
+
+(define (obsidian_widget_smoke_open ignored)
+  (window-open! "Monad widget smoke" 320 240
+                obsidian_widget_smoke_draw
+                obsidian_widget_smoke_input)
+  True)

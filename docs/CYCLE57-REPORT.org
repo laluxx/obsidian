@@ -1,0 +1,79 @@
+#+TITLE: Obsidian Cycle 57 — The actual SDF sidebar joins Emacs-like scene undo
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Why this slice exists
+
+Cycles 51–56 added shared sphere identities, viewport picking/dragging,
+transaction cancellation and Emacs-style undo. The production graphical SDF
+inspector (=render_sdf_inspector= in =src/editor/editor.c=) still wrote the
+same sphere's primitive storage directly, bypassing that journal. Cycle 57
+routes its supported fields through the existing scene journal rather than
+creating a parallel property model.
+
+* Production contract
+
+=editor field controls -> persistent proxy storage ->
+ src/editor/sdf_property_bridge.c -> shared scene-epoch ticket ->
+ src/scene/sdf_inspector.c -> real scene.sdfs -> fence-slot SDF SSBO -> Vulkan=.
+
+- For spheres, Position XYZ, base RGBA, Roughness and Metallic are submitted
+  as validated copies, not written into the live scene before validation.
+  Position and material changes in one render pass produce one undoable record.
+- A sphere created through ordinary scene UI obtains a lazy stable ticket;
+  it need not originate in compiled Monad or the external agent.
+- Sidebar edits do not join or change an open speculative viewport transaction;
+  they fail closed. Invalid values and stale selections reject without
+  changing the supported scene properties or stealing selection.
+- The modal color picker retains its target across frames. Journal-backed UI
+  fields therefore use persistent proxy storage. On a different sphere, the
+  panel closes only its own picker and clears only pointer capture it owns.
+- Publication uses the existing GPU dirty-generation/fence-slot path. There
+  is no shadow scene, mutation queue or second undo implementation.
+
+* Deliberate limits
+
+- Radius, primitive shape/CSG/smoothness, emissive RGB and strength,
+  non-sphere properties, and texture edits are not in this journal. They keep
+  prior direct-edit behavior and are not undoable. Out-of-band direct edits
+  can make earlier journal undo reject on object-state conflict.
+- Sustained sidebar float drags produce multiple undo commands. Full Emacs
+  command-loop boundaries and automatic amalgamation are not implemented.
+- Scene mutation remains owner-thread-only; no QTT-certified effect is added.
+- Visible GUI, color-picker and physical display behavior needs workstation
+  verification; native tests do not substitute for that interaction.
+
+* Verification and reproducibility
+
+#+begin_src sh
+make test-sdf-property-bridge
+make -j2 test
+python3 tests/build-contract.py
+# Requires a complete MonadC SDK and Vulkan host:
+make test-sdf-viewport-runtime
+make run
+#+end_src
+
+The source-bound native test exercises production scene creation, stable
+identity, journal, bridge and SSBO synchronization. The strict integration
+test additionally requires the compiled Monad-created sphere and full runtime.
+Passing native coverage does not establish desktop interaction.
+
+* Post-application verification
+
+- Cycle 57 archive: =python3 tools/incremental_overlay.py verify
+  ../obsidian-monad-cycle57-incremental-20261012.tar.gz= — PASS, 13 members.
+- =make test-sdf-property-bridge= — PASS, including 1,500 scene resets and
+  repeated undo/redo.
+- After Cycle 58 was applied, =make -j2 test= — PASS for available native and
+  tooling suites; Monad/frame integration runners were SKIP.
+- =python3 tests/build-contract.py= — PASS.
+- Changed editor and input translation units compile. Existing warnings in
+  editor/input code remain.
+- Visible widgets, color-picker interaction and physical display — NOT
+  VERIFIED. =make test-sdf-viewport-runtime= reaches real NVIDIA Vulkan setup
+  but fails while loading the Monad module: 5 polymorphic definitions lack a
+  closed native ABI, before it exercises the sidebar interaction.
+- Cycle 58 extends the historical Cycle 57 limits: sphere radius, CSG/
+  smoothness and emission now join the journal. Non-sphere fields and
+  continuous-drag coalescing were outside Cycle 57 and added in Cycle 58.

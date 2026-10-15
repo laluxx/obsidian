@@ -1,0 +1,28 @@
+;;; publication-queue-contract.mon --- Cycle 13 — source-request scheduler observability in actual embedded Monad.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract publication-queue-contract
+
+;;; Commentary:
+
+This is a real integration-gated fixture: the engine host must register
+these procedures. A reader/parser-only test cannot establish behavior.
+
+;;; Code:
+(define (publication-queue-contract)
+  (and (>= (publish-queued) 0)
+       (<= (publish-queued) 2)
+       (>= (publish-completed) 0)
+       (>= (publish-coalesced) 0)
+       (>= (publish-failed) 0)
+       (>= (publish-cancelled) 0)))
+
+;;; Do not confuse an empty host queue with a compiler-verified candidate:
+;;; the latter requires independent MonadC candidate-image APIs.
+(define (publication-queue-observation)
+  (list (publish-queued)
+        (publish-completed)
+        (publish-coalesced)
+        (publish-failed)
+        (publish-cancelled)))

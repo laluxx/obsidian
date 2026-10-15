@@ -1,0 +1,73 @@
+#+TITLE: Obsidian MSDF pipeline — upstream msdfgen integration
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Obsidian has two different SDF technologies:
+- =shaders/sdf.frag= and =src/graphics/sdf.c=: 3D scene ray-marching of
+  analytic/CSG primitives. Keep this separate from glyph/vector MSDF.
+- =src/graphics/msdf_generator.{h,cpp}=, =tools/msdf/= and
+  =shaders/msdf_glyph.frag=: generation and decoding of 2D vector-glyph
+  multi-channel distance textures. This is an optional, opt-in tool now;
+  it is NOT installed as the default editor font/atlas renderer.
+
+* Reference model
+
+Upstream: https://github.com/Chlumsky/msdfgen (MIT license).
+Implemented through the actual upstream library, NOT a crude independent
+approximation. Glyph shapes use FreeType outlines (through msdfgen-ext),
+normalize, per-edge RGB coloring, =generateMSDF= and a distance window.
+Read README's =Library API= and =Using a multi-channel distance field=.
+The red/green/blue channels are not color; sample as *linear UNORM*.
+Median of RGB recovers distance. RGBA alpha is 1 (MTSDF is not generated).
+
+The original engine font atlas uses glyph coverage in RGBA sRGB alpha;
+packing MSDF samples into the old atlas would produce incorrect colors
+and break old face-shader effects. This deliberately remains isolated.
+
+* Building the optional generator
+
+When msdfgen is installed as a CMake package:
+#+begin_src sh
+make msdf-tool
+build/msdf/obsidian-msdf /path/font.ttf 0x41 capital-A.ppm
+#+end_src
+
+Alternatively point at a local upstream msdfgen checkout:
+#+begin_src sh
+make msdf-tool MSDFGEN_SOURCE_DIR=../msdfgen
+#+end_src
+
+The CMake subproject sets upstream VCPKG/SKIA/standalone off; FreeType
+and libpng are still upstream build dependencies. Output is P6 PPM (RGB
+linear UNORM), with 64x64 pixels and a 4px distance range by default.
+The reusable C ABI returns top-down RGBA8 pixels and the projection range.
+The caller owns its allocation and frees it using =obs_msdf_release=.
+No vendor licensing ambiguity: msdfgen is referenced, not redistributed.
+
+* Geometry, range and GPU contract
+
+- Finite normalized glyph bounds and pixel dimensions are validated.
+- Scaling is uniform, aspect-preserving; glyph is centered with padding
+  sufficient for the requested pixel range. Whitespace/empty outlines are
+  currently returned as a meaningful error (atlas callers must special-case).
+- =pixel_range= is measured in source bitmap pixels; the shader computes
+  =screenPxRange= through =fwidth=, clamped to at least one pixel.
+- Use =VK_FORMAT_R8G8B8A8_UNORM= and linear filtering (NEVER SRGB).
+- Store atlas glyph UV rectangle *plus* the source distance range and plane
+  bounds; a resized quad must account for its own UV/texel footprint.
+- Any eventual MTSDF (true distance in alpha) is a separate format/path.
+
+* Integration blockers
+
+- [ ] Build and run against REAL upstream msdfgen headers and libraries.
+- [ ] Validate corner/join accuracy, holes, ligatures, Unicode glyphs,
+      negative bearings and mixed font sizes using saved golden images.
+- [ ] Implement a distance-aware packed font atlas and separate sampler
+      class; preserve existing bitmap atlas as selectable fallback.
+- [ ] Wire a real Vulkan pipeline and descriptor/sampler for MSDF glyphs.
+- [ ] Ensure pipeline hot swap occurs after old GPU work is retired.
+- [ ] Give Monad typed MSDF/font-atlas foreign objects after generation and
+      lifetime contracts are proven. Do not expose raw VkImage/VkDevice.
+- [ ] Profile rasterization, packing, GPU upload and glyph visual quality.

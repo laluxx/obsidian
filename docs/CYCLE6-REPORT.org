@@ -1,0 +1,74 @@
+#+TITLE: Obsidian — Cycle 6 implementation report
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+This is an incremental overlay on the canonical =obsidian/= tree after Cycle 5.
+The first priority was restoring the default engine build target and removing
+an undocumented dependency on a generated font header that is absent from
+shipped archives. The second priority was a coherent *Monad language surface*
+on top of the existing typed, opaque host-object bridge.
+
+* Done in source
+
+- =.DEFAULT_GOAL := all=; =all: internal_build= respects =make -jN= rather
+  than spawning an unconditional second, machine-wide make.
+- The editor no longer includes =assets/fonts/MapleMono-NF-Regular.h=.
+  =load_editor_font= tries =OBSIDIAN_EDITOR_FONT=, an optional local
+  =assets/fonts/MapleMono-NF-Regular.ttf= file, then a Fontconfig monospace
+  font. It fails with a clear diagnostic if *no* font can be found.
+  No proprietary font bytes are packaged, synthesized, or copied.
+- Short, direct embedded Monad constructors =scene=, =camera=, =node=, =mesh=,
+  =sdf=, =gltf=, =render= added alongside the compatible =obs-*= low-level
+  interface. Explicit read/write operations are consistently noun-prefixed:
+  =mesh-name=, =mesh-visible?=, =mesh-visible!=, =sdf-material!=, etc.
+- The short and explicit mesh/SDF/glTF/node constructors share a borrow
+  helper *per subsystem* rather than duplicating handle creation and bounds.
+- Node and camera code uses the shared foreign-host reference validation;
+  input, camera and scene subsystem registration now use =obs_host_register=.
+- =modules/obsidian/language.mon= demonstrates native Monad =Syntax -> Syntax=
+  macros based on Glemax's =lisp/subr.mon= pattern. No second interpreter.
+- =modules/obsidian/live-world.mon= provides a readable Monad gameplay API
+  example; compatibility =obsidian-*= modules retain their old entry points.
+- =tests/monad/cycle6-{language,macro,error}-contract.mon= add executable
+  engine-hosted contracts: consistency with old ABI, macro expansion,
+  invalid-index/type rejection. =tests/run_monad.sh= discovers them.
+
+* Observed verification
+
+- [X] =make -n= selects shader+engine dependencies, not =msdf-tool=.
+- [X] =make test= passes UTF-8, stats, watcher tests. Runs guarded Vulkan
+      capacity test only when Vulkan headers exist. Monad tests skipped here.
+- [X] No unconditional editor include of generated font header remains.
+- [X] Complete clean-source overlay reapplication / SHA-256 (see manifest).
+- [ ] Full engine compile+link: required development libraries and
+      =glslangValidator= are not installed in this execution environment.
+- [ ] Real MonadC compiled image -> dynamic bindings -> foreign-value execution.
+- [ ] Macro syntax checked by the exact MonadC version used by the user.
+- [ ] Runtime font selection and rendered glyph output validated on a GPU.
+
+* Architecture / safety
+
+The compact functions are *real C-registered Monad dynamic bindings*, not
+string rewriting or a second Scheme/Lisp evaluator. The normal shape is
+=(mesh i)=, =(mesh-name m)=, =(mesh-visible! m True)=. The short form and
+explicit host form refer to the same C-owned scene storage, checked at every
+call. They remain generation/structural-epoch checked borrowed references;
+structural edits can invalidate them. Stable logical entity identity is not
+implemented. Only the engine owner thread can call these capabilities.
+
+=with-mesh= and related syntax transformers remain integration-gated until
+MonadC's compiled-image/dynamic-object-space behavior is proven. Source-level
+macros here do not prove compiled execution or hygienic macro expansion.
+
+* Remaining blockers and next cycle
+
+1. Prove real MonadC ABI/dynamic object-space integration in a full engine.
+2. Carry out a full linked build and asset/renderer smoke test.
+3. Unify introspection and stable logical IDs for scene nodes and meshes.
+4. Publish QTT-aware transactional hot replacement from compiler-owned API,
+   without guessing ABI compatibility or live-state ownership from C.
+5. Profile font atlas update costs and GPU p95/p99 on an actual target device.
+
+No performance improvements are claimed without runtime measurements.

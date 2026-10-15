@@ -1,0 +1,73 @@
+#+TITLE: Obsidian — Cycle 24: Mesh material and world-transform foreign views
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Implemented
+
+- =src/monad/mesh_views_api.[ch]=: separate nominal =obsidian.material= and
+  =obsidian.transform= foreign references derived from existing stable mesh IDs.
+- =src/scene/mesh_properties.[ch]=: allocation-free, all-or-nothing validation
+  and updates for PBR metallic/roughness, RGBA and model translation.
+- GPU-visible mutations use existing =markMeshDirty= on changed mesh slots;
+  transform updates also synchronize any attached physics body.
+- =modules/obsidian/language.mon=: =with-material= and =with-transform= lexical
+  Syntax transformations; =modules/obsidian/material.mon=: short helpers.
+- New native validator tests wired into =make test-native= and an opt-in
+  Monad engine integration fixture.
+- One central root =TODO.org= remains the task ledger.
+
+* Tests
+
+- =make test-native=: PASS (including 50,000 property validator cases).
+- =make test=: PASS (using the user-supplied public Monad SDK headers;
+  real runtime/JIT/graphics integration remains SKIP).
+- =gcc -std=c23 -Wall -Wextra -Werror -pedantic -fsyntax-only=: PASS for
+  =mesh_views_api.c= against real public embed SDK headers plus local
+  renderer/scene stub declarations.
+- Full Vulkan/FreeType/Jolt engine: NOT VERIFIED in this environment.
+- MonadC real eval, QTT host effects, GPU screenshots and animated transform
+  persistence: NOT VERIFIED.
+- New pure helper tested under ASan/UBSan: PASS.
+- Clean prior-cycle overlay and checksum verification: PASS.
+
+* Semantics / performance
+
+Material/transform views have zero new registry allocations beyond an initial
+borrow of the underlying mesh identity; every access validates that identity
+and engine owner thread. The numerical transaction makes one pass through
+up to four scalars and skips GPU dirty writes on no-op. No FPS improvement or
+actual GPU dispatch latency is claimed. The adapter stays in src/monad and
+GPU ownership remains in the engine.
+
+* Known limitations and next cycle
+
+- Material view refers to Mesh PBR factors, not a standalone material asset.
+- World-model transform edits may be overwritten by glTF animation.
+- Generic QTT effect/proof typing is not yet exported to the compiler ABI.
+- Integrate real Monad runner with assertions and Vulkan validation; then
+  model animated transforms and persistent material assets explicitly.
+
+* Application into the cumulative worktree
+
+Only Cycle 24's new mesh-view API, numeric property seam, Monad syntax and test
+files were merged. Its Makefile and =bindings.c= revisions also contained
+unrelated reversions of Cycle 20 publication-coherence/keymap work, Cycle 23
+identity tests, and engine benchmark/test targets; those were kept from the
+current tree. This report records the archive's test claims separately from
+the local verification performed after integration.
+
+The cumulative local =make -j= completed the full engine link, including
+=mesh_views_api.c= and the Monad render-policy setters. =make test-native= and
+=make test= passed; the latter also ran SDK-backed host syntax checks. Its first
+run exposed the missing =-Isrc/scene= include path in the Cycle 23
+=foreign.h= dependency; that path was added and the full test target passed on
+the next run. =make test= explicitly skipped Monad/JIT and live-frame
+integration because neither runner is configured. No Vulkan rendering or
+interactive scene test was performed.
+
+Cycle 24 audit found that the archived transform setter dirtied GPU mesh state
+but did not synchronize an attached Jolt body; =physics_step= could therefore
+overwrite the scripted transform with the body's old pose. The merged setter
+now calls =physics_set_transform= only after a changed translation, matching
+the editor/gizmo teleport path (including its velocity reset), then marks the
+GPU slot dirty.

@@ -1,0 +1,18 @@
+;;; bench-meshlet-growth.mon --- portable geometry arena and meshlet workload.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract bench-meshlet-growth
+
+;;; Commentary:
+
+Scene 12 loads the checked-in deterministic arena-growth fixture.
+
+;;; Code:
+(define (obsidian-benchmark-scene-id [ignored : Int] -> Int) 12)
+(define (obsidian-benchmark-width [ignored : Int] -> Int) 640)
+(define (obsidian-benchmark-height [ignored : Int] -> Int) 360)
+(define (obsidian-benchmark-warmup [ignored : Int] -> Int) 30)
+(define (obsidian-benchmark-frames [ignored : Int] -> Int) 120)
+(define (obsidian-benchmark-cache-mode [ignored : Int] -> Int) 0)
+(define (obsidian-benchmark-min-meshes [ignored : Int] -> Int) 1)

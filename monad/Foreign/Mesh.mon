@@ -1,0 +1,52 @@
+;;; Mesh.mon --- Foreign methods for borrowed Obsidian mesh references
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian mesh scene foreign
+
+;;; Commentary:
+
+ Mesh values are engine-owned, generation-checked references. The C host
+ validates each receiver against the live scene before reading or changing it;
+ scripts never receive a Mesh pointer or Vulkan handle.
+
+ The methods below delegate to the engine's checked host operations. Mesh
+ references are borrowed and expire when their scene identity is invalidated.
+
+;;; Code:
+
+import Foreign.Material
+import Foreign.Transform
+
+module Foreign.Mesh
+  [Mesh ◯ at describe index name visible? visible! material-index material transform]
+
+type ◯ :: {Mesh}
+type Mesh = ◯
+
+define at :: Int -> ◯
+  index -> obs-scene-mesh (obs-current-scene) index
+
+method describe :: ◯ -> String
+  mesh -> mesh-name mesh
+
+method index ::                                 ◯ -> Int
+  mesh -> mesh-index mesh
+
+method name ::                                  ◯ -> String
+  mesh -> mesh-name mesh
+
+method visible? ::                              ◯ -> Bool
+  mesh -> mesh-visible? mesh
+
+method visible! ::                              ◯ -> Bool -> ()
+  mesh visible -> mesh-visible! mesh visible
+
+method material-index :: ◯ -> Int
+  mesh -> mesh-material-index mesh
+
+method material :: ◯ -> Material
+  mesh -> mesh-material mesh
+
+method transform :: ◯ -> Transform
+  mesh -> mesh-transform mesh

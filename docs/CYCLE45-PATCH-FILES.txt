@@ -1,0 +1,15 @@
+Makefile
+TODO.org
+docs/CYCLE45-PATCH-FILES.txt
+docs/CYCLE45-REPORT.org
+src/assets/gltf_cook_static.c
+tests/fixtures/async-static-cycle.gltf
+tests/fixtures/async-static-hierarchy.gltf
+tests/fixtures/async-static-instancing.gltf
+tests/fixtures/async-static-meshopt.gltf
+tests/fixtures/async-static-orphan.gltf
+tests/fixtures/async-static-required-extension.gltf
+tests/fixtures/async-static-textured.gltf
+tests/fixtures/async-static-variant.gltf
+tests/native/async_gltf_controller.c
+tests/native/gltf_cook_static.c

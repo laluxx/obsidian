@@ -1,0 +1,27 @@
+;;; Camera.mon --- Foreign methods for the guarded camera capability
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign camera
+
+;;; Code:
+
+module Foreign.Camera
+  [Camera ◯ current yaw pitch angles! move!]
+
+type ◯ :: {Camera}
+
+define current :: IO ◯
+  (obs-current-camera)
+
+method yaw :: ◯ -> Float
+  camera -> camera-yaw camera
+
+method pitch :: ◯ -> Float
+  camera -> camera-pitch camera
+
+method angles! :: ◯ -> Float -> Float -> Unit
+  camera yaw pitch -> camera-angles! camera yaw pitch
+
+method move! :: ◯ -> Float -> Float -> Float -> Unit
+  camera x y z -> camera-move! camera x y z

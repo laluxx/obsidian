@@ -1,0 +1,17 @@
+;;; reload-polling-invariants.mon --- Pure Monad property check for the observation of reload counters.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract reload-polling-invariants
+
+;;; Commentary:
+
+Pass the before/after snapshots captured by the engine test harness.
+
+;;; Code:
+(define (obsidian-reload-counters-valid
+          [before-attempts : Int] [before-published : Int]
+          [after-attempts : Int] [after-published : Int] -> Bool)
+  (and (>= after-attempts before-attempts)
+       (>= after-published before-published)
+       (<= after-published after-attempts)))

@@ -1,0 +1,44 @@
+;;; Scene.mon --- Foreign methods for the live scene capability
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign scene
+
+;;; Code:
+
+import Foreign.GltfInstance
+import Foreign.Mesh
+import Foreign.Node
+import Foreign.Sdf
+
+module Foreign.Scene
+  [◯ Scene current node-count mesh-count sdf-count gltf-count node mesh sdf gltf]
+
+type ◯ :: {Scene}
+
+define current :: IO ◯
+  (obs-current-scene)
+
+method node-count :: ◯ -> Int
+  scene -> obs-scene-node-count scene
+
+method mesh-count :: ◯ -> Int
+  scene -> obs-scene-mesh-count scene
+
+method sdf-count :: ◯ -> Int
+  scene -> obs-scene-sdf-count scene
+
+method gltf-count :: ◯ -> Int
+  scene -> obs-scene-gltf-count scene
+
+method node :: ◯ -> Int -> Node
+  scene index -> obs-scene-node scene index
+
+method mesh :: ◯ -> Int -> Mesh
+  scene index -> obs-scene-mesh scene index
+
+method sdf :: ◯ -> Int -> Sdf
+  scene index -> obs-scene-sdf scene index
+
+method gltf :: ◯ -> Int -> GltfInstance
+  scene index -> obs-scene-gltf scene index

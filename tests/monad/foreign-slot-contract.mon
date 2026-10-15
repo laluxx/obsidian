@@ -1,0 +1,29 @@
+;;; foreign-slot-contract.mon --- Cycle 22: dense scene capabilities resolve identity without an O(n) scan.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract foreign-slot-contract
+
+;;; Commentary:
+
+Real MonadC integration gate: run inside the live engine on the owner thread.
+Structural mutations invalidate old handles via QTT/host epochs; the
+constant-time slot resolver never overrides that rule.
+
+;;; Code:
+(define (foreign-slot-contract)
+  (let ([world (scene)])
+    (and
+      (if (> (mesh-count world) 0)
+          (= (mesh-index (mesh 0)) 0)
+          True)
+      (if (> (sdf-count world) 0)
+          (= (sdf-index (sdf 0)) 0)
+          True)
+      (if (> (gltf-count world) 0)
+          (= (gltf-index (gltf 0)) 0)
+          True)
+      (if (> (node-count world) 0)
+          (= (node-index (node 0)) 0)
+          True))))
+(if (foreign-slot-contract) True (error "Cycle 22 slot identity failed"))

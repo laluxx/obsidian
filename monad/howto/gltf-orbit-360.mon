@@ -1,0 +1,42 @@
+;;; gltf-orbit-360.mon --- wait for a glTF scene, then yaw a full circle
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto gltf-orbit-360
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/gltf-orbit-360.mon ./obsidian
+Load a glTF scene in the editor after startup (Monad has no scene-load
+binding; loading is editor-owned). Once an instance with meshes exists,
+pitch locks at -12 degrees and yaw advances 6 degrees per frame: one
+full 360 every 60 frames. Yaw wraps in-module; the host validates bounds.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define yaw-rate 6)
+
+(define (orbit-yaw n)
+  (if (> (* n yaw-rate) 360)
+      (- (* n yaw-rate) 360)
+      (* n yaw-rate)))
+
+(define (orbit-frame f)
+  (if (and (> (gltf-count (scene)) 0)
+           (> (gltf-mesh-count (gltf 0)) 0))
+      (begin
+        (camera-angles! (camera) (orbit-yaw (frame-number f)) -12.0)
+        True)
+      True))
+
+(on-frame! orbit-frame)

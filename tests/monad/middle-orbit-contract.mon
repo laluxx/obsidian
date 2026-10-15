@@ -1,0 +1,54 @@
+;;; middle-orbit-contract.mon --- Obsidian Monad module.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract middle-orbit-contract
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+:TEST-ID tests.obsidian.middle-orbit
+:TEST-CONTEXT obsidian editor camera navigation
+:TEST-PURPOSE Monad owns middle-drag orbit direction and sensitivity.
+:TEST-EXPECT compile, run, all orbit policy assertions pass
+:TEST-TIER regression
+
+module Tests.Obsidian.MiddleOrbit
+  []
+
+define orbit-yaw-urad :: Int -> Int
+  delta-millipixels -> delta-millipixels * 10
+
+define orbit-pitch-urad :: Int -> Int
+  delta-millipixels -> delta-millipixels * 10
+
+define drag-begin :: Int -> Int -> [Int]
+  x y -> list 1 x y
+
+define drag-move :: [Int] -> Int -> Int -> [Int]
+  [1, old-x, old-y] x y -> list 1 x y (x - old-x) (y - old-y)
+  _ _ _ -> list 0 0 0 0 0
+
+define drag-release :: [Int] -> [Int]
+  _ -> list 0 0 0
+
+tests
+  assert-eq (drag-begin 100 200) (list 1 100 200) "Press starts a drag at the current cursor"
+  assert-eq (drag-move (drag-begin 100 200) 100 200)
+    (list 1 100 200 0 0) "No-motion frame has no rotation"
+  assert-eq (drag-move (drag-begin 100 200) 110 220)
+    (list 1 110 220 10 20) "Move reports signed screen-space deltas"
+  assert-eq (drag-move (drag-begin 110 220) 100 200)
+    (list 1 100 200 -10 -20) "Opposite drag reverses both axes"
+  assert-eq (drag-move (drag-release (drag-begin 100 200)) 110 220)
+    (list 0 0 0 0 0) "Release disables further motion"
+  assert-eq (drag-move (drag-begin 500 400) 500 400)
+    (list 1 500 400 0 0) "Re-press establishes a fresh cursor anchor"
+  assert-eq (orbit-yaw-urad 1000) 10000 "One pixel rotates yaw by 0.01 radians"
+  assert-eq (orbit-yaw-urad -1000) -10000 "Left drag reverses yaw"
+  assert-eq (orbit-yaw-urad 0) 0 "No horizontal motion has no yaw"
+  assert-eq (orbit-pitch-urad 1000) 10000 "Downward screen delta raises the orbit camera"
+  assert-eq (orbit-pitch-urad -1000) -10000 "Upward screen delta reverses pitch"
+  assert-eq (orbit-pitch-urad 0) 0 "No vertical motion has no pitch"

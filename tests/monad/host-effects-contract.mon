@@ -1,0 +1,23 @@
+;;; host-effects-contract.mon --- Real engine integration-gated regression Execute through the embedded Monad test runner, not an isolated parser.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract host-effects-contract
+
+;;; Commentary:
+
+host-effects-contract.mon — Real engine integration-gated regression
+Required assertions for the host harness:
+1. During image publication (engine-mutable?) is False; scene
+node-visible!, camera-move!, mesh-visible!, sdf-material! reject.
+2. At an active callback (engine-mutable?) is True; only valid borrowed
+objects accept writes, and the engine remains owner of all storage.
+3. A rejected image with a staged invalid/native-owned key chord MUST
+not alter the live keymap or installed frame callback.
+4. An ended Frame capability MUST fail, even if held in a Monad value.
+5. Leak-check retained native images across repeated failures.
+The native effect-policy test checks only the host phase matrix.
+
+;;; Code:
+(define (engine-effect-observation)
+  (list (engine-mutable?) (engine-gpu-mutable?)))

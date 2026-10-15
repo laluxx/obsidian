@@ -1,0 +1,39 @@
+;;; camera-state.mon --- absolute placement plus full pose readback
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto camera-state
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/camera-state.mon ./obsidian
+Frame 1 parks the camera at (6, 4, 6); every frame reports position XYZ
+plus yaw and pitch in degrees. Relative nudges live in camera-fly.mon and
+key-command.mon; the 360 tour lives in gltf-orbit-360.mon.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (state-frame f)
+  (begin
+    (if (= (frame-number f) 1)
+        (begin (camera-position! (camera) 6.0 4.0 6.0) True)
+        True)
+    (list (camera-x (camera))
+          (camera-y (camera))
+          (camera-z (camera))
+          (camera-yaw (camera))
+          (camera-pitch (camera)))
+    True))
+
+(on-frame! state-frame)

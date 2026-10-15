@@ -1,0 +1,216 @@
+#+TITLE: Obsidian Cycle 53 — Emacs-compatible scene undo semantics
+#+SUBTITLE: Source research, bounded inverse records, command groups and executable verification
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Source authorities and what is actually copied
+
+Research input: user-supplied GNU Emacs =lisp/simple.el= (2026 version):
+- =undo-equiv-table=, =undo=, =undo-only=, =undo-redo=,
+  =undo-more=, =primitive-undo= and =undo-start=, around lines 3422–3807.
+- =undo-auto--boundaries=, =undo-auto-amalgamate= and
+  =amalgamating-undo-limit=, around lines 4052–4180 and 49–55.
+Official references:
+- https://www.gnu.org/software/emacs/manual/html_node/emacs/Undo.html
+- https://www.gnu.org/software/emacs/manual/html_node/elisp/Undo.html
+- https://www.gnu.org/software/emacs/manual/html_node/elisp/Maintaining-Undo.html
+
+This implementation reproduces *command-level behavioral semantics* on the
+supported SDF property transaction domain. It does NOT copy Lisp code, emulate
+Emacs text buffers, use =undo-equiv-table=, or claim full Emacs equivalence.
+
+* What was wrong in Cycle 52
+
+A conventional array =commands[64], cursor= destroys redo on a fresh edit
+and makes the normal =undo= command an ordinary backwards cursor. Emacs instead
+records the inverse of every undo in the same undo list. Repeated undo commands
+walk a saved older tail, rather than immediately undoing their own inverses.
+After an intervening command, the next =undo= starts at the actual head and can
+undo an earlier undo (therefore redo a user edit). =undo-only= skips those
+inverses. =undo-redo= explicitly consumes an undo-generated record; it does not
+append another redo record. These are different command semantics.
+
+* Supported scene semantics
+
+| Source mechanism | Implemented scene behavior |
+|------------------+----------------------------|
+| buffer-local chronological change records | one scene-epoch 64-record journal of float-quantized SDF before/after state |
+| nil boundary between keyboard commands | one new group ID per successful inspector edit |
+| repeated =undo= / pending old tail | =undo_sequence= + saved =pending= index, independent of appended inverse records |
+| undoing an undo after a non-undo command | =command_boundary= then ordinary =undo= replays the prior inverse |
+| =undo-only= without redo | skip inverse-generated records and original changes already undone |
+| =undo-redo= | consume latest undo-generated group after validation; no new inverse record |
+| =undo-amalgamate-change-group= | explicit begin/end group across property edits and sphere tickets |
+| bounded undo list truncation | evict oldest record on 64-entry capacity; no unbounded allocations |
+| primitive edit hooks | production SDF =publish= + flight-slot fence-safe =flushSdfSSBO= |
+
+Emacs-style reversibility: a normal edit after undo does NOT truncate its
+historical inverse records. A later ordinary undo may traverse them. To keep
+=undo-only= from targeting an original edit already undone, originals track
+logical active/inactive state with unique serial root identity. Recording and
+replaying inverse records toggles the corresponding root, if still retained.
+
+Each grouped undo does an entire reverse-order simulated preflight before any
+publication. A denied, stale, malformed, or conflicting edit leaves CPU scene
+and journal unchanged. Every inverse is added only after preflight succeeds.
+The owner-thread effect gate and existing SDF fence-slot publisher remain
+mandatory. An open group refuses undo, redo and nesting. Non-undo selection or
+explicit command boundary terminates a consecutive undo sequence.
+
+* Public C API contract
+
+| Function | Contract |
+|----------+----------|
+| =obs_sdf_inspector_undo= | Invert the next applicable chronological command group. Consecutive calls walk older groups; a command boundary permits undo-of-undo. |
+| =obs_sdf_inspector_undo_only= | Same traversal, but skip inverse-generated groups and inactive originals. A successful inversion still appends its inverse record. |
+| =obs_sdf_inspector_undo_selected= | Find the newest active original group touching the selection; invert the whole group. A newer active command touching any group member returns conflict. |
+| =obs_sdf_inspector_redo= | Consume the newest inverse group after full preflight; reify a new original group if all source roots were evicted. |
+| =obs_sdf_inspector_command_boundary= | End the consecutive-undo cursor in the current epoch; does not commit/cancel a preview or edit scene values. Epoch sync may discard stale history first. |
+| =obs_sdf_inspector_state= | Return selection plus advisory retained-history counts; stale selection is cleared on query. |
+| =obs_sdf_inspector_clear= | Drop journal records and break the sequence without editing scene values; preserve a live selection, but epoch sync may clear a stale one. An open preview makes it invalid. |
+
+Mutating history calls return =OBS_SDF_EDIT_INVALID= during an open preview,
+=OBS_SDF_EDIT_EMPTY= when there is no candidate, and =OBS_SDF_EDIT_STALE= or
+=OBS_SDF_EDIT_CONFLICT= when the preflight cannot safely replay. Failed undo,
+redo, or clear does not partially publish scene changes. The API is owner-thread
+only; callers must apply their existing engine-owner/effect admission.
+
+* Behavioral traces
+
+Each example starts with one sphere at X=0 and no edit records.
+
+#+begin_example
+edit X=1; edit X=2; undo; undo                => X=0
+boundary; undo; undo                         => X=2  (undo the undos)
+boundary; undo-only; undo-only                => X=0  (skip inverse records)
+
+edit X=1; edit X=2; undo; undo-redo           => X=2
+edit X=3; undo-redo                          => rejected: no recent undo
+
+begin-group; edit X=1; edit X=2; end-group
+undo                                          => X=0  (one command)
+undo-redo                                     => X=2
+#+end_example
+
+* Verification ledger
+
+- Undo/redo reuse the stable primitive pointers resolved by complete inverse
+  preflight instead of resolving each ticket and snapshotting its state again
+  during publication. This relies on the owner-thread invariant: no scene
+  mutator runs between preflight and publication.
+- Committed command groups contain at most one record per ticket. Group commit
+  folds repeated previews to one before/after pair; standalone edits are
+  singleton groups; generated inverse/redo groups preserve that membership.
+  Preflight therefore checks each member against its live postimage directly,
+  removing the former per-member scan/simulation of earlier group entries.
+  The repeated-ticket transaction fixture verifies that multiple previews of
+  the same object still undo/redo as one atomic group.
+- Ticket resolution uses a fixed reverse index for scenes larger than 16
+  objects, with linear lookup retained for smaller scenes. The index adds
+  4 KiB to each =ObsSdfTickets= and holds at most 1024 entries in 2048
+  buckets; creation and lookup allocate no memory. Lookup has bounded linear
+  probing (at most 2048 buckets), with no deletion/recycling within an epoch.
+  The public history remains capped at 64 records; no undo API semantics or
+  scene/GPU publication ordering changed.
+- =make bench-sdf-undo BENCH_ITERATIONS=4000= profiles the production journal
+  at 1, 16 and 64 objects per atomic group. It reports per-operation median,
+  p95 and maximum CPU nanoseconds. The fixture uses the production journal,
+  token resolver, and SDF publisher with the native scene fixture; it does not
+  time Vulkan or claim frame/GPU latency. Timings are informational, not a
+  pass/fail threshold.
+
+  | Group | Operation | Initial p50 (ns) | Current p50 (ns) | Change |
+  |-------+-----------+-----------------+-----------------+--------|
+  | 1 | Undo | 260 | 220 | -15% |
+  | 1 | Redo | 240 | 200 | -17% |
+  | 16 | Undo | 2255 | 1543 | -32% |
+  | 16 | Redo | 2084 | 1323 | -37% |
+  | 64 | Undo | 12654 | 6782 | -46% |
+  | 64 | Redo | 11571 | 6122 | -47% |
+
+  The latest 4000-sample run also reduced 64-object-group p50 from the
+  pointer-reuse-only version (8686/7754 ns) to 6782/6122 ns for undo/redo,
+  about 22%/21%; 16-object groups improved about 5%/6%. Small-group results
+  are effectively unchanged. p95 and maximums varied with host scheduling;
+  use medians as observed workload evidence, not a portable guarantee. Both
+  builds used GCC C23 =-O3= on the same workstation.
+
+- =tests/native/emacs_scene_undo.c=: real production inspector, tokens,
+  scene SDF append and GPU-slot publication compiled as strict C23. Covers
+  consecutive undo, undo-of-undo, undo-only, redo removal, group boundaries,
+  grouped multi-entity atomicity, conflict rejection, reset, eviction and
+  2,000 deterministic edit/invert/redraw sequences.
+- =tests/native/sculpt_api.c=: invokes the actual registered Monad host
+  callbacks, including wrong-effect refusal and the new commands.
+- =tests/native/agent_engine.c=: actual external C façade, owner and effect
+  checks, command group with two edits, break, undo-of-undo and undo-only.
+- =tests/integration/agent_sculpture.c=: full linked Vulkan/MonadC acceptance
+  extends the existing sculpture demo with undo-of-undo / undo-only / redo;
+  still requires =make test-sculpture-runtime= on an SDK-equipped device.
+- =tests/emacs/undo-reference.el=: independent ERT oracle for actual GNU Emacs
+  text undo command behavior; run =make test-emacs-reference= **with Emacs**.
+  Not a mock. Optional oracle is strict and MUST NOT be counted as passed
+  when GNU Emacs is not installed.
+
+Recommended commands:
+#+begin_src sh
+make test-emacs-scene-undo
+make test
+make bench-sdf-undo BENCH_ITERATIONS=4000
+make test-emacs-reference       # requires installed GNU Emacs; no silent skip
+make test-sculpture-runtime     # requires actual MonadC and Vulkan
+#+end_src
+
+* Deliberate boundaries versus full Emacs
+
+- Text offsets, markers, selective region undo, file modified timestamps,
+  per-buffer independent histories, timer-generated boundaries and GC-based
+  byte-budget trimming are NOT scene operations. No claim of those semantics.
+- The host cannot infer arbitrary editor key-command boundaries yet; scene
+  inspectors must call =command_boundary= after a non-undo UI command. A
+  successful selection and every normal inspector edit do so automatically.
+- Automatic 20-insert amalgamation isn't appropriate to world-property edits.
+  Explicit begin/end grouping is provided for editor drags and compound edits.
+- Only inspector-mediated edits are journaled. Direct =sdf-move!= and legacy
+  setters can cause a conflict; the engine refuses an unsafe replay rather
+  than silently rewriting unrelated scene data.
+- History is volatile and bounded. Oldest records may expire while an undo
+  temporarily occupies one slot. Do not mistake the counts for a promise of
+  replayability: a record can fail because its scene ticket or live state
+  changed outside this journal.
+- Active compiler QTT/effects, physics, GPU resource creation/deletion and
+  scene graph topology are not rewindable by this transaction journal.
+
+* Cycle 54 — Emacs atomic change groups and scene gesture cancellation
+
+Emacs =atomic-change-group= / =prepare-change-group=, =accept-change-group=,
+=cancel-change-group= distinguish committed changes from cancelled ones. See
+GNU Emacs Lisp manual:
+https://www.gnu.org/software/emacs/manual/html_node/elisp/Atomic-Changes.html
+
+Cycle 54 applies that model to one owning scene (not general Emacs buffers):
+previewed SDF property edits remain outside the committed inverse history
+until accepted, and cancellation validates + undoes all previews newest-first.
+The preview limit is 64, groups cannot nest, non-inspector writes can veto
+commit/cancellation, and all edits remain scene-epoch scoped. This is **not**
+source-identical implementation of Emacs Lisp undo internals, nor a compiler
+QTT certificate. =tests/native/scene_gesture.c= exercises actual C source.
+
+* Cycle 64 — Editor input command boundaries
+
+=src/platform/scene_undo_input.c= maps editor events to the existing command
+boundary. Other pressed keys, delivered character/IME events, pointer presses,
+nonzero scroll and focus loss terminate a consecutive undo run. Modifier
+presses, key releases/repeats, pointer motion and zero scroll do not. Actual
+scene-owned =Ctrl+Z=, =Ctrl+Shift+Z= and =Ctrl+Alt+Z= continue the run.
+
+Keymaps and text input get their existing dispatch opportunity before the
+scene undo shortcuts. If they consume =Ctrl+Z=, it is classified as another
+command. An open speculative property gesture remains owned by its UI path;
+an input boundary neither commits nor cancels it. The focused native fixture
+exercises the production input adapter and journal. It does not establish
+physical GLFW ownership or rendered output; see =docs/CYCLE64-REPORT.org=.
+
+This does not add a universal command loop to external C agent calls or
+arbitrary Monad evaluation. Those paths must explicitly report their own
+non-undo command boundaries.

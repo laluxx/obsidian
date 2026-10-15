@@ -1,0 +1,23 @@
+;;; native-gameplay-policy.mon --- typed native Monad smoke contract.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract native-gameplay-policy
+
+;;; Commentary:
+
+native-gameplay-policy.mon — typed native Monad smoke contract.
+These functions are not interpreted Lisp; they must compile as native Monad.
+Test via the MonadC native loader and look up Int -> Int symbols.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm [current : Int] -> Int)
+  (+ current 375))
+
+(define (obsidian_policy_expected_step [current : Int] -> Int)
+  (- (obsidian_camera_step_mm current) current))
+
+(define (obsidian_policy_double_step [current : Int] -> Int)
+  (+ (obsidian_camera_step_mm current) 375))

@@ -1,0 +1,18 @@
+# Cycle 10 overlay on Cycle 9. No deletions.
+# Extract in parent of canonical obsidian/.
+Makefile
+TODO.org
+docs/CYCLE10-REPORT.org
+docs/QTT-HOT-REPLACEMENT.org
+modules/obsidian/interactive.mon
+src/monad/hotreload_api.c
+src/monad/native_read.c
+src/monad/native_read.h
+src/monad/repl_model.c
+src/monad/repl_model.h
+src/monad/repl_service.c
+src/monad/runtime.c
+tests/native/native_read.c
+tests/native/repl_model.c
+docs/CYCLE10-PATCH-FILES.txt
+docs/CYCLE10-MANIFEST.sha256

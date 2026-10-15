@@ -1,0 +1,4 @@
+gcc -std=c23 -O3 -DNDEBUG -Wall -Wextra -Isrc/graphics tools/bench/font_utf8_bench.c src/graphics/font_utf8.c -o build/tests/font-utf8-bench
+workload	bytes	iterations	median_ms	worst_ms	median_MiB_per_s
+ascii	4096	10000	22.853	27.199	1709.3
+mixed	4095	10000	35.578	49.642	1097.7

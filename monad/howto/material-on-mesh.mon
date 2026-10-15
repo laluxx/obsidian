@@ -1,0 +1,38 @@
+;;; material-on-mesh.mon --- Snapshot mesh 0's PBR values and apply that independent preset to mesh 1.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto material-on-mesh
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm delta_millipixels)
+  delta_millipixels)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  delta_millipixels * 10)
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  delta_millipixels * 10)
+
+(define (material-on-mesh-frame f)
+  (if (and (= (material-asset-count) 0)
+           (>= (mesh-count (scene)) 2))
+      (let* ([source (mesh 0)]
+             [target (mesh 1)]
+             [source-material (material source)])
+        ;; Capture after changing the donor so the preset keeps its color.
+        (material-color! source-material 0.85 0.22 0.08 1.0)
+        (let ([stored (material-store source)])
+          (material-asset-factors! stored 0.28 0.72)
+          (material-apply! stored target)
+          (mesh-visible! target True)
+          True))
+      True))
+
+(on-frame! material-on-mesh-frame)

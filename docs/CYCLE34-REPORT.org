@@ -1,0 +1,54 @@
+#+TITLE: Obsidian — Cycle 34: Nonblocking Vulkan geometry uploads
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+Cycle 34 connects Cycle 33's reservation/flight owner to an opt-in Vulkan
+geometry transfer API. The transfer can be polled without waiting for its
+fence, and the caller commits geometry offsets only after a signaled result.
+The regular glTF loader and scene graph publication remain synchronous.
+
+* Implementation
+
+- =ObsGeometryAsync= owns the state transitions and backend callbacks. It
+  differentiates rejected, accepted, and uncertain submissions; fence polling
+  is nonblocking; only a confirmed signal permits commit.
+- Vulkan uses a dedicated staging buffer, command buffer, and fence per
+  exclusive flight. On uncertainty, resources remain quarantined until
+  device-idle recovery. Shutdown now retires a pending flight only after
+  successful =vkDeviceWaitIdle=.
+- =megaGeometryAsyncBeginCooked= / =megaGeometryAsyncPoll= /
+  =megaGeometryAsyncCommit= expose the path. An uncertain submit still returns
+  a valid ticket so the caller can inspect or recover it.
+- All legacy geometry appenders, synchronous batch transfers, preflight, and
+  staging flush are excluded while the one async flight is active. This avoids
+  destination aliasing without implementing multi-flight allocation.
+- The public helper does not publish a Scene. Graph, textures, materials,
+  physics, and Monad-visible scene ownership remain the caller's responsibility.
+
+* Verification
+
+- Cycle 34 archive manifest verified in an isolated extraction.
+- =make test-native= and =make test=: PASS. The new deterministic backend
+  lifecycle test passed 50,000 cases; live Monad and frame runners explicitly
+  skipped because their environment variables were unset.
+- The async lifecycle test under ASan+UBSan: PASS.
+- =make -j$(nproc)=: PASS; full Vulkan engine linked.
+- RTX 3060 runtime smoke submitted one cooked vertex through the new Vulkan
+  API, polled it to READY, and committed base vertex 24.
+- RTX 3060 shutdown smoke started a pending upload, exited after one frame,
+  and completed device-idle retirement without a reported cleanup failure.
+- Both smoke hooks were temporary and removed; the production build was
+  rebuilt afterward.
+
+* Limits
+
+- The runtime smoke used one synthetic vertex, not a glTF asset. The main
+  loader still does not build and publish pending scenes through this API.
+- One flight only. No concurrent uploads, validation layers, injected Vulkan
+  failures/device loss, GPU correctness comparison, or frame-time improvement
+  was measured.
+- This is asynchronous *geometry transfer*, not asynchronous asset or scene
+  loading. Do not expose scene handles until all non-geometry dependencies are
+  ready.

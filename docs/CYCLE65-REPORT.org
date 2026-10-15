@@ -1,0 +1,68 @@
+#+TITLE: Obsidian Cycle 65 — Failure-atomic scene undo transactions
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Scope
+
+Cycle 65 hardens the existing scene-owned undo journal. It changes neither
+rendering nor the editor input adapter; Cycle 64's event boundaries continue
+to call the same journal.
+
+* Defect 1 — An external write could be hidden by a later group edit
+
+An open group stages each preview as a before/after transition. Before this
+cycle, a normal grouped edit took its live starting state without comparing it
+to the group's latest staged postimage for that object. A direct out-of-band
+write could therefore be followed by another inspector edit, creating an
+unreplayable chain that appeared to commit successfully.
+
+=apply_edit= now checks the latest staged state for the selected ticket before
+an ordinary grouped write. Mismatch returns =OBS_SDF_EDIT_CONFLICT= before
+scene or journal mutation. The group remains open; the caller can restore its
+last owned preview and safely cancel. The existing panel preview route keeps
+its own stricter proxy validation.
+
+* Defect 2 — Raw gesture samples consumed bounded undo history
+
+=obs_sdf_inspector_end_group= still validates the complete live preview before
+committing. It then folds staged records by stable scene ticket: first
+preimage, final postimage, common group identity. Net-zero ticket changes are
+omitted. Raw preview samples still update the live scene and mapped GPU slots;
+only the committed undo representation is compacted. A gesture remains one
+atomic command across all changed objects.
+
+This is scene-property transaction coalescing, not a claim that GNU Emacs text
+undo records use the same data model.
+
+* Verification
+
+- =make test-sdf-undo-transactions test-scene-gesture= — PASS.
+- Reverted only the two Cycle 65 implementation changes and reran the new
+  regression fixture: it failed at the expected masked-write conflict
+  assertion. Restoring Cycle 65 made the same fixture pass.
+- The new native fixture covers interleaved multi-object edits, net-zero
+  transactions, preservation of 63 older commands under 64 raw updates,
+  bounded inverse retention, 4,000 deterministic snapshot-oracle transactions,
+  cancellation, scene-epoch reset and mapped GPU-slot synchronization.
+- Clang C23 AddressSanitizer/UndefinedBehaviorSanitizer with leak detection:
+  focused transaction test PASS.
+- =make -j2 test= — PASS for the available suite. Monad integration and live
+  frame runners were skipped because their runner variables are unset.
+- =make src/scene/sdf_inspector.o= — PASS.
+- MonadC/Vulkan runtime and desktop acceptance remain gated.
+
+* Boundaries
+
+- A group still accepts at most 64 successful raw staged changes; further
+  changes fail before mutation.
+- No nested or persisted transactions were added. Out-of-band scene writes
+  remain conflicts rather than being absorbed into undo history.
+- The journal and generated inverse records remain bounded to 64 entries.
+  Long undo traversals may evict old commands; this is not a fixed-size redo
+  stack or a promise that every historical edit remains traversable.
+- No physical Vulkan image, GLFW interaction, or real compiled MonadC callback
+  was exercised by the native fixture.
+
+On a provisioned workstation, repeat rapid repeated edits, multi-object undo
+and redo, no-op gestures, cancellation and conflict recovery with the visible
+Inspector; verify rendered SDF output and Vulkan validation.

@@ -1,0 +1,79 @@
+#+TITLE: Obsidian Cycle 58 — Continuous Scene Inspector Transactions
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* The real vertical slice
+
+Cycle 57 routed sphere position and base PBR fields through the shared undo
+journal, but emitted one command for each drag sample; radius, CSG/smoothness
+and emission still wrote directly into renderer primitives.
+
+Cycle 58 connects the production editor controls to a single coalesced scene
+transaction:
+
+=field_vec3 / field_float / field_dropdown / field_vec4_color=
+ -> persistent =ObsSdfPanelProxy= -> =obs_sdf_property_begin/preview/commit=
+ -> =obs_sdf_inspector_preview_edit= -> production =scene.sdfs=
+ -> fence-slot deferred =flushSdfSSBO= -> Vulkan.
+
+- The first valid control delta opens a private scene-epoch group. Later
+  samples replace one staged original/latest record; a sustained edit does
+  not fill the 64-command history.
+- Mouse release or picker close commits one existing Emacs-like undo command.
+  Escape, focus loss, selection change, and closing the Inspector request
+  conflict-checked cancellation. The Inspector refuses to close if rollback
+  remains conflicted.
+- The bridge checks both ticket and group identity. It cannot join a viewport
+  transaction or adopt a replacement group opened by another caller.
+- Supported sphere state is translation, base RGBA, metallic, roughness,
+  radius, CSG operation/smoothness, and emission RGB/strength. Values are
+  copied and validated before the journal publishes the primitive.
+- Modal picker and drag pointers refer to persistent editor-owned proxy state.
+  Non-sphere SDF fields retain their previous direct-edit behavior.
+
+* Executed verification
+
+| Gate | Result |
+|------+--------|
+| =make test-sdf-property-bridge= | PASS — Cycle 57 bridge; 1,500 scene resets |
+| =make test-sdf-property-gesture= | PASS — 12,000 mixed-property samples, one undo record |
+| Cancel/origin return/conflict/stale target/group replacement/type/epoch | PASS — production scene journal and bridge |
+| Clang ASan + UBSan, leak checks | PASS — focused Cycle 58 regression |
+| =make -j2 test= | PASS — available native/tooling suites; configured Monad/frame runners SKIP |
+| =python3 tests/build-contract.py= | PASS |
+| Changed editor/input C translation units | PASS compile; existing warnings remain |
+| =make test-sdf-viewport-runtime= | FAIL before Cycle 58 actions — real RTX 3060/Vulkan setup reaches Monad module load, which rejects 5 polymorphic definitions without closed native ABI |
+| Visible inspector widgets, picker and focus events | NOT VERIFIED — integration stops before the interaction |
+| Physical DPI/display behavior and renderer p95/p99 | NOT VERIFIED |
+
+The native regression links production =sdf_inspector.c=,
+=sdf_property_bridge.c=, =sdf_sculpt.c=, =sdf_tokens.c= and =sdf.c=; it is
+not a mock of undo or scene writes. It cannot establish GUI event delivery or
+pixel results. The strict integration failure is a Monad native-ABI blocker,
+not evidence that the new widget path ran.
+
+* Deliberate limits
+
+- Only translation-only sphere primitives are journal-backed. Boxes, terrain,
+  mesh and glTF editors are not routed through a sphere-state record.
+- History remains a bounded in-memory journal. Nested transactions, durable
+  undo and full Emacs command-loop amalgamation are not added.
+- External scene writers must participate in the journal or cause a checked
+  conflict. Mutation remains owner-thread-only.
+
+* Reproduction
+
+From =obsidian/=:
+
+#+begin_src sh
+make test-sdf-property-bridge test-sdf-property-gesture
+make -j2 test
+python3 tests/build-contract.py
+# Fails during module load until Monad closes the five required native ABIs:
+make test-sdf-viewport-runtime
+#+end_src
+
+The Cycle 57 and Cycle 58 input archives each passed their 13-member hash
+verifier before application. The workspace was selectively merged to preserve
+local editor/Makefile changes; the archive manifests are not hashes of the
+post-merge workspace.

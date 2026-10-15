@@ -1,0 +1,39 @@
+;;; MaterialAsset.mon --- Foreign methods for reusable PBR presets
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign material asset
+
+;;; Code:
+
+import Foreign.Mesh
+
+module Foreign.MaterialAsset
+  [MaterialAsset ◯ at count index roughness metallic factors! store apply!]
+
+type ◯ :: {MaterialAsset}
+type MaterialAsset = ◯
+
+define at :: Int -> ◯
+  index -> (material-asset index)
+
+define count :: () -> Int
+  _ -> (material-asset-count)
+
+method index :: ◯ -> Int
+  asset -> material-asset-index asset
+
+method roughness :: ◯ -> Float
+  asset -> material-asset-roughness asset
+
+method metallic :: ◯ -> Float
+  asset -> material-asset-metallic asset
+
+method factors! :: ◯ -> Float -> Float -> Unit
+  asset roughness metallic -> material-asset-factors! asset roughness metallic
+
+define store :: Mesh -> ◯
+  mesh -> material-store mesh
+
+method apply! :: ◯ -> Mesh -> Unit
+  asset mesh -> material-apply! asset mesh

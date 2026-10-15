@@ -1,0 +1,24 @@
+;;; inspect-gltf-skeleton.mon --- Return the number of joint entries in all skins of a loaded glTF instance.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto inspect-gltf-skeleton
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm delta_millipixels)
+  delta_millipixels)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  delta_millipixels * 10)
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  delta_millipixels * 10)
+
+(define (how-to-gltf-joint-count instance-index)
+  gltf-joint-count (gltf instance-index))

@@ -1,0 +1,172 @@
+#+TITLE: Obsidian PBR Pipeline Audit
+#+DATE: 2026-10-14
+
+* Conclusion
+
+Obsidian has a credible real-time metallic/roughness PBR foundation: GGX/Smith
+microfacet direct lighting, split-sum environment lighting, normal maps, alpha
+mask/blend, cascaded shadow maps, emissive output, and partial glTF transmission,
+volume, IOR and dispersion support. It is *not* yet a state-of-the-art or Unity
+URP Lit-equivalent material pipeline. The largest correctness holes found in
+this audit were dropped glTF occlusion strength, incomplete UV/material
+semantics, and ignored double-sided state despite global back-face culling.
+The AO strength and import-path defects are fixed here; other gaps below remain
+explicit work, not parity claims.
+
+* Audited path
+
+| Stage | Production code | Finding |
+|-------+-----------------+---------|
+| glTF material/texture import | =src/assets/gltf_loader.c=, =src/assets/gltf_material.c= | Base color, normal, metallic-roughness, occlusion and emissive slots are imported. AO is no longer gated on =has_pbr_metallic_roughness=; =occlusionTexture.strength= is retained. |
+| OMDL cache | =src/assets/omdl_mesh_meta.h=, =src/assets/gltf_loader.c= | AO strength is in cached metadata and the native ABI fingerprint; old-layout caches reject as incompatible and are rebuilt. |
+| Async static cooker | =src/assets/gltf_cook_static.c=, =src/assets/gltf_async.c= | The cooker deliberately accepts a closed untextured static subset; valid textured/extended materials still require the full cooker. AO strength default/validation is retained for supported material records. |
+| GPU material ABI | =src/graphics/renderer.h=, =src/graphics/vulkan_setup.c=, =shaders/pbr.{vert,mesh,task,frag}=, =shaders/refit_bounds.comp=, =shaders/shadow.vert= | Reused an existing 32-bit padding slot for AO strength; CPU and all mirrored GPU structures retain their stride. |
+| Vertex/mesh stages | =shaders/pbr.vert=, =shaders/pbr.mesh= | Skinning, morphs, displacement and tangent basis generation; UV input is one shared coordinate set for all maps. Inverse-transpose model normal matrix is computed per vertex. |
+| Fragment material/lighting | =shaders/pbr.frag= | GGX NDF, Smith masking, Schlick Fresnel, directional sun plus up to eight point lights, alpha-mask discard, emissive, IBL, and approximate screen-space transmission. |
+| IBL preprocessing | =shaders/equirect2cube.comp=, =shaders/irradiance.comp=, =shaders/prefilter.comp=, =shaders/brdf_lut.comp= | Equirectangular conversion, diffuse irradiance convolution, GGX prefilter, and split-sum BRDF LUT. Current diffuse convolution samples about 396k directions per output texel; prefilter uses 4096 and BRDF integration 1024 samples per output texel. These build/startup costs have no isolated regression benchmark yet. |
+| Shadows | =shadow.vert=, =pbr.frag=, =vulkan_setup.c= | Four cascades, normal-offset bias and 16 Poisson PCF samples. No cascade blend/fade; the per-material receive-shadow policy and contact-hardening shadows are absent. |
+| Output | =pbr.frag=, swapchain format setup | ACES-like fitted tone curve followed by sRGB attachment conversion. Input color textures are UNORM and decoded with =pow(rgb, 2.2)=, an approximation rather than the piecewise sRGB transfer function. |
+
+* AO fix and evidence
+
+Khronos glTF defines occlusion strength in [0,1], default 1, with linear
+interpolation between unoccluded white and the sampled AO value. The importer
+previously discarded that scalar; it also looked up the occlusion texture only
+inside the optional metallic/roughness block. Both cold and cached import now
+preserve strength, and the fragment shader uses =mix(1, sampledAO, strength)=.
+The AO runtime toggle still bypasses the map by using 1.
+
+AO multiplies diffuse environment lighting and the no-IBL ambient fallback; the
+current scalar also attenuates IBL specular reflections. It does not attenuate
+direct-light BRDF contributions. This is a material AO map, *not* screen-space
+ambient occlusion (SSAO), contact AO, or a bent-normal/specular-occlusion
+solution. Unity documents its SSAO renderer feature separately, with configurable
+sampling, radius, filtering, downsample and direct-light strength; Obsidian has
+no equivalent depth/depth-normal AO pass.
+
+Regression and benchmark:
+
+- =make build/tests/gltf-cook-static && build/tests/gltf-cook-static= parses a
+  glTF fixture with AO strength 0.25, verifies absent strength defaults to 1,
+  and checks zero strength is preserved. The production helper supplies the
+  same semantics to sync and async import.
+- =make test-headless-pbr-ao= prepares and requires a validated OMDL cache hit
+  for AO-bearing =ABeautifulGame.gltf=, requires imported AO-mapped meshes and
+  valid =main_forward= GPU timestamps in every run, and benchmarks 5 independent
+  processes × 60 measured frames after 30 warmup frames.
+- Observed warm-OMDL RTX 3060 run: 49 meshes, 33 AO-mapped meshes, 43 textures,
+  934,309 vertices, 4,500,672 indices, 18,251 meshlets. Across 300 frame
+  samples, =main_forward= GPU median was 0.442 ms and p95 0.486 ms. The
+  whole-GPU-frame run-level median was 0.516 ms (five process medians;
+  0.511–0.545 ms). HZB showed high tail variance; timings are one
+  machine/build/scene measurement, not AO-only cost or an AO-on/off A/B.
+
+* Unity 6 URP comparison
+
+Official reference pages:
+
+- [[https://docs.unity3d.com/6000.0/Documentation/Manual/urp/lit-shader.html][URP Lit material reference]]
+- [[https://docs.unity3d.com/6000.0/Documentation/Manual/urp/shader-complex-lit.html][URP Complex Lit material reference]]
+- [[https://docs.unity3d.com/6000.0/Documentation/Manual/urp/ssao-renderer-feature-reference.html][URP SSAO renderer feature reference]]
+- [[https://docs.unity3d.com/6000.0/Documentation/Manual/urp/use-built-in-shader-methods-indirect-lighting.html][URP indirect-lighting methods]]
+- [[https://raw.githubusercontent.com/KhronosGroup/glTF/main/specification/2.0/schema/material.occlusionTextureInfo.schema.json][Khronos glTF occlusion strength schema]]
+
+URP Lit documents metallic *and* specular workflows, surface/blend modes,
+normal/height/AO/emission, texture tiling/offset, alpha clipping, receive
+shadows, detail maps, and advanced reflection/specular controls. Complex Lit
+adds clear coat. Its indirect-lighting API supports reflection probes and
+occlusion attenuation; SSAO is a separate configurable pass. Obsidian currently
+has one metallic/roughness workflow with a fixed 0.04 dielectric F0, no
+clear-coat/detail-map/specular-color material model, and one global IBL
+environment rather than probe blending or light probes.
+
+* Remaining holes — ordered by correctness and leverage
+
+1. *Material contract coverage*: add GPU-visible regressions for AO strengths
+   0/partial/1, AO toggle, and diffuse/specular indirect contribution. Current
+   test asserts parsed strength and renders/benchmarks AO-bearing materials,
+   but does not compare captured AO-on/off pixels or isolate AO GPU cost.
+2. *Core glTF surface semantics*: propagate per-texture =texCoord= selection
+   and =KHR_texture_transform=; import normal-map scale; honor =doubleSided=.
+   The pipeline uses one shared UV set and the rasterizer defaults to back-face
+   culling. Per-material culling needs a real pipeline/draw policy, not a
+   fragment-only flag.
+3. *Lighting model*: implement and validate specular-color workflow and a
+   documented clear-coat lobe before broader extensions; add spot lights and
+   per-material receive-shadow control. Current direct lights are one sun plus
+   eight points.
+4. *Indirect lighting*: add a selectable, profiled SSAO pass with depth/normal
+   input, temporal stability, edge-aware filtering and quality/performance
+   levels. Keep it separate from material AO. Later: reflection probes/blending,
+   light probes or baked GI, and roughness-aware/bent-normal specular occlusion.
+5. *Color management*: replace approximate =pow(2.2)= base/emissive decoding with
+   correct sRGB behavior or sRGB image formats, then golden-test known values
+   through final output conversion. Define HDR/exposure and tone-map curve as a
+   versioned render contract.
+6. *Shading correctness/performance*: the no-IBL ambient fallback currently
+   gives metallic surfaces diffuse albedo lighting; gate it by the diffuse
+   energy fraction and compare output. Also resolve zero-distance point-light
+   normalization, below-horizon direct BRDF contribution, skinned normal
+   transforms, and per-vertex inverse-matrix work with targeted numerical/GPU
+   tests before optimizing. Differential-test nonuniform/negative scales.
+7. *Shadow quality*: test cascade boundaries, atlas-edge filtering, bias acne,
+   peter-panning and alpha-mask casters. Add cascade blending and tune PCF using
+   controlled reference images; profile static and dynamic caster workloads.
+8. *IBL cost*: benchmark environment conversion/convolution separately on cold
+   and warm cache. Reduce or adapt the current sample counts only against
+   deterministic image-error thresholds and startup-time measurements.
+9. *Extension and transparency scope*: map each supported glTF extension to an
+   importer/shader/render test. Current transmission is a single screen-space
+   offset plus small blur and environment fallback, not depth-traced refraction;
+   test overlap, total internal reflection, camera boundaries, absorption and
+   multiple transparent surfaces. Async static cooking intentionally rejects
+   many textured/extension-rich materials.
+
+* Deliberate matrix deferral
+
+The 3x4 affine transform packing idea is recorded in =TODO.org= only. No shader,
+CPU structure, descriptor, or benchmark path was changed for it. Revisit only
+after profiling and layout/parity tests cover forward, shadows, culling,
+skinning and animation.
+
+* Feature-aware rendering and conformance boundary
+
+glTF 2.0 core is the renderer's baseline contract. Extension support is a
+separate, explicit matrix: prioritize ratified Khronos extensions that change
+visible rendering or GPU asset handling; do not imply that supporting all
+extensions means supporting non-rendering metadata, in-progress drafts, or
+vendor extensions. Unknown entries in =extensionsRequired= must fail
+predictably; optional extensions may fall back to core behavior only where
+their specification defines a valid fallback. The Khronos registry distinguishes
+ratified, in-progress, multi-vendor, vendor, and archived extensions.
+
+The renderer should derive an active feature set from actual scene and material
+data, then select the cheapest compatible path. No point lights means no point
+light loop iterations (already true through =pointLightCount=); no directional
+sun now skips direct-sun BRDF work and cascaded shadow draws, and sends a
+uniform flag that bypasses the 16-tap shadow lookup in both mesh and SDF
+shaders. Unlit and matcap fragments already return before PBR lighting. The
+headless sun-on/off benchmark passed on a one-mesh fixture (five independent
+60-frame runs per mode); reports showed shadow mesh-task work only with sun.
+Forward-pass median timestamps were 7.168 µs sun-on and 6.144 µs zero-sun, but
+the tiny workload and high variance do not support a general speedup claim.
+Shadow images/backing memory are still allocated with no sun (about 32 MiB
+attributed in the benchmark), so this saves rendering/shader work, not startup
+memory. Still open: lazy shadow/IBL resource creation, material/pipeline
+feature variants for maps and extensions, glTF punctual lights beyond the
+engine's fixed 8-point-light limit, and benchmarks for additional feature
+combinations. Runtime toggles remain overrides; an override must not force
+unrelated scene features on.
+
+Feature activation must preserve output for active features, keep inactive
+feature resources out of the per-frame graph where safe, and expose why a path
+was selected in headless reports. Shader variants should be introduced only
+for expensive, coherent feature groups after compile-time, pipeline-cache,
+binary-size and measured-GPU tradeoffs are checked; small material data
+branches should not become variant proliferation.
+
+Primary Khronos references:
+
+- [[https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html][glTF 2.0 specification]]
+- [[https://github.com/KhronosGroup/glTF/blob/main/extensions/README.md][glTF extension registry]]
+- [[https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_lights_punctual/README.md][KHR_lights_punctual]]

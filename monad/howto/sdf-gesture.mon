@@ -1,0 +1,37 @@
+;;; sdf-gesture.mon --- commit a speculative edit group, then audit history depth
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto sdf-gesture
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/sdf-gesture.mon ./obsidian
+Frame 2 selects the ticket-0 sphere, previews a tint, commits it as one
+undoable command, and reports undo/redo depth. Cancellation path lives in
+monad/obsidian/sculpture.mon; abort path in sdf-pick-edit.mon.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (gesture-frame f)
+  (if (= (frame-number f) 2)
+      (begin
+        (sdf-inspect-select! (sdf-ticket 0))
+        (sdf-inspect-begin-group!)
+        (sdf-inspect-tint! 0.20 0.60 1.00)
+        (sdf-inspect-end-group!)
+        (list (sdf-inspect-undo-count) (sdf-inspect-redo-count))
+        True)
+      True))
+
+(on-frame! gesture-frame)

@@ -1,0 +1,830 @@
+#+TITLE: Vulkan Graphics Profiling Research and Obsidian Audit
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Research conclusion
+
+No single timing source is a complete GPU profiler. Use application timestamps for
+repeatable coarse/nested durations, CPU instrumentation for host waits and command
+recording, calibrated timestamps for cross-domain timelines when supported, and
+vendor tools for hardware-unit counters, queue scheduling, shader stalls and
+barrier analysis. Keep detailed hardware-counter captures separate from the
+low-overhead benchmark used to compare releases.
+
+* Vulkan timing rules that govern the implementation
+
+- A timestamp query is asynchronous. Its tick-to-nanosecond conversion is
+  =delta_ticks * VkPhysicalDeviceLimits::timestampPeriod=; meaningful low bits
+  come from the timestamp queue family's =timestampValidBits=. Compute deltas
+  modulo that width, including the full-width unsigned wrap case.
+- Query timestamps only on a queue family with nonzero =timestampValidBits=.
+  A zero value means unsupported. Distinct queue/device timestamps are not a
+  common clock and must not be subtracted without an explicit calibration model.
+- =vkCmdWriteTimestamp2= has a narrowly specified stage scope, defines an
+  execution dependency, and may latch at a logically later stage. Coarse
+  TOP_OF_PIPE-to-BOTTOM_OF_PIPE regions are useful approximate pass durations,
+  but fine-grained samples and nested intervals need measured overhead and
+  careful interpretation. Do not sum nested or overlapping regions as if they
+  were exclusive GPU busy time.
+- Reuse query slots only after their prior writes are complete. The engine waits
+  for the frame-slot fence before collection and does not request blocking query
+  reads. This avoids a CPU query-result stall; missing/unavailable query results
+  must remain missing, not silently become zero-time work.
+- =VK_KHR_calibrated_timestamps= (promoted from =VK_EXT_calibrated_timestamps=)
+  provides quasi-simultaneous host/device clock samples plus a maximum deviation.
+  It is optional and should be used for cross-domain correlation, not as a
+  replacement for same-submit pass deltas. Recalibrate rather than extrapolating
+  indefinitely.
+- =VK_EXT_debug_utils= object names and nested command labels organize captures
+  in RenderDoc and vendor tools; labels do not measure time. Gate detailed
+  annotations separately from production timing if they perturb the workload.
+- Standard pipeline-statistics queries explain counts (for example shader
+  invocations), not elapsed time. =VK_KHR_performance_query= exposes
+  implementation-specific counters and may require multiple replay passes. Treat
+  both as opt-in diagnostics, not universally available per-frame metrics.
+
+* What external profilers add
+
+- NVIDIA Nsight Graphics GPU Trace: per-queue/event timelines, hardware-unit
+  metrics, synchronization visibility and shader sampling/stall attribution.
+  Use a short, representative trace after timestamps identify a costly region;
+  the trace is a diagnostic capture, not the benchmark baseline. Nsight Systems
+  is the complementary CPU/GPU scheduling and submission timeline. Nsight
+  Compute is installed, but is not treated as a Vulkan graphics-pass profiler.
+- AMD Radeon GPU Profiler: event timing, wavefront occupancy, cache counters and
+  barrier timelines can distinguish shader execution from queue/barrier gaps.
+  It is not installed/verified on this workstation.
+- RenderDoc: frame/event/resource inspection and visual correctness; its timings
+  are useful for locating candidate events, not a substitute for hardware-backed
+  repeated benchmark measurements.
+- Vulkan timestamps answer *how long the measured interval lasted*. They do not
+  identify ALU-vs-memory limits, occupancy, cache misses, queue overlap, cause of
+  a stall, or competing system activity. Vendor counters/sampling answer those
+  questions where available.
+
+* Vendor diagnostic capture recipes
+
+Keep vendor captures separate from release benchmark runs: they may serialize,
+replay, inject, or sample and can change execution behavior. The runner's
+headless JSON/CSV remains the comparison artifact.
+
+#+begin_src sh
+mkdir -p build/bench/vendor
+OBSIDIAN_BENCH_ASSET_ROOT=assets \
+  nsys profile --trace=vulkan,osrt --sample=none \
+  --output=build/bench/vendor/sponza \
+  ./obsidian --headless-benchmark build/bench/vendor/sponza.json \
+  --monad-boot tests/monad/bench-scene.mon
+#+end_src
+
+Nsight Systems CLI records Vulkan API/queue scheduling around the actual
+headless Monad-defined Sponza workload. Analyze the `.nsys-rep` timeline for
+CPU submission gaps, waits, queue overlap, and expensive API calls; do not
+derive performance baselines from this instrumented run. `nsys` is currently
+not installed here, so this recipe is documented, not executed.
+
+For Nsight Graphics GPU Trace/Shader Profiler, use a short editor capture on
+NVIDIA after the headless timestamp profile identifies a costly pass:
+
+#+begin_src sh
+ngfx-capture --exe ./obsidian --working-dir "$PWD" \
+  --output-dir build/bench/vendor/nsight-graphics \
+  --capture-frame 120 --frame-count 1
+#+end_src
+
+This launches the windowed editor and captures a presented frame; it is a
+vendor diagnostic, not the headless correctness/performance test. `ngfx-capture`
+is not installed here. On a supported AMD system, use Radeon Developer Panel
+to capture a Vulkan frame and inspect its `.rgp` in Radeon GPU Profiler. RGP's
+frame-based graphics profile is defined around Vulkan applications that call
+`Present`; the current headless benchmark does not present, so do not claim that
+RGP workflow is headless. RGP/RDP are not installed or verified here.
+
+Nsight Compute CLI 2026.2.1 and RenderDoc CLI 1.45 are installed; RenderDoc is
+built with Vulkan support. Nsight Systems, Nsight Graphics Capture CLI and RGP
+executables were not found. The Nsight Systems/Graphics recipes have not been
+run on this workstation.
+
+* Current Obsidian evidence and gaps
+
+- =src/core/gpu_profile.h= now owns one stage schema, hierarchy, and checked
+  nanosecond conversion helper. It handles modulo wrap for timestamp widths 1..64
+  and rejects invalid widths/periods and overflow. Native tests cover boundaries.
+  =src/platform/window.c= collects only after the frame-slot fence without WAIT;
+  =src/graphics/vulkan_setup.c= writes same-queue TOP/BOTTOM timestamps. Those
+  endpoints are coarse inclusive intervals, not exact exclusive shader durations.
+- The schema includes aggregate shadows plus four cascade intervals and aggregate
+  HZB plus up to 16 mip intervals. JSON uses the C-owned schema, and Python validates
+  IDs, parents, ns units and inclusive semantics before summary/CSV output. The
+  dashboard indents children and warns that nested/pipelined durations are
+  non-additive. C report serialization and Python schema/metadata tests pass.
+- A complete =make -j all= linked after adding the omitted TinyEXR implementation
+  object and Monad compiler library to the build. The real headless Sponza profile
+  ran 120 warm-up plus 600 measured frames: cascade and HZB-mip values were
+  nonzero; unexecuted dynamic geometry/bounds refit and disabled readback were
+  null. Raw and summarized JSON contain Vulkan device IDs, driver/API versions,
+  queue family, timestamp valid bits and period. Separate headless raw-image smoke
+  still produced the expected startup cube. This is integration proof, not a
+  stable performance baseline.
+- The latest one-process smoke had GPU frame p50 1.463 ms and p95 2.670 ms;
+  device-wide GPU utilization was 84-99% at the boundary snapshots. This is
+  visibly contaminated/noisy and is not a performance baseline or regression
+  threshold.
+  Earlier five-process numbers remain historical and were collected before the
+  current metadata/scope build; don't mix them as a current controlled baseline.
+- CPU command-recording intervals are also exported for render-graph pass
+  execution, transmission/transparent recording, and UI recording. One 600-frame
+  smoke measured p50 66.6, 10.5, and 1.75 microseconds respectively; outer
+  command-record p50 was 111.9 microseconds. These CPU intervals are nested
+  inside command recording, not GPU pass durations and not an optimization
+  claim.
+- Per-run host memory now reports =getrusage.ru_maxrss= peak and Linux
+  =/proc/self/statm= resident bytes after engine teardown. One Sponza process
+  measured 1288.8 MiB peak and 172.7 MiB final. These are whole-process values,
+  not subsystem allocation attribution or GPU heap usage.
+- When available, =VK_EXT_memory_budget= reports per-heap =heapUsage= estimates
+  before scene loading and before engine teardown plus the final =heapBudget=.
+  The Vulkan specification defines usage as an estimate for the current
+  process; budget may change with unrelated system activity. These values are
+  not Obsidian-only buffer/image accounting. Unsupported devices report no
+  heaps. One headless Sponza smoke reported heap-0 1266.1 MiB estimated
+  process usage / 9928.0 MiB budget, heap-1 843.1 / 11948.0 MiB, and heap-2
+  31.4 / 214.6 MiB. Budget values varied between nearby runs. See the Khronos
+  [[https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceMemoryBudgetPropertiesEXT.html][memory-budget property reference]].
+- The engine now wraps every direct source-tree =vkAllocateMemory= and
+  =vkFreeMemory= call with low-frequency accounting. Per-run
+  =engine_vulkan_memory= reports requested =VkDeviceMemory= bytes and live
+  allocation counts by physical-device heap: renderer-ready initial state,
+  workload final state, and process peak. The runner validates heap ordering,
+  nonnegative values, peak bounds, and stable tracking availability; the
+  dashboard shows final and peak engine allocations. This is engine-owned
+  allocation accounting, not resource-by-resource attribution, resident
+  texture bytes, driver overhead, or actual device-local residency. A short
+  Sponza smoke recorded heap-0 initial/final/peak 1289.2/1289.2/1289.2 MiB and
+  heap-1 840.1/840.1/936.5 MiB. The run proves capture/serialization, not a
+  stable footprint baseline. No per-frame polling is added; individual memory
+  allocations/frees take a mutex and update a dynamically grown record array.
+- Opt-in =VK_EXT_debug_utils= command labels mirror the stage schema, including
+  nested shadow cascades and HZB mips. =BENCH_DEBUG_LABELS= defaults to =off=;
+  raw JSON records the enabled state and the runner fails if a requested
+  capture cannot activate labels. A 600-frame headless Sponza run enabled labels
+  on the RTX 3060 and retained required cascade/HZB timing samples. Labels
+  organize external captures; they are not a timing source and may perturb
+  diagnostic runs. The query pool, graphics command pool/buffers and headless
+  color target and primary graphics/SDF/HZB/bounds-refit pipelines also receive
+  opt-in debug-utils object names. External capture inspection and broader
+  resource names remain open. A headless startup scene passed
+  =VK_LAYER_KHRONOS_validation= after teardown exposed and fixed four leaked
+  meshlet buffer/memory pairs and a distinct legacy 3D pipeline that had been
+  incorrectly treated as an alias. The headless startup smoke now enables
+  synchronization validation too. A separate one-process Sponza
+  synchronization-validation capture also passed; the benchmark runner scans
+  preparation/run logs for validation errors and records diagnostic mode.
+  A live Wayland resize validation then exposed an acquire/layout hazard that
+  headless validation could not exercise: the =COLOR_ATTACHMENT_OUTPUT=
+  semaphore wait did not cover the render graph's =TOP_OF_PIPE= swapchain
+  transition. Both windowed submit paths now wait at =TOP_OF_PIPE=. With
+  synchronization validation and debug-utils labels enabled, resizing the
+  engine through 1280×720, 800×600 and 1440×900 left the window mapped and
+  produced no validation diagnostics. This covers settled nonzero sizes, not
+  continuous drag pacing, zero-size suspension/restore, or device-loss/error
+  injection. The conservative acquire wait can delay unrelated pre-attachment
+  GPU work; measure it on a representative workload before claiming resize
+  performance gains.
+- The Monad manifest selects headless scenes; =./make profile= presents a colored
+  dashboard and writes JSON/CSV. Performance mode omits host readback; raw-image
+  mode retains the copy. CPU phases and lifecycle durations exist. Optional
+  CPU-recorded command counters report total and inclusive pass draw calls,
+  indirect draw count, directly known vertex/index counts, mesh-task workgroups,
+  and compute dispatch/workgroup counts. HZB output confirms the mip-attributed
+  compute groups sum to the parent/frame totals. These are encoded command
+  arguments, not shader-visible work after GPU culling; indirect vertex/index
+  totals are unknown. Five-process counter-enabled/disabled Sponza runs had
+  wall-frame p50 1.398/1.414 ms and CV 27.3/25.6%; this noisy comparison cannot
+  establish instrumentation overhead.
+- Performance-mode headless rendering now queues up to two frames with
+  independent command buffers, color/depth/shadow/HZB/transmission targets and
+  timestamp slots. Each frame slot samples its own shadow atlas; sharing a
+  writable shadow atlas across queued frames could let one frame overwrite
+  shadows while another frame's main pass samples them. The two 2048² D32
+  atlases add 32 MiB of logical image texels before Vulkan allocation
+  requirements. It waits at slot reuse and collects that slot's timestamps
+  only after its fence. Raw-image mode keeps synchronous completion before
+  readback. Five-process Sponza cold runs before/after queueing measured host
+  submission-loop medians 1.408/1.241 ms (11.8% lower after) with disjoint
+  bootstrap intervals; GPU-frame p50 was 1.209/1.229 ms. This is a throughput
+  improvement from CPU/GPU overlap, not a GPU-rendering speedup or a paired
+  regression gate. The host frame metric is no longer completion latency.
+- Remaining profiler work: complete Vulkan object/pipeline coverage, optional
+  calibrated host/device timeline, broader CPU recording scopes, resource-class
+  and actual residency attribution, broader Monad workloads, overhead
+  measurement, rapid/zero-size/device-loss resize validation, validation error
+  injection and vendor-capture runs. Removed the declared-but-unused draw-count buffer and its misleading
+  render-graph reads: inspection found no writer or indirect-count draw command,
+  despite comments claiming it was cleared and used for wireframe. Exact
+  implementation and completion gates are tracked under
+  =OBS-PROF-004..010= in =TODO.org=.
+- The runner emits unique run directories and rejects incompatible Vulkan device,
+  timestamp metadata, heap availability/count, stage schemas, and changed
+  workload inputs between runs. Per-run output includes compiler command/flags,
+  executable SHA-256, benchmark-source SHA-256, selected Monad module SHA-256,
+  and SHA-256 manifests for the selected glTF/GLB plus referenced local assets.
+  Missing external assets make headless capture fail closed. This checkout has
+  no Git metadata, so revision/worktree fields are null; content fingerprints
+  still distinguish source/assets without pretending to preserve an exact diff.
+  summaries retain the independent per-process p50 samples and publish a
+  configuration identity hash. It excludes source/binary hashes so candidate
+  builds can be compared, but includes compiler flags, workload, assets,
+  device, host, extent, validation, labels, work counters and timestamp mode.
+  In the current checkout the =assets/= directory is absent, so
+  =make profile-check= fails closed preparing the configured Sponza workload;
+  validated headless startup-cube smoke still passes but cannot substitute
+  for the missing performance workload. Restore the benchmark asset pack before
+  using the standard profile-check target as end-to-end evidence.
+  The checked-in data-URI triangle fixture can still exercise the complete
+  headless Vulkan benchmark path: five 600-frame processes at 640×360 reported
+  wall p50 0.081 ms, GPU-frame p50 0.066 ms, and HZB 0.030 ms. Frame CV was
+  65.5%, and the 3-vertex scene is far too small to qualify as a performance
+  baseline. The raw reports are in
+  =build/bench/triangle-fixture-baseline/=; treat them only as schema/runner
+  smoke evidence, not a performance win or regression gate.
+  A separate 10-frame validation run with synchronization validation and
+  debug-utils labels enabled passed on this fixture; its diagnostic timings are
+  not performance samples. Artifacts are in
+  =build/bench/triangle-fixture-validation/=.
+  Five-or-more-run summaries use a deterministic percentile bootstrap over
+  independent process medians. A paired baseline runner and accepted performance
+  thresholds remain open; results are not release gates.
+- Available locally: Nsight Compute CLI 2026.2.1 and RenderDoc CLI 1.45.
+  =nsys=, =ngfx-capture= and Radeon Developer Panel/RGP are unavailable.
+  Running =renderdoccmd capture --wait-for-exit= around the headless raw-image
+  path exited normally but produced no =.rdc= artifact: this path does not
+  present a swapchain image, so CLI auto-capture is not a headless capture
+  proof. External Vulkan frame capture remains unverified; do not report this
+  command as a successful capture. A second attempt wrapped the windowed engine
+  in RenderDoc on this Wayland-only session; the engine exited with
+  =Failed to create window surface= and no capture artifact was produced.
+  Detailed driver/GPU capabilities, counter permissions and validation-layer
+  state still need capture; compiler flags are included in runner provenance.
+
+* Simple-scene GPU memory floor: first measured reductions
+
+The 5-process headless fixture benchmark used
+=tests/fixtures/async-triangle.gltf= (1 mesh, 3 vertices, no textures) at
+640x360, 120 warm-up frames and 600 measured frames per process. Before this
+change, engine-tracked initial Vulkan allocations were 1,332,178,944 bytes on
+heap 0 and 880,904,208 bytes on heap 1 (2,213,083,152 bytes total). After
+removing an unused 256 MiB device-local dynamic buffer and starting the texture
+arena at 4 MiB with geometric growth up to 256 MiB/page, the corresponding
+values were 799,502,336 and 880,904,208 bytes (1,680,406,544 total): a
+repeatable reduction of 532,676,608 bytes (about 508 MiB). The unused device
+buffer had no readers; dynamic uploads copy from the host-visible staging
+buffer into the mega vertex buffer. Geometric page growth preserves capacity
+for texture-heavy scenes; 64 pages still allow roughly 15.8 GB decimal total
+capacity, with each allocation sized for its Vulkan memory requirement.
+
+The 5-run report is
+=build/bench/triangle-memory-after/summary.json=. GPU timing is not claimed as
+improved: frame CV was 71.3%, and this empty-texture triangle is a memory smoke,
+not a representative production scene. =make test= and
+=make test-vulkan-validation-headless= passed; the latter rendered the startup
+cube with 14,350 visible pixels. The remaining large fixed allocation is the
+256 MiB static/dynamic vertex arena. Minimum-footprint work must preserve the
+per-frame dynamic-vertex limit and valid device addresses while reducing its
+simple-scene reserve. Texture-page growth with real textured and large-image
+workloads also needs validation. Meshlet, skin, morph-delta and per-frame bounds
+storage now allocate on demand and grow geometrically. Correction: the dynamic
+vertex staging arena is
+256 MiB because two frame slots each permit 1,048,576 vertices and
+=sizeof(Vertex)= is 128 bytes; this is exact for the current hard limit, not
+spare 96 MiB.
+
+A follow-up changed the persistent upload staging arena from fixed 64 MiB to
+4 MiB initial capacity with checked geometric growth for a larger single
+request. The cooked glTF batch path already creates an exact-sized temporary
+staging allocation; its preflight now validates the packed batch size rather
+than incorrectly requiring the persistent legacy arena to hold the whole
+scene. The same five-process triangle workload measured 799,502,336 bytes on
+heap 0 and 817,989,648 bytes on heap 1 (1,617,491,984 bytes total), a further
+60 MiB reduction and 568 MiB below the original simple-scene baseline. The
+native =arena-growth= test covers minimum/geometric/overflow arithmetic; the latest
+verified five-process report is
+=build/bench/triangle-memory-demand-sized/summary.json=. The rendered
+smoke validates the 4 MiB staging base, but no current fixture forces the
+Vulkan staging arena's growth branch. Large legacy uploads and texture-heavy
+scenes remain required validation workloads. Frame CV was 84.4%; timing is not
+claimed as improved.
+
+A further change reduced the initial index arena from 128 MiB to 5 MiB and
+added geometric growth that preserves the used index prefix before replacing
+the buffer. The triangle fixture used 4,194,316 bytes of indices and reserved
+5,242,880 bytes. Five runs measured initial engine-tracked Vulkan allocations
+of 670,527,488 bytes on heap 0 and 817,989,648 bytes on heap 1
+(1,488,517,136 total): 128,974,848 bytes (123 MiB) below the previous
+demand-sized-staging result, and 724,566,016 bytes (691 MiB) below the original
+simple-scene baseline. Report: =build/bench/triangle-index-arena/summary.json=.
+The smoke workload does not force index-arena growth; native policy tests cover
+capacity arithmetic, while a large-geometry Vulkan workload is still needed to
+exercise the GPU copy/swap path. =make test= and
+=make test-vulkan-validation-headless= passed; the latter rendered the centered
+startup cube with 14,350 visible pixels. Frame CV was 74.7%, so timing is not
+claimed as improved.
+
+* Lazy morph-delta arena
+
+The fixed 64 MiB device-local morph-delta allocation is now absent until a
+scene requests morph data. Its first allocation starts at 4 KiB and grows
+geometrically; buffer replacement waits for prior GPU readers, copies the live
+delta prefix, updates the shader device address, then retires the old storage.
+First allocation skips the device-wide idle wait because no old morph resource
+exists. The 200-delta fixture requires 6,400 bytes and logged an 8 KiB
+allocation under synchronization validation:
+=build/bench/morph-arena-vulkan-final/run-01.log=. That one-process,
+10-frame scene smoke exercises the real allocation/upload path, not populated
+buffer replacement; a reload workload is still needed to verify live-prefix
+copy after earlier morph data has been used.
+
+The five-process 640x360 triangle smoke now measured initial engine-tracked
+Vulkan allocations of 603,418,624 bytes on heap 0 and 817,989,648 bytes on
+heap 1 (1,421,408,272 total): exactly 67,108,864 bytes (64 MiB) below the
+previous state, and 791,674,880 bytes (755 MiB) below the original baseline.
+Report: =build/bench/triangle-lazy-morph/summary.json=. Frame CV was 34.1%;
+timing is not claimed as improved.
+
+* Demand-sized meshlet and bounds arenas
+
+Removed the fixed 16/32/32/64/64 MiB meshlet, static-bounds, skin,
+meshlet-vertex and meshlet-triangle pools, plus the two fixed 32 MiB dynamic
+bounds buffers. Each is created at a 4 KiB minimum on demand and grows
+geometrically; static data growth copies the live prefix and updates its BDA,
+while per-frame dynamic bounds are scratch and are recreated without copying.
+All geometry preflight and legacy upload paths reserve the matching pools
+before writing.
+
+The 9,000-vertex/3,000-triangle fixture cooks to 143 meshlets. Under Vulkan
+synchronization validation, the run grew meshlet storage to 4/8/8 KiB, meshlet
+vertices to 64 KiB, triangles to 16 KiB and each frame's dynamic bounds to
+8 KiB. The headless run completed; report and growth log:
+=build/bench/meshlet-arena-vulkan/=. The fixture and native cooker assert
+multi-meshlet bounds and vertex/triangle stream sizes. The five-process simple
+triangle benchmark's initial engine-tracked allocations fell from
+1,421,408,272 to 1,136,195,600 bytes, a further 285,212,672 bytes (272 MiB);
+that is 1,076,887,552 bytes (1,027 MiB) below the original simple-scene
+baseline. Report: =build/bench/triangle-lazy-meshlet/summary.json=. Frame CV
+was 80.2%; no timing gain is claimed. This new fixture grows pools from empty
+state, so replacement after a populated live prefix remains unexercised.
+
+* Lazy static and dynamic vertex storage
+
+The device-local mega-vertex buffer now starts at 4 KiB and grows geometrically
+before static geometry writes; growth flushes pending upload copies, waits for
+old GPU users, preserves the live static prefix and refreshes its BDA. Dynamic
+host staging and its GPU destination range are not allocated at startup. The
+first dynamic-vertex API call reserves the existing two-frame, one-million
+vertices-per-frame contract and then creates the mapped staging buffer.
+
+The five-process 640x360 triangle smoke measured initial engine-tracked Vulkan
+allocations of 49,774,592 bytes on heap 0 and 549,554,192 bytes on heap 1
+(599,328,784 total). Compared with the preceding meshlet stage, this removes
+536,866,816 bytes (512 MiB): 256 MiB of unused device-local vertex capacity and
+256 MiB of dynamic host-visible staging. The total is 1,613,754,368 bytes
+(1,539 MiB) below the original simple-scene baseline. Report:
+=build/bench/triangle-lazy-vertex/summary.json=. This benchmark does not emit
+dynamic vertices, so it proves startup deferral and static-scene behavior, not
+the lazy dynamic staging allocation/copy path. Dynamic mode still reserves its
+full documented per-frame limit when first used. Frame CV was 33.5%; no timing
+gain is claimed.
+
+A throwaway headless callback emitted a 16x16 immediate-mode sphere before
+the static cube. The synchronization-validation render passed with center
+RGBA 178/178/178/255 and 14,350 foreground pixels. This exercises first dynamic
+allocation/upload followed by static geometry allocation; the callback was
+removed afterward. It does not establish multi-frame dynamic growth coverage.
+
+The 9,000-vertex fixture also passed ten headless frames under synchronization
+validation with a 2 MiB vertex arena (1.1 MiB used), exercising static arena
+expansion and the replacement device address:
+=build/bench/vertex-growth-validation/summary.json=.
+
+* Demand-sized line renderer startup
+
+Line rendering no longer reserves two 256 MiB mapped GPU buffers or a 256 MiB
+static CPU array. CPU vertices grow geometrically from 64 vertices; each GPU
+frame slot allocates only on upload and grows independently after its fence
+retires. Failed uploads do not submit draws with stale storage. Shutdown unmaps
+and releases both frame buffers and CPU storage.
+
+Five 640x360 triangle processes measured initial tracked Vulkan allocations
+of 62,457,872 bytes, down another 536,870,912 bytes (512 MiB).
+Median peak process RSS fell from 795,287,552 to 266,358,784 bytes.
+Headless renderer-ready median fell from 300.255 to 187.283 ms in these
+sequential runs; this is not controlled causal attribution or first-visible
+editor latency. Frame CV was 105.6%; no frame performance gain claimed.
+Artifacts: =build/bench/triangle-lazy-lines/summary.json=.
+
+=make test= and headless synchronization validation passed. A throwaway callback
+submitted 5,000 lines, exercising CPU growth and demand GPU allocation under
+validation; it was removed afterward. Live per-frame GPU replacement still
+needs a multi-frame stress workload. Remaining startup time requires phase
+timings inside Vulkan initialization rather than calling the engine instant.
+
+* Startup driver floor investigation
+
+A temporary headless initialization probe measured instance creation at
+61.090 ms, physical-device selection at 0.073 ms, logical-device creation
+(including format check and device setup) at 108.962 ms, graphics pipelines
+at 3.048 ms and compute pipelines at 0.402 ms. This single observation
+attributes most startup latency to Vulkan loader/driver initialization, not
+scene geometry or pipeline creation. It does not prove an absolute floor.
+The temporary probes were removed.
+
+SDF graphics, HZB reduce and bounds-refit compute pipeline creation now use
+the existing persisted pipeline cache instead of VK_NULL_HANDLE. No rendering
+capabilities are removed or deferred past readiness. Full tests and headless
+synchronization validation passed. Five warmed-pipeline-cache triangle
+processes measured renderer-ready median 198.346 ms, minimum 185.063 ms,
+maximum 249.659 ms. This does not demonstrate a startup speedup over the prior
+187.283 ms median. Report: =build/bench/startup-pipeline-cache/summary.json=.
+Further claims require controlled driver/loader experiments or changing the
+process lifetime; a persistent renderer would change lifecycle semantics and
+is not implemented by this change.
+
+* Real display window creation
+
+A throwaway native host on DISPLAY=:0 initialized the engine with its built-in
+editor disabled, created five additional 320x240 windows, submitted/presented
+a red 2D quad in each and destroyed each window. Additional windows reuse the
+shared device, command pool and pipelines; they do not repeat engine startup.
+The initial probe observed 10.013/21.362/12.615/11.961/18.059 ms creation times.
+
+It reproduced GLFW error 65546 on the primary window: Vulkan-only windows
+were passed to glfwMakeContextCurrent despite GLFW_NO_API. That call is now
+removed, and primary-window allocation failure is checked before dereference.
+The final probe reported GLFW_NO_ERROR on the primary and all five additional
+windows and completed all presentation calls. Additional-window times were
+11.208/25.397/12.129/13.327/11.858 ms (median 12.129 ms); first engine/window
+ready was 442.505 ms. No speedup claimed from these noisy sequential probes.
+These are constructor timings, not compositor-visible presentation timestamps.
+Audio initialization alone was 23.472 and 27.800 ms in two earlier probes;
+Monad and other primary-only setup are also included in first-window latency.
+Full tests and headless validation passed. Temporary host/probes removed.
+
+* Research sources
+
+- Khronos Vulkan specification, queries and timestamps:
+  https://docs.vulkan.org/spec/latest/chapters/queries.html
+- Khronos =vkCmdWriteTimestamp2= reference:
+  https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdWriteTimestamp2.html
+- Khronos Vulkan timestamp-query sample (support, stage scope, wrap/availability,
+  asynchronous retrieval):
+  https://docs.vulkan.org/samples/latest/samples/api/timestamp_queries/README.html
+- Khronos profiling guide (CPU/GPU timeline, labels, timestamps, hardware tools):
+  https://docs.vulkan.org/guide/latest/profiling.html
+- Khronos calibrated timestamp proposal:
+  https://docs.vulkan.org/features/latest/features/proposals/VK_EXT_calibrated_timestamps.html
+- Khronos =VK_EXT_debug_utils= guidance:
+  https://docs.vulkan.org/guide/latest/extensions/VK_EXT_debug_utils.html
+- Khronos =VK_EXT_memory_budget= heap usage/budget definition:
+  https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceMemoryBudgetPropertiesEXT.html
+- NVIDIA Nsight Systems CLI and Vulkan trace:
+  https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+- NVIDIA Nsight Graphics capture CLI:
+  https://docs.nvidia.com/nsight-graphics/UserGuide/graphics-capture-cli.html
+- NVIDIA Nsight Graphics GPU Trace overview:
+  https://docs.nvidia.com/nsight-graphics/UserGuide/gpu-trace-overview.html
+- NVIDIA Nsight Graphics Shader Profiler:
+  https://docs.nvidia.com/nsight-graphics/UserGuide/shader-profiler.html
+- AMD GPUOpen Radeon GPU Profiler event/occupancy documentation:
+  https://gpuopen.com/manuals/rgp_manual/events_windows/
+- AMD Radeon GPU Profiler capture quick start:
+  https://gpuopen.com/manuals/rgp_manual/quickstart/
+
+* Decision
+
+Do not claim an absolute performance minimum. The measurable finish line is a
+reproducible, attribution-capable profiling system with accepted correctness and
+regression contracts; optimization continues one evidenced bottleneck at a time.
+
+* Permanent startup attribution and demand-sized immediate vertices
+
+Benchmark reports now include monotonic process-relative startup milestones.
+Window runs distinguish GLFW initialization/window creation, input, FreeType,
+audio, Vulkan instance/device/swapchain, renderer, Monad runtime, editor and
+Monad boot, then first submission and successful present call. A successful
+=vkQueuePresentKHR= return is not proof that the compositor displayed the frame.
+Unavailable headless stages are null. Terminal summaries label window mode
+correctly and print the measured stages.
+
+Default application startup no longer loads five unused demo textures or the
+unused 4K rock material. IBL and actual editor resources remain intact.
+The normal-window benchmark now captures engine allocation sizes and Vulkan
+heap estimates before application setup and before teardown.
+
+Immediate vertices grow from 64 vertices per frame to the existing one-million
+vertex limit instead of allocating that limit on first use. All upload and draw
+addresses use the actual frame stride. Growth retires GPU users, retains the
+current CPU frame prefix, and publishes mapped staging only after replacement
+allocation/map succeeds. Growth currently uses a device-idle wait; eliminating
+that wait requires a separately verified retirement design.
+
+Five fresh-process 800x600 window runs, ten warmup and thirty measured frames:
+=build/bench/window-dynamic-demand/summary.json=. Median first successful
+present call was 524.328 ms; GLFW window creation milestone 163.137 ms;
+renderer-ready 409.640 ms. Tracked final device heap allocations were 165.3 MiB
+and host heap allocations 12.2 MiB, versus 691.6/268.1 MiB before demand-sizing.
+Whole-process peak RSS median was 419.7 MiB. Sequential runs and differing frame
+counts do not establish a controlled timing speedup.
+
+=make obsidian=, =make test= and =make test-vulkan-validation-headless= passed.
+The raw headless cube retained center RGBA (178,178,178,255) and 14,350 visible
+pixels. Window rendering exercised dynamic growth across forty frames per
+process. A separate throwaway headless C smoke exercised 65, 4,097, 17, 65,537,
+513 and 1,048,576 vertices across both frame slots, checking retained vertex
+values after every append and drawing static cubes between growth transitions.
+It emitted raw image data and passed synchronization validation with no
+validation errors; the layer reported a deprecated environment-setting warning.
+The temporary source/build target were removed. Subsequent permanent native
+contracts now cover replacement map failure/retry, preserved write cursor and
+vertex prefix, maximum capacity, and alternating frame ownership between two
+real windows. Run =make test-vulkan-dynamic-headless= and
+=make test-vulkan-dynamic-window=. Both passed with synchronization validation.
+Their Python contract runner fails on validation diagnostics even when the
+native executable returns success.
+
+The multi-window contract exposed three leaked render-finished semaphores in
+=obs_window_destroy=. Window destruction now retires presentations, destroys
+those semaphores and frees per-image fence bookkeeping before swapchain teardown
+resets the image count. The failing-before/passing-after real Vulkan contract
+retains this regression coverage.
+
+* Constructor ownership and alternating startup controls
+
+Tracked allocations now retain constructor ownership, live/peak bytes and
+live/peak allocation counts. Shared buffer allocation preserves its caller's
+constructor name; direct allocations retain their allocating function name.
+This is constructor-level attribution, not asset/object identity or driver
+internal memory. Unlabeled allocations are explicitly =unknown=. Owner names
+are copied, allocation failures do not enter accounting, and reports fail
+closed if owner capacity or accounting overflows. The benchmark schema checks
+that summed owner live bytes/counts equal summed heap live bytes/counts.
+
+The older =build/bench/window-owner-attribution/summary.json= recorded 99.1
+MiB of IBL images and 12.0 MiB of texture pages. A fresh profile later exposed
+that the default demo also loaded unused textures: the reproducible baseline
+=build/bench/ibl-f32-baseline-current/summary.json= attributed 552.2 MiB to
+texture pages. That older 12.0 MiB figure is not representative of the current
+default demo startup.
+
+* Default-window memory reduction and Vulkan validation findings
+
+The live-window benchmark now activates the same GPU-allocation and startup
+memory trackers as the headless path, samples them after window initialization,
+and captures final GPU memory after device idle. Before that correction the
+window report omitted process-entry memory and undercounted allocations.
+
+The default demo loaded five unused texture assets and an unused 4K rock
+material. Removing those loads, while explicitly preserving the material reset
+they incidentally performed, reduced texture-page memory. A second reduction
+uses RGBA16F storage images for the environment, irradiance, and prefiltered
+IBL outputs when the device supports the required storage, sampling, filtering,
+and transfer features. HDR input and compute arithmetic remain FP32; devices
+without the optional storage feature retain the RGBA32F path. The cache uses a
+distinct OIB2 header for the half-float payload, so an older cache is rebaked
+once on a capable device rather than read with the wrong pixel size.
+
+One-run, 10-frame profiles on the RTX 3060, 800x600 default editor workload:
+
+| Metric | FP32 baseline | Optimized cache hit |
+|--------+---------------+---------------------|
+| Texture-page owner live | 552.2 MiB | 4.2 MiB |
+| IBL-image owner live | 99.1 MiB | 50.1 MiB |
+| Engine-tracked GPU live allocations, all heaps | 714.7 MiB | 117.7 MiB |
+
+Tracked live GPU allocation fell by 626,032,640 bytes (597.0 MiB, 83.5%).
+Reports: =build/bench/ibl-f32-baseline-current/summary.json= and
+=build/bench/ibl-fp16-window-cache-hit/summary.json=. These are one-run memory
+measurements, not a statistically controlled timing comparison. The isolated
+cache-miss run validated a real RGBA16F bake and cache write:
+=build/bench/ibl-fp16-window-cache-miss/summary.json= reports zero Vulkan
+validation errors. The bake has a higher temporary peak than a cache hit
+(178.1 MiB attributed peak for IBL images); steady-state IBL live memory is
+50.1 MiB.
+
+Reproduce the miss-then-hit profiles with an isolated cache:
+#+begin_src sh
+profile_home=$(mktemp -d)
+env HOME="$profile_home" python3 tools/bench/engine_bench.py \
+  --executable ./obsidian --runs 1 --warmup-frames 2 --frames 10 \
+  --timeout 900 --work-counters off --validation \
+  --output build/bench/ibl-fp16-window-cache-miss --color never
+env HOME="$profile_home" python3 tools/bench/engine_bench.py \
+  --executable ./obsidian --runs 1 --warmup-frames 2 --frames 10 \
+  --work-counters off \
+  --output build/bench/ibl-fp16-window-cache-hit --color never
+#+end_src
+
+That real-window validation run also exposed correctness faults, now covered
+by permanent tests:
+
+- The first swapchain-image layout barrier did not match the acquire-semaphore
+  wait stage. Acquired images now enter the render graph with
+  COLOR_ATTACHMENT_OUTPUT as the source stage.
+- IBL image transitions lacked transfer-read access for cache readback.
+  Transition access masks now cover transfer and shader layouts.
+- Dynamic-geometry copies used the configured maximum vertex count rather than
+  the allocated per-frame staging stride. Every per-frame offset now derives
+  from that stride; buffer growth relocates each frame slice so changing the
+  stride preserves both frames' data.
+
+Run =make test-vulkan-dynamic-headless= and
+=make test-vulkan-dynamic-window= for the Vulkan growth, retention, map-failure,
+capacity, and frame-ownership contracts. Both passed with validation enabled.
+
+=tools/bench/startup_compare.py= alternates baseline/candidate process order
+AB/BA, enforces matching host/device/workload/instrumentation identities and
+reports paired bootstrap intervals. =OBSIDIAN_PIPELINE_CACHE_PATH= isolates
+cache files without removing the user's cache. Cold mode creates a unique
+empty engine pipeline cache per process; warm mode primes one cache per
+binary. Neither mode flushes OS pages or vendor driver caches.
+
+Example:
+#+begin_src sh
+python3 tools/bench/startup_compare.py \
+  --baseline ./obsidian --candidate ./obsidian --pairs 5 \
+  --pipeline-cache warm --scene tests/fixtures/async-triangle.gltf \
+  --output build/bench/startup-control-example
+#+end_src
+
+Both cold and warm same-binary five-pair headless controls ran successfully:
+=build/bench/startup-paired-cold/comparison.json= and
+=build/bench/startup-paired-warm/comparison.json=. First-submit paired median
+differences were -4.757 ms and -1.623 ms respectively; both 95% intervals
+included zero, correctly providing no evidence of a speedup.
+Native owner lifetime/failed-allocation checks and paired-statistics contracts
+run through =make test=.
+Five-pair real-window cold/warm controls also passed:
+=build/bench/window-paired-cold/comparison.json= and
+=build/bench/window-paired-warm/comparison.json=. These same-binary controls
+do not demonstrate an optimization; their first-present intervals include zero.
+
+* Portable Monad workload measurements
+
+Added =make bench-portable= and three executable Monad modules using checked-in
+glTF fixtures. Five independent processes per module, each 30 warmup and 120
+measured frames, produced real per-pass GPU timestamps:
+
+| Workload | Meshes | Vertices | Meshlets | Frame wall p50 | GPU frame p50 |
+|----------+--------+----------+----------+----------------+---------------|
+| Minimal triangle | 1 | 3 | 1 | 0.081 ms | 0.066 ms |
+| Static instancing | 6 | 18 | 2 | 0.078 ms | 0.063 ms |
+| Meshlet growth | 1 | 9,000 | 143 | 0.099 ms | 0.084 ms |
+
+Evidence: =build/bench/monad-portable-minimal/summary.json=,
+=build/bench/monad-portable-instancing/summary.json= and
+=build/bench/monad-portable-meshlets/summary.json=. Frame variance is high;
+these are workload measurements, not an optimization comparison. HZB consumed
+about 0.030 ms across these small scenes; a broader representative workload
+is needed before changing its scheduling/algorithm.
+
+Corrected the startup schema: headless =first_present= is null, not an alias
+of first submission. Earlier headless reports emitted that misleading field;
+their first-submit measurements remain valid.
+The portable modules do not fulfill the full many-assets, texture-heavy,
+animation, upload-contention, resize and multi-window Monad workload portfolio.
+
+* Sponza frame baseline and texture-page regression
+
+=make test-headless-sponza= now runs the real Sponza glTF through one
+offscreen frame and teardown. It asserts the 103-mesh/69-texture workload was
+queued without texture-page exhaustion. This caught a fixed 64-page ceiling:
+the cached-texture upload path ignored image-allocation failure and teardown
+later destroyed a stale image handle. Texture-page descriptors now grow
+geometrically, reuse only Vulkan-compatible memory types, and free on renderer
+cleanup. Image allocation/binding failures clear handles; cached uploads enter
+the failed state instead of continuing with invalid Vulkan objects.
+
+Five independent runs, each with 30 warmup and 60 measured frames, on the
+NVIDIA GeForce RTX 3060 at 256x256 produced:
+
+| Metric | Median | p95 | Notes |
+|--------+--------+-----+-------|
+| Frame wall | 0.809 ms | 2.323 ms | CV 56.5%; noisy |
+| GPU frame | 0.632 ms | 2.276 ms | stage timing |
+| Shadows | 0.357 ms | 2.056 ms | 56.5% of GPU-frame median |
+| Main forward | 0.130 ms | 0.187 ms | 20.6% |
+| HZB | 0.025 ms | 0.026 ms | 3.9% |
+
+The Sponza workload contained 103 meshes, 69 textures, 192,496 vertices,
+786,801 indices and 3,491 meshlets. Scene load took 354.7 ms wall / 344.4 ms
+CPU; geometry upload measured 5.281 ms GPU. The GPU was 90–99% busy in
+out-of-process snapshots, and frame/pass variance was high, so these numbers
+locate likely frame cost (four shadow cascades first), not a clean comparison
+or proof of an optimization. Full report:
+=build/bench/headless-hotpath-20261012-b/summary.json=.
+
+At 1280x720, the same five-run/60-frame workload measured 1.501 ms frame-wall
+median / 1.442 ms GPU-frame median. Shadows were 0.544 ms (37.7%), main
+forward 0.421 ms (29.2%), and HZB 0.039 ms (2.7%). Frame CV was 21.9%;
+GPU-state snapshots ranged from 19–78% busy. The CPU frame profile's
+1.415 ms median begin-fence wait is GPU synchronization, not CPU execution;
+command recording was 0.073 ms median. This Sponza has no active animation.
+Report: =build/bench/sponza-720p-20261012/summary.json=.
+
+* Animation-channel indexing optimization
+
+CPU sampling of the production animation benchmark captured 687 samples with
+zero lost samples; =animate_scene= accounted for 98.66% of self samples. The
+production function scanned every animation channel for every node even
+though each channel targets one node. Added a runtime-only stable node-to-
+channel index for large animations (more than 4096 legacy node/channel checks).
+It is built once per immutable animation graph, preserves channel order,
+indexes morph-weight channels separately, and falls back to the original scan
+if allocation fails. Small animations retain the no-index path; no per-frame
+allocation or serialized-format change.
+
+The same CPU-only benchmark executable, 256 frames per sample and five
+samples, compared before/after hot medians:
+
+| Nodes × channels | Before | After | Change |
+|------------------+--------+-------+--------|
+| 512 × 128 | 79.6 µs | 9.2 µs | 8.7× faster |
+| 512 × 512 | 280.8 µs | 21.3 µs | 13.2× faster |
+| 1024 × 1024 | 1.014 ms | 42.6 µs | 23.8× faster |
+| 2048 × 2048 | 3.899 ms | 86.1 µs | 45.3× faster |
+
+At 2048 × 2048 the first indexed call measured 132.6 µs, including index
+construction; subsequent hot median was 86.1 µs/frame. The 512-node,
+zero-channel case remained 4.7 µs/frame. Regression coverage checks stable
+ordering for repeated node targets, translation/rotation/scale composition,
+morph weights, and hierarchy output against the reference path.
+These synthetic animation sizes are not measured Sponza frame costs.
+
+* Transparent-sort large-blend optimization
+
+The production CPU-only transparent-sort benchmark measured the full partition,
+distance-cache, and sort path (five samples × 256 sorts; median per sort).
+Replacing Shell sort at large blend counts with an in-place min-heapsort
+improved the large cases without extra scratch allocation. Shell sort remains
+for fewer than 2048 blended meshes, preserving the existing path at small
+sizes. The measured 2048-item all-blend case is the smallest benchmarked size
+where the heapsort path showed a clear gain; the crossover between algorithms
+was not exhaustively searched.
+
+| Meshes | Blend meshes | Before | After | Change |
+|--------+--------------+--------+-------+--------|
+| 128 | 128 | 1.50 µs | 1.35 µs | 10% faster |
+| 512 | 512 | 9.74 µs | 9.70 µs | 0.4% faster |
+| 2048 | 2048 | 160.4 µs | 118.5 µs | 26% faster |
+| 8192 | 8192 | 766.5 µs | 673.5 µs | 12% faster |
+| 8192 | 6144 | 560.8 µs | 477.0 µs | 15% faster |
+
+For at least 2048 blended items, the path now has O(n log n) comparison work;
+smaller blends retain the existing Shell sort. Sorting runs only when scene
+topology or camera position changes, so these are update-spike savings, not a
+per-frame reduction. These are synthetic CPU workloads, not measured Sponza
+transparent meshes. Equal-distance tie order is not stable in either algorithm;
+the contract and regression check require depth order and complete membership,
+not a specific permutation of ties. Full benchmark output is produced by
+=make bench-transparent-sort BENCH_ITERATIONS=256=.
+
+* Static shadow-atlas reuse
+
+The Sponza baseline showed four stable cascades at 1280x720: aggregate shadow
+GPU p50 0.553 ms (p95 0.620 ms), 20.5% of the 2.694 ms GPU-frame p50. A CPU
+whole-mesh AABB cull was rejected: all 103 meshes overlapped every cascade,
+and the profile remained 0.555 ms with the same 412 draws / 688 mesh-task
+groups. Moving task-shader plane extraction to one invocation and sharing the
+mesh normal matrix also did not improve measured GPU time; the latter regressed
+the forward pass. Neither experiment is retained.
+
+Static shadow maps are now reused independently per in-flight frame slot. A
+fingerprint covers cascade matrices, scene revisions, each eligible caster's
+model/bounds/meshlet ranges, alpha-test material inputs, and texture image/view
+handles. A hit imports the atlas from its actual shader-read layout and loads
+the existing depth attachment instead of clearing/rasterizing four cascades.
+Skinned and morphed casters, disabled shadows, and empty draw lists bypass the
+cache; unsafe frames invalidate both slots after successful submission.
+Transform, bounds, material, texture-handle, or cascade changes produce a
+different key. Textures are treated as immutable once their VkImage/view is
+created; adding in-place texture painting needs an explicit texture revision in
+the cache key.
+
+Using the same five-process/30-warmup/60-measured cold-Sponza workload, the
+baseline shadow pass had 103 mesh draws and 172 task groups per cascade. In
+the cache run, steady-state headless frames contained no shadow pass timestamp
+and no shadow Vulkan draw/task commands; only the main-forward work remained.
+GPU-frame p50 was 0.724 ms (run-level wall p50 0.768 ms; frame CV 40.8%).
+This is not a clean whole-frame A/B: the baseline had work counters disabled,
+the cache run enabled them, and external GPU load was high. The direct evidence
+is that steady-state static frames omit the previously measured 0.553 ms shadow
+pass; the frame-p50 change is directional, not an isolated causal estimate.
+Synchronization validation passed for repeated atlas LOAD/read transitions.
+That smoke exposed a render-graph contract bug: load attachments require read
+access as well as write access in their dependency. Color and depth attachment
+dependencies now include the corresponding read bit when =clear=false=, with a
+native contract test for both.
+
+The cache-key native test covers model/cascade/bounds/revision/material/texture
+changes and skinned/morphed bypass. Full report:
+=build/bench/sponza-shadow-cache-final/summary.json=; validation smoke:
+=build/bench/sponza-shadow-cache-final-validation/summary.json=.

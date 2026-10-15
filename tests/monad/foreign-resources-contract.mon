@@ -1,0 +1,80 @@
+;;; foreign-resources-contract.mon --- Contract tests in Monad (not C).
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract foreign-resources-contract
+
+;;; Commentary:
+
+INTEGRATION GATE: compiled MonadC -> object-space binding access unverified.
+Execute inside a running, initialized engine on its owner thread.
+For stale-handle tests, mutate the scene between borrowing and using a
+reference. Expected behavior: a typed invalid-reference error, not a crash.
+
+;;; Code:
+(define (obsidian-test-mesh-capability)
+  (let ([world (obs-current-scene)])
+    (if (> (obs-scene-mesh-count world) 0)
+        (let* ([mesh (obs-scene-mesh world 0)]
+               [visible (obs-mesh-visible? mesh)])
+          (obs-mesh-set-visible mesh visible)
+          (and (= (obs-mesh-index mesh) 0)
+               (= visible (obs-mesh-visible? mesh))))
+        True)))
+
+(define (obsidian-test-sdf-capability)
+  (let ([world (obs-current-scene)])
+    (if (> (obs-scene-sdf-count world) 0)
+        (let* ([sdf (obs-scene-sdf world 0)]
+               [roughness (obs-sdf-roughness sdf)]
+               [metallic (obs-sdf-metallic sdf)])
+          (obs-sdf-set-material sdf roughness metallic)
+          (and (= roughness (obs-sdf-roughness sdf))
+               (= metallic (obs-sdf-metallic sdf))))
+        True)))
+
+(define (obsidian-test-gltf-capability)
+  (let ([world (obs-current-scene)])
+    (if (> (obs-scene-gltf-count world) 0)
+        (let ([instance (obs-scene-gltf world 0)])
+          (and (>= (obs-gltf-mesh-count instance) 0)
+               (>= (obs-gltf-animation-count instance) 0)
+               (>= (obs-gltf-joint-count instance) 0)
+               (= (obs-gltf-joint-count instance)
+                  (gltf-joint-count instance))))
+        True)))
+
+(define (obsidian-test-render-policy)
+  (let ([render (render)])
+    (and (Bool? (render-ao? render))
+         (Bool? (render-ibl? render))
+         (Bool? (render-culling-frozen? render))
+         (obsidian-test-render-setting
+          render render-ao? render-ao!)
+         (obsidian-test-render-setting
+          render render-ibl? render-ibl!)
+         (obsidian-test-render-setting
+          render render-culling-frozen? render-culling-frozen!)
+         (obsidian-test-render-antialiasing render))))
+
+(define (obsidian-test-render-antialiasing policy)
+  (render-antialiasing! policy nil)
+  (= (render-antialiasing policy) nil))
+
+(define (obsidian-test-render-setting policy getter setter)
+  (let ([original (getter policy)])
+    (setter policy (not original))
+    (let ([changed (getter policy)])
+      (setter policy original)
+      (and (= changed (not original))
+           (= (getter policy) original)))))
+
+(define (obsidian-test-all-resources)
+  (and (obsidian-test-mesh-capability)
+       (obsidian-test-sdf-capability)
+       (obsidian-test-gltf-capability)
+       (obsidian-test-render-policy)))
+
+(if (obsidian-test-all-resources)
+    True
+    (error "Foreign resource contract failed"))

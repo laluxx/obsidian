@@ -1,0 +1,477 @@
+#include "camera.h"
+#include "easing.h"
+#include "editor.h"
+
+/// Implementation
+
+Camera camera;
+
+void camera_init(Camera* cam, vec3 position, float yaw, float pitch, float aspect_ratio) {
+    cam->yaw = yaw;
+    cam->pitch = pitch;
+    cam->movement_speed = 3.0f;
+    cam->mouse_sensitivity = 0.1f;
+    cam->aspect_ratio = aspect_ratio;
+    cam->fov = 45.0f;
+    cam->near_plane = 0.1f;
+    cam->far_plane = 100.0f;
+    cam->active = false;
+    cam->use_look_at = true;
+    cam->snap_transition = (CameraSnapTransition){0};
+
+    glm_vec3_copy((vec3){0.0f, 1.0f, 0.0f}, cam->up);
+    glm_vec3_copy((vec3){0.0f, 0.0f, 0.0f}, cam->look_at);
+
+    glm_vec3_copy(position, cam->position);
+
+    camera_update(cam);
+}
+
+void camera_update(Camera* cam) {
+    // Compute dynamic UP vector based on true yaw and pitch for 360-degree rotation
+    cam->up[0] = -cos(glm_rad(cam->yaw)) * sin(glm_rad(cam->pitch));
+    cam->up[1] = cos(glm_rad(cam->pitch));
+    cam->up[2] = -sin(glm_rad(cam->yaw)) * sin(glm_rad(cam->pitch));
+    glm_normalize(cam->up);
+
+    if (cam->use_look_at) {
+        // ORBIT MODE: Always look at the specified point
+        vec3 look_dir;
+        glm_vec3_sub(cam->look_at, cam->position, look_dir);
+        glm_vec3_normalize_to(look_dir, cam->front);
+
+        // Update view matrix to look at the target point
+        glm_lookat(cam->position, cam->look_at, cam->up, cam->view_matrix);
+    } else {
+        // FPS MODE: Use the dynamic 360-degree UP vector to support inverted panning
+        vec3 front;
+        front[0] = cos(glm_rad(cam->yaw)) * cos(glm_rad(cam->pitch));
+        front[1] = sin(glm_rad(cam->pitch));
+        front[2] = sin(glm_rad(cam->yaw)) * cos(glm_rad(cam->pitch));
+        glm_normalize_to(front, cam->front);
+
+        vec3 target;
+        glm_vec3_add(cam->position, cam->front, target);
+        glm_lookat(cam->position, target, cam->up, cam->view_matrix);
+    }
+
+    // Update projection matrix (same for both modes)
+    glm_perspective(glm_rad(cam->fov), cam->aspect_ratio, cam->near_plane, cam->far_plane, cam->projection_matrix);
+    cam->projection_matrix[1][1] *= -1; // Vulkan correction
+}
+
+void camera_set_look_at(Camera* cam, vec3 look_at) {
+    glm_vec3_copy(look_at, cam->look_at);
+    cam->use_look_at = true;
+    camera_update(cam);
+}
+
+void camera_frame_transition_begin(Camera *cam, vec3 target,
+                                   float distance,
+                                   CameraFrameTransition *transition) {
+    if (!cam || !transition || !target) return;
+    camera_update(cam);
+    if (distance < 0.01f) distance = 0.01f;
+    glm_vec3_copy(cam->position, transition->start_position);
+    if (cam->use_look_at) {
+        glm_vec3_copy(cam->look_at, transition->start_look_at);
+    } else {
+        vec3 forward_offset;
+        glm_vec3_scale(cam->front, distance, forward_offset);
+        glm_vec3_add(cam->position, forward_offset,
+                     transition->start_look_at);
+    }
+    glm_vec3_copy(target, transition->target_look_at);
+    vec3 backward_offset;
+    glm_vec3_scale(cam->front, -distance, backward_offset);
+    glm_vec3_add(target, backward_offset, transition->target_position);
+    cam->use_look_at = true;
+    camera_set_look_at(cam, transition->start_look_at);
+}
+
+void camera_frame_transition_apply(Camera *cam,
+                                   CameraFrameTransition *transition,
+                                   float amount) {
+    if (!cam || !transition) return;
+    if (amount < 0.0f) amount = 0.0f;
+    if (amount > 1.0f) amount = 1.0f;
+    glm_vec3_lerp(transition->start_position, transition->target_position,
+                  amount, cam->position);
+    vec3 look_at;
+    glm_vec3_lerp(transition->start_look_at, transition->target_look_at,
+                  amount, look_at);
+    camera_set_look_at(cam, look_at);
+}
+
+void camera_orbit_around_point(Camera* cam, vec3 pivot_point, float delta_yaw, float delta_pitch) {
+    vec3 pivot_to_cam;
+    glm_vec3_sub(cam->position, pivot_point, pivot_to_cam);
+    float distance = glm_vec3_norm(pivot_to_cam);
+
+    cam->yaw += glm_deg(delta_yaw);
+    /* Positive orbit pitch raises the camera; the Monad input policy owns the
+     * screen-space sign convention and sensitivity. */
+    cam->pitch -= glm_deg(delta_pitch);
+    if (cam->pitch > 89.9f) cam->pitch = 89.9f;
+    if (cam->pitch < -89.9f) cam->pitch = -89.9f;
+
+    while (cam->yaw > 180.0f) cam->yaw -= 360.0f;
+    while (cam->yaw < -180.0f) cam->yaw += 360.0f;
+
+    float yaw_rad = glm_rad(cam->yaw);
+    float pitch_rad = glm_rad(cam->pitch);
+
+    cam->position[0] = pivot_point[0] - distance * cosf(pitch_rad) * cosf(yaw_rad);
+    cam->position[1] = pivot_point[1] - distance * sinf(pitch_rad);
+    cam->position[2] = pivot_point[2] - distance * cosf(pitch_rad) * sinf(yaw_rad);
+
+    camera_set_look_at(cam, pivot_point);
+}
+
+void camera_disable_orbit_mode(Camera* cam) {
+    cam->use_look_at = false;
+    camera_update(cam);
+}
+
+void camera_process_keyboard(Camera* cam, GLFWwindow* window, float delta_time) {
+    if (!cam->active) return;
+
+    float velocity = cam->movement_speed * delta_time;
+    vec3 tmp;
+
+    // Check if any movement key is pressed
+    bool movement_key_pressed =
+        glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+
+    // When moving with WASD in FPS mode, disable orbit mode
+    if (movement_key_pressed && cam->use_look_at) {
+        camera_disable_orbit_mode(cam);
+    }
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+        glm_vec3_scale(cam->front, velocity, tmp);
+        glm_vec3_add(cam->position, tmp, cam->position);
+    }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+        glm_vec3_scale(cam->front, velocity, tmp);
+        glm_vec3_sub(cam->position, tmp, cam->position);
+    }
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+        glm_cross(cam->front, cam->up, tmp);
+        glm_normalize(tmp);
+        glm_vec3_scale(tmp, velocity, tmp);
+        glm_vec3_sub(cam->position, tmp, cam->position);
+    }
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+        glm_cross(cam->front, cam->up, tmp);
+        glm_normalize(tmp);
+        glm_vec3_scale(tmp, velocity, tmp);
+        glm_vec3_add(cam->position, tmp, cam->position);
+    }
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+        glm_vec3_scale(cam->up, velocity, tmp);
+        glm_vec3_add(cam->position, tmp, cam->position);
+    }
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
+        glm_vec3_scale(cam->up, velocity, tmp);
+        glm_vec3_sub(cam->position, tmp, cam->position);
+    }
+}
+
+void camera_process_mouse(Camera* cam, double xoffset, double yoffset) {
+    xoffset *= cam->mouse_sensitivity;
+    yoffset *= cam->mouse_sensitivity;
+
+    // Disable orbit mode when manually moving mouse (any movement)
+    if (cam->use_look_at && (fabs(xoffset) > 0.01 || fabs(yoffset) > 0.01)) {
+        camera_disable_orbit_mode(cam);
+    }
+
+    // If the camera is currently upside down, normalize it to the right-side-up equivalent view
+    if (cam->pitch > 90.0f) {
+        cam->pitch = 180.0f - cam->pitch;
+        cam->yaw += 180.0f;
+    } else if (cam->pitch < -90.0f) {
+        cam->pitch = -180.0f - cam->pitch;
+        cam->yaw += 180.0f;
+    }
+
+    cam->yaw += xoffset;
+    cam->pitch += yoffset;
+
+    // Strict clamp for FPS mode: never allow looking past straight up or straight down
+    if (cam->pitch > 89.9f) cam->pitch = 89.9f;
+    if (cam->pitch < -89.9f) cam->pitch = -89.9f;
+
+    while (cam->yaw > 180.0f) cam->yaw -= 360.0f;
+    while (cam->yaw < -180.0f) cam->yaw += 360.0f;
+
+    camera_update(cam);
+}
+
+/// GIZMO SNAP
+
+static const float STANDARD_YAW_ANGLES[] = {
+    0.0f,    // Front (looking from +X towards origin)
+    45.0f,
+    90.0f,   // Right side
+    135.0f,
+    180.0f,  // Back (looking from -X towards origin)
+    -135.0f,
+    -90.0f,  // Left side
+    -45.0f
+};
+
+static const float STANDARD_PITCH_ANGLES[] = {
+    0.0f,
+    45.0f,
+    90.0f,
+    135.0f,
+    180.0f,
+    225.0f,
+    270.0f,
+    315.0f
+};
+
+#define NUM_YAW_ANGLES (sizeof(STANDARD_YAW_ANGLES) / sizeof(float))
+#define NUM_PITCH_ANGLES (sizeof(STANDARD_PITCH_ANGLES) / sizeof(float))
+
+bool smooth_camera_snap = true;
+#define SNAP_ANIM_DURATION 0.25f
+
+static float normalize_angle(float angle) {
+    while (angle > 180.0f) angle -= 360.0f;
+    while (angle <= -180.0f) angle += 360.0f;
+    return angle;
+}
+
+static float lerp_angle(float start, float end, float t) {
+    float diff = normalize_angle(end - start);
+    return start + diff * t;
+}
+
+static void calculate_orbit_position(vec3 position_out, vec3 pivot, float distance, float yaw_deg, float pitch_deg) {
+    float yaw_rad = glm_rad(yaw_deg);
+    float pitch_rad = glm_rad(pitch_deg);
+
+    // Spherical to Cartesian conversion using inverse view vector
+    // This ensures yaw/pitch are universally treated as view angles
+    position_out[0] = pivot[0] - distance * cosf(pitch_rad) * cosf(yaw_rad);
+    position_out[1] = pivot[1] - distance * sinf(pitch_rad);
+    position_out[2] = pivot[2] - distance * cosf(pitch_rad) * sinf(yaw_rad);
+}
+
+bool raycast_to_ground(Camera* cam, vec3 hitPoint) {
+    vec3 rayOrigin, rayDir;
+    glm_vec3_copy(cam->position, rayOrigin);
+    glm_vec3_copy(cam->front, rayDir);
+    glm_vec3_normalize(rayDir);
+
+    // Check if ray is parallel to ground (no Y component)
+    if (fabs(rayDir[1]) < 0.0001f) {
+        hitPoint[0] = rayOrigin[0];
+        hitPoint[1] = 0.0f;
+        hitPoint[2] = rayOrigin[2];
+        return false;
+    }
+
+    // Calculate intersection with plane y = 0
+    // t = -rayOrigin.y / rayDir.y
+    float t = -rayOrigin[1] / rayDir[1];
+
+    if (t < 0.0f) {
+        // Project camera position onto ground plane
+        hitPoint[0] = rayOrigin[0];
+        hitPoint[1] = 0.0f;
+        hitPoint[2] = rayOrigin[2];
+        return false;
+    }
+
+    // Calculate hit point
+    hitPoint[0] = rayOrigin[0] + rayDir[0] * t;
+    hitPoint[1] = 0.0f;
+    hitPoint[2] = rayOrigin[2] + rayDir[2] * t;
+
+    return true;
+}
+
+/// find_next_angle — implementation group
+static float find_next_angle(float current_angle, const float* angles, int num_angles, bool increase) {
+    current_angle = normalize_angle(current_angle);
+    float best_angle = current_angle;
+    float min_diff = 360.0f;
+
+    for (int i = 0; i < num_angles; i++) {
+        float diff = normalize_angle(angles[i] - current_angle);
+
+        if (increase) {
+            if (diff <= 0.1f) diff += 360.0f;
+        } else {
+            if (diff >= -0.1f) diff -= 360.0f;
+            diff = -diff;
+        }
+
+        if (diff < min_diff) {
+            min_diff = diff;
+            best_angle = angles[i];
+        }
+    }
+
+    return best_angle;
+}
+
+void camera_snap_to_angles(Camera* cam, float target_yaw, float target_pitch, vec3 pivot) {
+    if (!cam || !pivot) return;
+    vec3 to_cam;
+    glm_vec3_sub(cam->position, pivot, to_cam);
+    float distance = glm_vec3_norm(to_cam);
+
+    if (smooth_camera_snap) {
+        CameraSnapTransition *snap = &cam->snap_transition;
+        if (snap->active) {
+            float t = snap->time / SNAP_ANIM_DURATION;
+            if (t > 1.0f) t = 1.0f;
+            float ease_t = ease_quart_out(t);
+            snap->start_yaw =
+                lerp_angle(snap->start_yaw, snap->target_yaw, ease_t);
+            snap->start_pitch =
+                lerp_angle(snap->start_pitch, snap->target_pitch, ease_t);
+        } else {
+            // Start fresh from true internal angles
+            snap->start_yaw = cam->yaw;
+            snap->start_pitch = cam->pitch;
+        }
+
+        snap->active = true;
+        snap->target_yaw = target_yaw;
+        snap->target_pitch = target_pitch;
+        snap->time = 0.0f;
+        snap->orbit_distance = distance;
+        glm_vec3_copy(pivot, snap->pivot);
+    } else {
+        cam->snap_transition.active = false;
+        cam->yaw = target_yaw;
+        cam->pitch = target_pitch;
+        calculate_orbit_position(cam->position, pivot, distance, target_yaw, target_pitch);
+        camera_set_look_at(cam, pivot);
+    }
+}
+
+void camera_update_animations(Camera* cam, float delta_time) {
+    if (!cam) return;
+    CameraSnapTransition *snap = &cam->snap_transition;
+    if (snap->active) {
+        snap->time += delta_time;
+        float t = snap->time / SNAP_ANIM_DURATION;
+        if (t >= 1.0f) {
+            t = 1.0f;
+            snap->active = false;
+        }
+
+        float ease_t = ease_quart_out(t);
+
+        cam->yaw = lerp_angle(snap->start_yaw, snap->target_yaw, ease_t);
+        cam->pitch = lerp_angle(snap->start_pitch, snap->target_pitch, ease_t);
+
+        calculate_orbit_position(cam->position, snap->pivot,
+                                 snap->orbit_distance, cam->yaw, cam->pitch);
+        camera_set_look_at(cam, snap->pivot);
+    }
+}
+
+void camera_snap_to_next_angle(Camera* cam, bool forward, bool vertical, vec3 pivot) {
+    if (!cam) return;
+    float base_pitch = cam->snap_transition.active
+        ? cam->snap_transition.target_pitch : cam->pitch;
+    float base_yaw = cam->snap_transition.active
+        ? cam->snap_transition.target_yaw : cam->yaw;
+
+    float target_pitch = base_pitch;
+    float target_yaw = base_yaw;
+
+    if (vertical) {
+        bool increase = forward;
+        target_pitch = find_next_angle(base_pitch, STANDARD_PITCH_ANGLES, NUM_PITCH_ANGLES, increase);
+    } else {
+        bool increase = forward;
+        target_yaw = find_next_angle(base_yaw, STANDARD_YAW_ANGLES, NUM_YAW_ANGLES, increase);
+    }
+    camera_snap_to_angles(cam, target_yaw, target_pitch, pivot);
+}
+
+// Helper to get the correct pivot point for orbiting/snapping
+void get_target_pivot(vec3 out_pivot) {
+    glm_vec3_zero(out_pivot);
+    if (editor.inspector.selected_mesh_index >= 0 && editor.inspector.selected_mesh_index < (int)scene->meshes.count) {
+        Mesh* m = &scene->meshes.items[editor.inspector.selected_mesh_index];
+        vec3 local_center;
+        glm_vec3_add(m->aabbMin, m->aabbMax, local_center);
+        glm_vec3_scale(local_center, 0.5f, local_center);
+        vec4 lc4 = {local_center[0], local_center[1], local_center[2], 1.0f};
+        vec4 wc4;
+        glm_mat4_mulv(m->model, lc4, wc4);
+        glm_vec3_copy(wc4, out_pivot);
+    }
+}
+
+void camera_snap_left() {
+    vec3 p; get_target_pivot(p);
+    float current_pitch = camera.snap_transition.active
+        ? camera.snap_transition.target_pitch : camera.pitch;
+    float norm_pitch = normalize_angle(current_pitch);
+    bool upside_down = (norm_pitch > 90.0f || norm_pitch < -90.0f);
+    camera_snap_to_next_angle(&camera, upside_down ? false : true, false, p);
+}
+
+void camera_snap_right() {
+    vec3 p; get_target_pivot(p);
+    float current_pitch = camera.snap_transition.active
+        ? camera.snap_transition.target_pitch : camera.pitch;
+    float norm_pitch = normalize_angle(current_pitch);
+    bool upside_down = (norm_pitch > 90.0f || norm_pitch < -90.0f);
+    camera_snap_to_next_angle(&camera, upside_down ? true : false, false, p);
+}
+void camera_snap_up()    { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, false, true,  p); }
+void camera_snap_down()  { vec3 p; get_target_pivot(p); camera_snap_to_next_angle(&camera, true,  true,  p); }
+
+// Direct snap to standard views
+void camera_snap_to_front() {
+    vec3 pivot = {0.0f, 0.0f, 0.0f};
+    camera_snap_to_angles(&camera, 180.0f, 0.0f, pivot);
+}
+
+void camera_snap_to_back() {
+    vec3 pivot = {0.0f, 0.0f, 0.0f};
+    camera_snap_to_angles(&camera, 0.0f, 0.0f, pivot);
+}
+
+void camera_snap_to_left() {
+    vec3 pivot = {0.0f, 0.0f, 0.0f};
+    camera_snap_to_angles(&camera, 90.0f, 0.0f, pivot);
+}
+
+void camera_snap_to_right() {
+    vec3 pivot = {0.0f, 0.0f, 0.0f};
+    camera_snap_to_angles(&camera, -90.0f, 0.0f, pivot);
+}
+
+void camera_snap_to_top() {
+    vec3 pivot = {0.0f, 0.0f, 0.0f};
+    camera_snap_to_angles(&camera, camera.yaw, 90.0f, pivot);
+}
+
+void camera_snap_to_bottom() {
+    vec3 pivot = {0.0f, 0.0f, 0.0f};
+    camera_snap_to_angles(&camera, camera.yaw, -90.0f, pivot);
+}
+
+void look_at_world_origin() {
+    vec3 world_origin = {0.0f, 0.0f, 0.0f};
+    camera_set_look_at(&camera, world_origin);
+}
+

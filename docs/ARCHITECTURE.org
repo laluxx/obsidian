@@ -1,0 +1,185 @@
+#+TITLE: Obsidian — subsystem ownership and migration contracts
+#+STARTUP: overview
+
+* Directory layout
+
+| Location          | Owner                                              |
+|-------------------+----------------------------------------------------|
+| =src/assets/=       | Asset decoding, glTF, OBJ                          |
+| =src/physics/=      | Jolt physics wrapper                               |
+| =src/app/=          | executable and current sample application          |
+| =src/core/=         | shared types, context, math/easing                 |
+| =src/platform/=     | GLFW, X11, input and native/Monad key dispatch     |
+| =src/graphics/=     | renderer, GPU allocation, render graph, fonts      |
+| =src/scene/=        | scene graph and cameras                            |
+| =src/audio/=        | audio backend and callback                         |
+| =src/editor/=       | editor UI, text, gizmos, menus, animation          |
+| =src/monad/=        | one Monad runtime, foreign capabilities, module IO |
+| =monad/obsidian/= | user-facing Monad definitions                      |
+| =tests/monad/=      | Monad-native tests and examples                    |
+| =docs/=             | architecture and preserved historical notes        |
+| =shaders/=          | GLSL and generated SPIR-V                          |
+| =vendor/=           | third-party sources                                |
+
+* Source boundaries
+
+- Preserve the original rendering, resource, and simulation data paths.
+- The C engine holds a single Monad runtime for each running application.
+- A foreign reference is host-owned, type-tagged and generation checked.
+- The key dispatch path retains compiled Monad functions, not source strings.
+- Frame/audio/GPU driver callbacks do not evaluate Monad source.
+- A Monad module may compute camera/game logic; host calls validate mutation.
+- C header basename compatibility is maintained temporarily with -I paths.
+- =src/monad/runtime.c= and =bindings.c= own the dynamic Monad ABI
+  lifecycle and registration; =*_api.c= modules implement controlled
+  subsystem foreign capabilities.  Don't scatter monad_value_t through graphics code.
+- New code should include subsystem headers from their owning directories
+  (the flattened header namespace is a migration aid, not final design).
+
+* Lifecycle
+
+1. =initWindow= initializes graphics, scene and editor state, registers the
+   editor keymap objects and typed host actions, then starts Monad and loads the
+   native policy module plus the live editor command/keymap image.
+2. With =OBSIDIAN_MONAD_BOOT= set, one Monad source module is loaded from disk.
+3. With boot configured, F5 reloads the boot file at the normal input/event
+   safe point.  The module must rebind its commands after a reload.
+4. Monad commands call compiled procedures on the owning event-loop thread.
+5. =cleanup= closes the host before native scene/GPU resources are destroyed.
+
+* Editor policy and live keymap boundary
+
+=monad/obsidian/editor-orbit.mon= exports pure, typed policies for camera
+orbit and the next open state of an editor panel. =monad/obsidian/editor.mon=
+owns effective keymap declarations for the
+global editor, transform mode, search, Add Menu, animation editor, REPL, text
+editor and Vertico. Map values are opaque host keymap capabilities; the source
+associates key notation with Monad command closures and descriptions. The live
+loader accepts both balanced parenthesized forms and blank-delimited Wisp
+declarations, preserving source line numbers.
+
+Vertico navigation policy and its width/count/placement/wrap options live in
+=monad/obsidian/editor.mon=. Marginalia annotations live in
+=monad/obsidian/marginalia.mon=. C exposes bounded selection-state and
+variable-reflection capabilities and renders the shared candidate surface; the
+compiled layout scalar cells are read only when the selector activates, not
+evaluated per frame. Command palette, key help, variable help, text input, and
+completion share this one panel.
+
+=src/editor/scene_buffers.c= owns scene documents. A scene buffer carries its
+loaded scene, selection, source path and actual OMDL cache result. Vertico
+switches the active buffer and shows that cache status. =src/editor/editor_frames.c=
+owns auxiliary OS frames; Monad Marginalia chooses annotation labels, while
+the host appends candidate details with bounded formatting. The render loop
+pumps events once per iteration and
+renders each presentable frame against its own scene buffer, camera, workspace,
+and transient frame-local keymap. Scene animation advances once per buffer per
+logical iteration; physics advances only for the primary frame's scene.
+
+Monad source convention: use typed Wisp declarations (=define name :: Type=)
+for pure transformations and state-independent policy. Keep effectful command
+procedures, keymap installation and ordered mutation in explicit parenthesized
+forms. A module may mix the two; syntax follows effect/ownership, not a
+project-wide preference for one surface.
+
+=src/monad/live_editor.c= registers each C-owned keymap and typed host action
+before source evaluation. It also publishes opaque hierarchy, inspector, and
+REPL panel capabilities. Monad commands query/set the panel open state and
+choose toggle behavior; writes are accepted only during live command dispatch.
+It retains command closures through the Monad dynamic-procedure ABI, stages
+command metadata and prepared keymap images in a single live-evaluator batch,
+and swaps host bindings only after the batch commits. Shutdown removes managed
+bindings before releasing retained procedures. Reloading identical editor
+source is a no-op; changed keymap source is currently rejected without
+disturbing the active image because the embedded evaluator cannot yet replace
+that image safely. =src/platform/keychords.c= still owns physical input
+decoding, stack precedence and dispatch.
+
+Editor command policy now lives in Monad: top-level =r= starts the rotate
+operation; =q/w/e= select rotate/translate/scale through checked opaque
+=ObsidianGizmoMode= values; modal/local maps define their own routes; and
+hierarchy/inspector/REPL commands decide their open/close transitions. The
+gizmo renderer still owns its numerical mode state and all drag/transform
+calculations; C applies the mode selected by Monad only during a live command
+on the owner thread. Skybox, IBL, shadow and culling-freeze toggle decisions
+also live in Monad; typed render-setting capabilities mutate the corresponding
+engine booleans only during live command dispatch. Add Menu bounded
+next/previous/first/last selection policy is Monad-owned through a checked
+selection-state capability; C retains candidate filtering, menu hierarchy,
+selection effects, pointer handling and rendering. C owns panel storage and
+animation, REPL modal lifetime, widget state, rendering state and Vulkan/text
+work behind narrow host capabilities. This is a real command-policy migration
+slice, not a claim that the complete editor model or gizmo implementation has
+moved to Monad.
+
+The =f= selection command is Monad-bound and delegates the focus target to the
+camera host. The camera transition interpolates position and look target in
+parallel, preserving the initial view direction; transition state is stored per
+frame. =C-x 5= commands operate on auxiliary windows, each with an animated
+lifecycle and a frame-local =C-g= close binding. Window close and =C-g= share
+the same teardown path, which releases the local map with the frame.
+
+The compiled Monad render-policy capability also exposes runtime
+antialiasing. =nil= selects 1x/off; =2=, =4= and =8= request exact Vulkan
+sample counts. The owner thread validates color/depth format support, waits for
+device quiescence, recreates multisample attachments and sample-dependent
+pipelines, and applies the mode on the next frame. Unsupported requests fail
+without changing the active mode. The single-sample depth resolve remains the
+HZB input; depth resolves use =MAX= to preserve the HZB's conservative
+far-depth reduction. This mutation is not allowed during source publication.
+
+* Gizmo picking and glTF transform ownership
+
+The gizmo recomputes its hover hit against the current pointer, camera matrices,
+selection origin and screen scale on each render frame when no drag is active.
+The rotate trackball owns its inner projected disc, so overlapping ring/arc
+hits cannot make one half of the handle unselectable.
+
+=GLTFInstance.instance_transform= is the transform above all glTF scene roots;
+each =OmdlNode= retains its own local transform. Keyboard, gizmo and Inspector
+edits to a selected mesh update its node-local matrix and cached TRS, while a
+selected glTF hierarchy group edits only =instance_transform=. The hierarchy
+keeps Shift-click range selection additive and promotes a fully selected
+instance's mesh rows to its group row. The GLFW editor regression loads the
+static nested-hierarchy fixture and checks trackball picks on both screen halves
+plus additive selection ranges, full-group promotion, child-local/group-instance
+rotation and cancel restoration.
+
+=M-d= duplicates the active mesh, or the entire glTF instance when its
+hierarchy group is selected. glTF copies are loaded asynchronously from their
+retained source path; a selected child keeps only its copied mesh, while a
+selected group keeps the full copied graph and animation set. Standalone static
+mesh copies share immutable uploaded geometry and own their material, morph,
+bone-override and collider state. A duplicate enters the existing translation
+transaction and follows pointer movement. Left click or =RET= commits;
+=Escape=, =C-g= or right click cancels and restores source selection.
+
+During duplicate placement, numeric prefixes take precedence over the
+transform map's single-key snap shortcuts: =3 x RET= applies exactly +3 meters
+on X, and =-3 x RET= applies -3 meters; Y and Z work the same way. Without
+=RET=, the entered magnitude becomes the cursor-follow snap interval for the
+selected axis; pointer movement updates the preview and =RET= or click commits.
+The headless editor regression covers standalone, child-mesh and whole-instance
+scope; signed XYZ offsets; cursor snapping; commit and rollback.
+
+* Intentionally incomplete contracts
+
+- Changed editor keymap source needs a safe evaluator/image replacement path;
+  current behavior intentionally preserves the active bindings and reports a
+  reload error instead of risking a dead editor.
+- Do not claim engine-module reload is atomic: parsing, compilation and
+  publication still need transactional staging, rollback and state migration.
+- Engine native source code and Vulkan resources are NOT rewritten in Monad.
+- Typed Monad wrappers for Scene/Camera are early adapters; QTT/linear resource
+  capabilities and language-native graphics effects require MonadC work.
+- This is a host capability model, not an unrestricted C pointer FFI.
+- Complete build, validation layers, benchmarks, and real Monad tests require
+  MonadC + Vulkan dependencies and a runnable display/server.
+- Auxiliary-frame rendering still shares engine-global renderer/editor
+  subsystems; only camera, scene buffer, selection and workspace panels are
+  isolated per frame. Physics simulation is primary-frame-only.
+- Port physics out of editor ownership before making it game-runtime stable.
+
+* Migration sequence
+
+Continue work in root =TODO.org=.  There is one active engine task queue.

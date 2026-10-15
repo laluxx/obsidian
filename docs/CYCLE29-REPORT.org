@@ -1,0 +1,74 @@
+#+TITLE: Obsidian — Cycle 29: Aggregate Geometry Reservation Preflight
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope and actual guarantee
+
+Cycle 29 prevents *capacity-driven partial GPU geometry reservations* during
+OMDL cache hits and glTF cache misses. It does *not* implement complete GPU
+rollback after already-submitted Vulkan work. The pure preflight is deliberately
+outside the MonadC/QTT runtime; Obsidian owns real GPU storage, while MonadC
+continues to own scripting-level resource proofs and native-image lifetimes.
+
+* Implementation
+
+** Graphics ownership
+
+- =src/graphics/geometry_budget.[ch]=: allocation-free 8-pool checked geometry
+  planning, with UINT32_MAX invalid-address protection, byte-capacity division,
+  safe arithmetic, immutable failure behavior, and staging-capacity checks.
+- =src/graphics/vulkan_setup.[ch]=: =megaGeometryPreflight= bridges the
+  renderer's live offsets and actual buffer byte capacities to the pure planner.
+  The meshlet pool validates separate meshlet, bounds and skin capacities.
+- The three meshlet streams share one logical slot offset. Their combined
+  staging footprint must fit before any upload is queued. Existing vertex and
+  index staging paths also require their individual uploads to fit.
+
+** Loader ownership
+
+- =src/assets/gltf_loader.c=: both validated OMDL cache hits and freshly
+  cooked glTF geometry invoke the aggregate preflight *before the first*
+  geometry upload. Rejected batches return failure without changing GPU
+  geometry offsets, creating pending GPU copy work, or publishing meshes.
+- Cache-miss failures release their temporary CPU cooker arrays; post-upload
+  cleanup also destroys staged mesh-owned names/morph weights and refuses to
+  install partially addressed meshes.
+
+* Executed tests
+
+- =make test=: passed headless native and tooling suites in this environment;
+  SDK-backed Monad/JIT and Vulkan integration explicitly skipped.
+- =build/tests/geometry-budget=: 100,000 deterministic randomized eight-pool
+  capacity cases; late-pool failure leaves the proposed reservation untouched;
+  tests exercise staging exhaustion, no-staging meshlet rejection, zero-count
+  streams, UINT32_MAX sentinels and exact element-size boundaries.
+- Selected =-fsanitize=address,undefined= standalone test: passed.
+- Full =make -j$(nproc)= Vulkan/Jolt executable build: passed.
+- Startup smoke initialized Vulkan on an NVIDIA GeForce RTX 3060, editor
+  systems, and Jolt; it was stopped after 10 seconds. No glTF geometry load
+  ran, so cache-hit/cache-miss integration is not runtime-verified.
+- Clean Cycle 28 -> 29 extraction/checksum verification: see packaging result.
+
+* Limits / unverified
+
+- Existing Vulkan per-pool upload routines are not transactional. A Vulkan
+  error, CPU allocation failure while extending pending-copy arrays, or a
+  mid-batch submission/flush can still leave GPU writes or capacity committed.
+  A future design needs a *staged GPU copy journal*, preallocated descriptors,
+  private upload space, and fence-aware commit or retirement.
+- No driver fault-injection, live cache-hit/cache-miss load, or real GPU
+  frame-time test was run. An aggregate capacity gate is a safety improvement,
+  not a measured render-speedup.
+- This cycle deliberately does not expose raw GPU reservation pointers as
+  Monad foreign objects; engine-side resource ownership must remain explicit.
+
+* Next priorities
+
+1. Batch all upload descriptors and ensure allocation succeeds before writing
+   or submitting any destination copy (including morph and meshlet uploads).
+2. Introduce fenced retirement for failed staged uploads; never rewind space
+   that might still be referenced by the GPU.
+3. Test cache-hit / cache-miss parity with Vulkan validation and GPU failure
+   injection on a full development machine.
+4. Once guarantees hold, expose a high-level QTT-aware engine load capability
+   to Monad, not a raw allocator interface.

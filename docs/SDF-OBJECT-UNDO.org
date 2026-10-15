@@ -1,0 +1,76 @@
+#+TITLE: Obsidian — Object-scoped, conflict-safe SDF undo
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* User workflow
+
+Enable the F8 SDF viewport, select a supported SDF primitive, make edits on
+several objects, then use =Ctrl+Alt+Z= to undo the last original edit group
+touching the selected object while leaving unrelated newer changes intact.
+Normal =Ctrl+Z= remains chronological undo; =Ctrl+Shift+Z= remains explicit
+redo. The shortcut requires the non-modal viewport to own input, with no
+active pointer drag or inspector property gesture.
+
+Monad exposes =(sdf-inspect-undo-selected!)= with no arguments and uses the
+shared inspector selection. External clients call
+=obs_agent_scene_undo_selected(engine, &error)=. Both use the existing
+scene-epoch journal and owner/effect admission.
+
+* Semantics and limits
+
+This operation is inspired by selective editing, but it is not Emacs
+=undo-in-region=: scene objects, not text positions, define its target.
+
+- Search newest-to-oldest for the latest active original group touching the
+  selected scene ticket. Inverse-generated records and inactive original
+  groups are not candidates.
+- A multi-object command is indivisible. The whole group is reversed; it is
+  never split into partial edits.
+- A newer active original command touching any member of the selected group
+  blocks selected undo, even if later edits returned that primitive to the
+  older numeric postimage. A newer original already undone is inactive and
+  does not block it.
+- Preflight every group member before publishing any inverse. A stale object
+  or out-of-band write returns failure and leaves the command unapplied.
+- The inverse is recorded in the existing bounded history; explicit redo can
+  consume it. Ordinary chronological undo skips inactive originals left in
+  the log.
+- Counts exclude inactive original groups, but are advisory: later foreign
+  mutation or bounded-history eviction can make a replay fail.
+- History has a 64-record limit and resets with scene lifetime. This is not
+  persistent history, mesh/topology deletion undo, a QTT proof, or
+  text-region selective undo.
+
+* Example
+
+#+begin_example
+A.x = 0; B.x = 5
+edit A.x = 1
+edit B.x = 6
+edit A.x = 2
+edit B.x = 7
+select A; selected-object undo  =>  A.x = 1, B.x = 7
+ordinary undo                  =>  A.x = 1, B.x = 6
+ordinary undo                  =>  A.x = 1, B.x = 5
+ordinary undo                  =>  A.x = 0, B.x = 5
+#+end_example
+
+If A and B were changed in one group and B then changed outside that group,
+selected undo on A refuses the whole group until B's newer write is undone.
+It does not partially restore A.
+
+* Verification
+
+=make test-sdf-selective-undo= compiles production scene, ticket, journal and
+SDF slot-publication sources into a native fixture. The full available suite
+also exercises production Monad callback and public C API source. Real
+GLFW/Vulkan/MonadC runtime acceptance requires a configured workstation.
+
+#+begin_src sh
+make test-sdf-selective-undo
+make test-emacs-scene-undo
+make -j2 test
+make test-sculpture-runtime   # strict, requires full MonadC/Vulkan SDK
+make run                      # interactive shortcut acceptance
+#+end_src
+

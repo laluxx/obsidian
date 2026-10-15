@@ -1,0 +1,27 @@
+;;; Transform.mon --- Foreign methods for borrowed mesh transforms
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign transform
+
+;;; Code:
+
+module Foreign.Transform
+  [Transform ◯ x y z position! rotate!]
+
+type ◯ :: {Transform}
+
+method x :: ◯ -> Float
+  view -> transform-x view
+
+method y :: ◯ -> Float
+  view -> transform-y view
+
+method z :: ◯ -> Float
+  view -> transform-z view
+
+method position! :: ◯ -> Float -> Float -> Float -> ()
+  view x y z -> transform-position! view x y z
+
+method rotate! :: ◯ -> Float -> Float -> Float -> Float -> ()
+  view x y z radians -> transform-rotate! view x y z radians

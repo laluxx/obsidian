@@ -1,0 +1,55 @@
+#+TITLE: Obsidian Cycle 64 — Input command boundaries for scene undo
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Result
+
+The editor's GLFW input adapter now delimits chronological SDF undo sequences
+through the existing =obs_sdf_inspector_command_boundary= operation. It adds
+no history store, scene mutation, allocation, GPU submission or second command
+model.
+
+Scene-owned =Ctrl+Z=, =Ctrl+Shift+Z= and =Ctrl+Alt+Z= remain one undo-family.
+Keymaps and text input get their existing dispatch opportunity before the
+scene shortcuts; if either claims the key, the event is an ordinary command
+boundary rather than a scene undo. Active SDF property gestures also prevent
+the scene shortcut from taking ownership.
+
+* Input semantics
+
+| Event | Effect on chronological undo sequence |
+|-------+----------------------------------------|
+| Other pressed key command | Start a new sequence |
+| Modifier press, key release/repeat | No boundary |
+| Scene-owned Ctrl+Z / Ctrl+Shift+Z / Ctrl+Alt+Z | Continue undo-family |
+| Ctrl+Z handled by a keymap or text editor | Start a new sequence |
+| Delivered character or IME event | Start a new sequence |
+| Pointer press | Start a new sequence |
+| Pointer movement or release | No boundary |
+| Nonzero scroll | Start a new sequence |
+| Zero scroll | No boundary |
+| Window focus loss | Start a new sequence |
+
+Boundary notifications only reset the undo cursor. They do not commit, abort,
+or otherwise take ownership of an open speculative gesture.
+
+* Implementation and verification
+
+- =src/platform/scene_undo_input.[ch]= is the allocation-free event adapter.
+- =src/platform/input.c= connects key, character, pointer, scroll and focus
+  callbacks. Keymap and text-input dispatch precede scene Ctrl+Z handling.
+- =tests/native/scene_undo_input.c= links that adapter with the production
+  inspector journal, SDF scene operations and mapped SSBO synchronization.
+- Observed: =make test-scene-undo-input= passed in this checkout, including
+  1,000 repeated edit/undo/boundary/slot-publication iterations.
+- The native fixture proves the journal/adapter behavior, not physical GLFW
+  ownership or visible Vulkan output. No source-text callback-hook test is
+  used as a substitute for runtime evidence.
+
+* Remaining acceptance
+
+Run =make test= and =make run= on a provisioned workstation; verify actual
+keymap/text ownership, input focus, undo/redo, active gesture preservation,
+Vulkan validation, and real MonadC callbacks. The external C agent and Monad
+evaluation contexts still require explicit =command_boundary= calls because
+they have no shared editor command loop.

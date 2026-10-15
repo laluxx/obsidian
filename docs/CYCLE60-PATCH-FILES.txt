@@ -1,0 +1,18 @@
+Cycle 60 applied files:
+
+Makefile
+README.md
+TODO.org
+docs/CYCLE60-PATCH-FILES.txt
+docs/CYCLE60-REPORT.org
+src/editor/editor.c
+src/editor/gizmo.c
+src/editor/sdf_viewport.c
+src/editor/sdf_viewport.h
+src/scene/sdf_inspector.c
+src/scene/sdf_inspector.h
+src/scene/sdf_sculpt.c
+src/scene/sdf_sculpt.h
+tests/fixtures/agent_engine_contract.h
+tests/native/sdf_property_gesture.c
+tests/native/sdf_typed_viewport.c

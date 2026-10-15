@@ -1,0 +1,119 @@
+#+TITLE: Obsidian — Cycle 40: production-callable asynchronous glTF cache-hit path
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope and acceptance
+
+This is Cycle 40 of the cumulative Obsidian incremental development series.
+The user requested a genuine end-to-end asynchronous scene load, not another
+standalone owner/journal. The work includes an opt-in *real loader caller*,
+threaded CPU preparation, actual pending-scene/Vulkan-adapter calls, retained
+texture references, fence-driven polling, and allocation-free mesh publication.
+
+IMPORTANT: This is *not full acceptance* of the requested asynchronous glTF
+loader. Only validated *OMDL v2 cache hits* use this path. Uncached glTF
+cooking remains synchronous on the legacy path and is deliberately NOT called
+by the asynchronous worker. A complete Vulkan/Jolt executable, running scene
+with texture assets, real GPU timings, and native Monad/JIT integration have
+not been verified in this environment.
+
+* Implementation
+
+** Actual source preparation (worker thread)
+
+- =src/assets/gltf_async_cache.h= + new isolated CPU preparation routines in
+  =src/assets/gltf_loader.c=. Move the native metadata declaration into
+  =src/assets/omdl_mesh_meta.h= without changing its on-disk native ABI.
+- Use the existing cgltf parser, decoded buffer/source digest, OMDL v2
+  envelope+checksum+ABI verification, mesh-count/scene-topology cross-checks,
+  full graph preflight and all eight validated geometry streams.
+- Allocate mesh records, names/morph targets, bind-pose hierarchy transforms,
+  script-translation scratch and deduplicated texture descriptor plan privately.
+- Worker has no permission to call Vulkan, register textures, mutate live
+  scene/mesh arrays, or publish GPU offsets. Cache failure is a reported
+  async failure, not a silent synchronous render-loop fallback.
+
+** Actual production host and Vulkan handoff
+
+- =src/assets/gltf_async.c/h=: ticketed request, worker, controlled staging,
+  nonblocking poll, supersession/cancel, owner-thread activation and cleanup.
+- Uses =ObsPendingSceneLoad= and =ObsVkSceneLoadBridge=; GPU submission and
+  actual allocation commit belong to existing =megaGeometryAsync*=.
+- Owns all CPU graph/mesh/geometry and texture lease resources from worker
+  preparation through fence completion or safe disposal/quarantine.
+- The renderer owner thread acquires via actual
+  =texture_pool_lease_acquire/release=. It waits for true GPU texture-ready
+  state before visibility; unexpected texture failure rejects the scene.
+- Reserves scene arrays BEFORE submission. The ready predicate verifies
+  scene structural revisions/counts and capacity; an incompatible interim
+  edit cancels the candidate. The final mesh/instance/tree publication path
+  does not allocate. Existing objects remain visible while preparing/uploading.
+- Stale tickets cannot operate on a newer load. One active flight, one
+  superseding request; supersession never frees GPU-owned staging early.
+- =pthread_tryjoin_np= avoids blocking the engine frame during worker exit;
+  blocking join is permitted only during shutdown.
+- =Texture2D.status= is an atomic enum because the background cooker publishes
+  readiness consumed by the owner-thread async poll.
+- Opt in using =OBSIDIAN_ASYNC_GLTF=/absolute/path/to/model.glb=; main loop
+  calls the production API each frame. On a failed device-idle proof the
+  application refuses unsafe resource teardown.
+
+** Changed files
+
+=src/assets/gltf_async.c/h=, =src/assets/gltf_async_cache.h=,
+=src/assets/omdl_mesh_meta.h=, =src/assets/gltf_loader.c=,
+=src/app/main.c=, =Makefile=, two test files, and documentation.
+
+* Verification
+
+- =make test=: PASS for available native tests, including new Cycle 40 test.
+- The Cycle 40 test compiles the *actual production controller body*, linked
+  with =src/scene/pending_load.c= and =src/scene/cache_textures.c=; only the
+  GPU, asset source, and visible scene dependencies are test doubles.
+- Tests cover ticket issuance, background completion, existing scene still
+  visible before fence, delayed texture readiness, GPU completion, activation,
+  stale/repeated polls, cancellation in flight, supersession, malformed cache,
+  texture failure, structural revision invalidation and balanced acquisitions.
+- Cycle 40 controller test: AddressSanitizer and UndefinedBehaviorSanitizer PASS.
+- =make -j$(nproc)= compiled and linked the engine with the async module.
+  This proves compilation/linking, not runtime GPU behavior.
+- Actual Vulkan smoke on an NVIDIA GeForce RTX 3060 loaded the cached
+  =DragonAttenuation.glb= and logged ticket status =PUBLISHED=. A second
+  source produced terminal =FAILED=. Both processes were terminated by the
+  smoke timeout, so graceful shutdown and rendered output were not verified.
+- No validation-layer fault injection, native Monad test, or measured
+  frame-time latency result. No general asynchronous cache-miss glTF cooker.
+  These remain BLOCKED.
+
+* Critical open engineering work
+
+1. Isolate the complete uncached glTF geometry/material/animation cooker from
+   its current static global state. Run it on the worker and construct the
+   same private candidate without assuming an existing OMDL cache.
+2. Validate an actual OMDL cache-hit scene with multiple textured meshes,
+   morph targets, animation and skinning on Vulkan validation layers.
+3. Verify runtime texture residency, descriptor retirement and teardown with
+   real fences, including device loss and renderer shutdown.
+4. Measure request/poll/texture-acquire CPU time and actual render frame-time
+   spikes. CPU source parsing and the GPU fence poll are nonblocking by code
+   structure, but texture-pool acquisition is still an engine-thread operation
+   and *is not yet proven to meet frame-time budgets*.
+5. Add engine-driven in-game REPL/Monad =SceneLoad= foreign capability, typed
+   status and QTT/effect/lifetime contracts only after real runtime testing.
+6. Audit whether animated glTF skin and morph global offsets remain correct
+   when multiple separately loaded instances are added and animated.
+
+* Incremental handoff
+
+#+begin_src sh
+# From the parent of obsidian/
+tar -xzf obsidian-monad-cycle40-incremental-20261011.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE40-MANIFEST.sha256
+make test
+# Run on the real engine machine after prewarming the OMDL v2 cache:
+OBSIDIAN_ASYNC_GLTF=./assets/gltf/Box.glb ./obsidian
+#+end_src
+
+The project root =TODO.org= remains the sole execution-status ledger. The
+Cycle 40 overlay preserved existing headless-render and engine-benchmark paths.

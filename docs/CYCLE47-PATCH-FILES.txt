@@ -1,0 +1,15 @@
+Makefile
+README.md
+TODO.org
+docs/CYCLE47-PATCH-FILES.txt
+docs/CYCLE47-REPORT.org
+docs/HEADLESS-RAW.org
+src/app/headless_job.c
+src/app/headless_job.h
+src/app/main.c
+src/core/atomic_file.c
+src/core/atomic_file.h
+src/monad/runtime.c
+src/monad/runtime.h
+src/platform/window.c
+tests/native/headless_job.c

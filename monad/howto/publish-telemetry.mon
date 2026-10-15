@@ -1,0 +1,36 @@
+;;; publish-telemetry.mon --- publication counters and preflight status
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto publish-telemetry
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/publish-telemetry.mon ./obsidian
+Reads the owner-thread publication ledger: completed requests, advisory
+worker preflight status (0 off, 1 accepted, 2 diagnostics, 3 unavailable)
+and whether staged source bytes await loading. Queue-wait versus CPU
+figures live behind :latency in the REPL. Binding commits and dispatch
+calls live in dispatch-watch.mon.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (publish-frame f)
+  (begin
+    (list (publish-completed)
+          (preflight-status)
+          (source-staged?))
+    True))
+
+(on-frame! publish-frame)

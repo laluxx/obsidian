@@ -1,0 +1,38 @@
+;;; Frame.mon --- Foreign methods for the ephemeral CPU frame capability
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign frame
+
+;;; Code:
+
+import Foreign.FrameScene
+
+module Foreign.Frame
+  [Frame ◯ current number delta width height slot active? scene]
+
+type ◯ :: {Frame}
+
+define current :: IO ◯
+  (obs-current-frame)
+
+method number :: ◯ -> Int
+  frame -> frame-number frame
+
+method delta :: ◯ -> Float
+  frame -> frame-delta frame
+
+method width :: ◯ -> Int
+  frame -> frame-width frame
+
+method height :: ◯ -> Int
+  frame -> frame-height frame
+
+method slot :: ◯ -> Int
+  frame -> frame-slot frame
+
+method scene :: ◯ -> FrameScene
+  frame -> frame-scene frame
+
+define active? :: IO Bool
+  (frame-active?)

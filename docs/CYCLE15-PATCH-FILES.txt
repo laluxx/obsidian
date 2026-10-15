@@ -1,0 +1,25 @@
+# Obsidian Cycle 15 overlay: extract over a complete Cycle 14 tree.
+# Paths are relative to obsidian/; no removals.
+Makefile
+TODO.org
+docs/CYCLE15-REPORT.org
+docs/PUBLICATION-PERFORMANCE.org
+modules/obsidian/live-reload.mon
+src/monad/hotreload.c
+src/monad/hotreload.h
+src/monad/hotreload_api.c
+src/monad/publication_metrics.c
+src/monad/publication_metrics.h
+src/monad/publication_queue.c
+src/monad/publication_queue.h
+src/monad/repl_service.c
+src/monad/runtime.c
+src/monad/runtime.h
+src/monad/source_stage.c
+src/monad/source_stage.h
+tests/monad/publication-latency-contract.mon
+tests/native/hotreload_watcher.c
+tests/native/publication_metrics.c
+tests/native/source_stage.c
+docs/CYCLE15-PATCH-FILES.txt
+docs/CYCLE15-MANIFEST.sha256

@@ -1,0 +1,33 @@
+;;; camera-fly.mon --- scripted camera placement and speed from a frame callback
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto camera-fly
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/camera-fly.mon ./obsidian
+Frame 1 sets cruise speed; later frames dolly forward along +X.
+Per-frame deltas come from frame-delta, so motion is rate-independent.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (fly-frame f)
+  (begin
+    (if (= (frame-number f) 1)
+        (begin (camera-speed! (camera) 2.0) True)
+        True)
+    (camera-move! (camera) (* 0.5 (frame-delta f)) 0.0 0.0)
+    True))
+
+(on-frame! fly-frame)

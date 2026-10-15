@@ -1,0 +1,54 @@
+;;; live-scene-mesh.mon --- Run through the real frame integration harness.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests frame live-scene-mesh
+
+;;; Commentary:
+
+Run through the real frame integration harness. Every borrowed frame,
+scene, mesh and transform is consumed during the callback that created it.
+
+;;; Code:
+(define (live-scene-mesh-find-name world wanted index count)
+  (if (>= index count)
+      -1
+      (let ([candidate (frame-scene-mesh world index)])
+        (if (= (mesh-name candidate) wanted)
+            index
+            (live-scene-mesh-find-name world wanted (+ index 1) count)))))
+
+(define (live-scene-mesh-check current-frame)
+  (let* ([world (frame-scene current-frame)]
+         [count (frame-scene-mesh-count world)]
+         [node-count (frame-scene-node-count world)])
+    (if (or (< count 0) (< node-count 0))
+        (error "live scene counts must be nonnegative")
+        (if (= count 0)
+            True
+            (let* ([mesh (frame-scene-mesh world 0)]
+                   [name (mesh-name mesh)]
+                   [index (mesh-index mesh)]
+                   [visible (mesh-visible? mesh)]
+                   [view (mesh-transform mesh)]
+                   [x (transform-x view)]
+                   [y (transform-y view)]
+                   [z (transform-z view)]
+                   [found-index (live-scene-mesh-find-name world name 0 count)])
+              (mesh-visible! mesh visible)
+              (transform-position! view x y z)
+              (transform-rotate! view 0.0 0.0 1.0 0.01)
+              (and (= index 0)
+                   (= found-index 0)
+                   (String? name)
+                   (= (mesh-visible? mesh) visible)
+                   (= (transform-x view) x)
+                   (= (transform-y view) y)
+                   (= (transform-z view) z)))))))
+
+(define (live-scene-mesh-tick current-frame)
+  (if (live-scene-mesh-check current-frame)
+      True
+      (error "live scene mesh foreign-object contract failed")))
+
+(on-frame! live-scene-mesh-tick)

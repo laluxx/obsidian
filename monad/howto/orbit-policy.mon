@@ -1,0 +1,28 @@
+;;; orbit-policy.mon --- orbit tuning as pure typed policy, no frame callback
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto orbit-policy
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/orbit-policy.mon ./obsidian
+Scalar-only module: yaw is twice as sensitive as pitch and the vertical
+axis is locked out. Publishes today like camera-policy.mon because no
+Frame borrow and no host effect cross the compiler boundary.
+
+;;; Code:
+(module Main)
+
+(define yaw-gain 20)
+
+(define pitch-gain 10)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels yaw-gain))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  0)

@@ -1,0 +1,798 @@
+#+TITLE: Obsidian — Tests, native bridge and performance verification
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Matrix
+
+| Target             | Dependencies                 | Coverage                         |
+|--------------------+------------------------------+----------------------------------|
+| =make test-native= | C23 compiler                 | Unicode, reload stats, watcher   |
+| =make test=        | C23 compiler                 | Native; visible integration SKIPs|
+| =make test-monad=  | Real embedded Monad runner   | =tests/monad/*.mon=              |
+| =make test-all=    | Full Monad runner            | Native + Monad integration       |
+| =make bench-font=  | C23 compiler                 | UTF-8 CPU scan throughput        |
+| =./make bench sdf-undo= | C23 compiler | Production SDF undo/redo CPU latency; no Vulkan timing |
+| =./make bench skin-overrides= | C23 compiler | Per-node skeletal override lookup; CPU only |
+| =./make bench animation-channels= | C23 compiler | Production animation sampling and hierarchy; CPU only |
+| =make test-transparent-sort= | C23 compiler + Vulkan headers/libraries | Production transparent ordering and allocation-failure recovery; no GPU startup |
+| =./make bench transparent-sort= | C23 compiler + Vulkan headers/libraries | Production transparent-mesh sort latency; CPU only |
+| =./make test headless= | C23 compiler; optional Vulkan GPU | Native tests, ASan/UBSan/LSan, CPU benches; optional pixel/validation/Sponza lifecycle smokes |
+| =make test-asan= | C23 compiler + sanitizer runtime | Isolated native regression suite under ASan/UBSan/LSan |
+| =make bench-monad= | Vulkan GPU + MonadC          | Monad scalar-configured Sponza     |
+| =make bench-monad-validation= | Vulkan GPU + validation layer | One-run Sponza synchronization-validation smoke |
+| =make profile-check= | Vulkan GPU + MonadC | Profiler contracts, raw pixels, validation, and Sponza runs |
+| =./make profile=  | Vulkan GPU + MonadC          | Colored terminal benchmark dashboard |
+| =./make bench= | C23 compiler; GPU/SDK for engine entries | Unified registered benchmark suite |
+| =make test-font-unicode= | Vulkan/FreeType/MonadC | GPU-backed glyph integration     |
+| =make test-headless-startup-render= | Vulkan-capable GPU | Monad AA transitions 2x/4x/8x/off + centered cube pixels |
+| =make test-headless-matcap= | Vulkan-capable GPU | PBR and studio-matcap pixels differ on rendered geometry |
+| =make test-headless-async-obj= | Vulkan-capable GPU | Worker-parsed OBJ uploads and publishes a triangle into the scene |
+| =make test-headless-editor-keymaps= | Vulkan-capable GPU | Editor keymaps, Monad hierarchy selection/anchor/range-bounds/selection-effects/glTF group promotion/shared hierarchy/skeleton/search auto-scroll/beam interpolation/navigation and cubic scroll animation (including text and animation editors)/animation titlebar and full panel click precedence for stop/play/close/ruler/keyframes/track rows, draggable-message lifecycle, transport/playback auto-follow/playhead scrub, duration bounds and drag transitions/image-preview drag, zoom clamping and pointer-anchored pan/color-picker hit precedence/hue-SV drag and release transitions/text pointer placement/selection-drag routing/text-editor wheel target/gizmo hover, drag/release and press precedence, popup-window and bottom-panel pointer policies, tree-click-drag/expansion/visibility/inspector-mode/Delete, Shift-additive SDF picks, marquee direction/bounds/3px-drag and mesh/SDF focus result, filesystem wheel-step/clamping and animation track-scroll/view-pan/keyframe-toggle policies, selected-SDF framing and viewport marquee selection |
+| =make test-headless-editor-materials= | Vulkan-capable GPU | Headless editor material/texture surface, Monad file-activation/double-click and viewport-selection policies, glTF complete-group promotion/demotion, missing-material wireframe picking, JPG/PNG mesh texture drops, async GLB/glTF/OBJ scene drops, Vertico layout and image editing |
+| =make test-headless-sponza= | Vulkan-capable GPU + Sponza assets | Real glTF scene texture upload and teardown |
+| =make test-headless-pbr-ao= | Vulkan GPU + A Beautiful Game glTF assets | Five independent 60-frame AO-mapped PBR GPU benchmarks with per-run report assertions |
+| =make test-headless-pbr-lighting= | Vulkan GPU | One-mesh 60-frame sun-on/off A/B; requires the zero-sun report and shader path to omit cascaded shadow work |
+| =make test-vulkan-dynamic-headless= | Vulkan GPU + validation layer | Dynamic vertex growth/frame slicing through offscreen frames |
+| =make test-vulkan-dynamic-window= | Vulkan GPU + validation layer + display | Dynamic vertex growth/frame slicing across two windows |
+
+* Run on the development workstation
+
+#+begin_src sh
+./make help
+./make help test
+./make test                 # same default suite as make test
+./make test native          # headless native regressions
+./make test tooling         # CLI and build-workflow contracts
+./make test headless        # native suite + sanitizers + CPU benches
+OBSIDIAN_GPU_TESTS=1 ./make test headless  # also Vulkan pixel and validation smokes
+./make test vulkan-dynamic-headless
+./make test vulkan-dynamic-window
+./make test all             # strict integration gate
+# The runner MUST own a live Monad runtime, object space and initialized
+# scene/camera, compile and execute each file, and report assertions.
+OBSIDIAN_MONAD_TEST_RUNNER=/path/to/embedded-host-runner make test-all
+make bench-font BENCH_ITERATIONS=20000
+./make bench sdf-undo --iterations 4000
+./make bench transparent-sort --iterations 32
+OBSIDIAN_FONT_PROFILE=1 ./obsidian
+./make profile engine --asset-root ../assets --runs 5
+#+end_src
+
+=./make= is a frontend over the original Makefile, not a replacement for it.
+It maps named commands to existing GNU Make targets; all original Makefile
+targets, recipes, and direct invocation forms remain available. =./make test=
+and =make test= run the same default suite. Missing SDK/live-runner suites
+report =SKIP= in that gate. Use =./make test all= or =make test-all= as the
+strict CI gate with both real host runners configured. =tests/monad= also contains orchestrated two-stage
+fixtures which require explicit reload coordination; loading the definitions
+alone is not a proof that reload preserved state or rejected stale refs.
+
+=make test-headless-startup-render= launches the real Vulkan renderer without
+a window, requests 2x, 4x, 8x, then nil/off through the Monad render-policy
+capability, and renders a frame after each accepted transition. Unsupported
+device sample counts are rejected without changing the active mode; invalid
+count 3 is always rejected. The fixture then captures a 256x256 RGBA frame and
+asserts that the centered cube contributes visible pixels at the center (not
+merely UI overlays). This catches an inverted rasterizer front-face setting as
+well. It requires the built =obsidian= executable and a working Vulkan device;
+it is separate from =make test=, which remains GPU-independent.
+=make test-headless-matcap= renders the same cube once in PBR and once in
+studio-matcap mode, then requires a consumer-visible pixel difference. It
+requires a working Vulkan device and is not part of the GPU-independent suite.
+=make test-headless-async-obj= sends a triangle OBJ through the real worker
+parser and renderer-thread upload/publication path; it asserts that the scene
+publishes one three-vertex mesh. It requires a working Vulkan device.
+=make test-headless-editor-materials= exercises the editor's shared drop-path
+dispatcher and Monad filesystem activation classifier without creating a native
+window: scene-preview extensions map to asset previews, supported image
+extensions map to image previews, unknown extensions map to text editing, and
+directories/no-extension files do not activate. Monad's double-click policy
+matches the same file row within 300 ms and rejects a different row or a click
+outside the timeout. JPG and PNG drops must assign
+different uploaded texture handles to the picked mesh, and GLB, glTF and OBJ
+drops must asynchronously increase the active scene's mesh count. Its GLB and
+glTF imports also exercise geometry-arena growth between completed async
+uploads. This covers the dispatch path invoked by the GLFW file-drop callback,
+not native window-system event delivery. The same fixture renders and picks a
+mesh with its material indices removed and wireframe enabled, covering selection
+through the depthless wireframe pass.
+Pipeline-cache writes use a same-directory temporary file and atomic rename;
+unreadable cache data is ignored, and driver-rejected cache data retries with
+an empty cache. Parallel headless renderer processes therefore cannot expose
+a partially written cache to one another.
+The capture is a raw RGBA correctness fixture, not a screenshot. Benchmark
+samples never capture or write image data.
+=make test-headless-sponza= runs one measured offscreen frame on the repository
+Sponza scene and tears down the full renderer. It exercises the large scene's
+texture upload/cache path; the test is included in =make test headless= when
+=OBSIDIAN_GPU_TESTS=1=.
+=make test-headless-pbr-ao= uses =assets/gltf/ABeautifulGame/glTF/ABeautifulGame.gltf=,
+requires at least one imported AO-mapped mesh and a valid measured
+=main_forward= GPU timestamp in every run. It primes and requires a validated
+OMDL cache hit, then benchmarks five independent processes, 30 warmup frames
+and 60 measured frames. Override
+=PBR_AO_BENCH_RUNS=, =PBR_AO_WARMUP_FRAMES=, or
+=PBR_AO_BENCH_FRAMES= for local investigation; retain the defaults for
+comparable results. This measures the whole forward pass with AO-capable
+materials, not AO-only shader cost or an AO-on/off performance delta.
+It is included in =make test headless= when =OBSIDIAN_GPU_TESTS=1=.
+=make test-headless-pbr-lighting= benchmarks the same one-mesh glTF fixture
+with directional sun intensity 3 and 0. Both modes run five processes, 60
+measured frames, and a warm OMDL cache; warmup is disabled so the sun-enabled
+case captures initial cascade rendering. Per-run reports must show a forward
+GPU timestamp in both modes, sun and shadow feature activation only in the
+sun-enabled mode, actual cascade task work only with the sun, and identical
+scene input. It records both forward-pass distributions without imposing a
+hardware-fragile timing threshold. The zero-sun policy also bypasses direct-sun
+BRDF and the shadow-dependent specular-occlusion term in mesh and SDF shaders.
+It is included in =make test headless= when =OBSIDIAN_GPU_TESTS=1=.
+
+=make test-asan= rebuilds =test-native= in the separate
+=build/asan/native/= directory with AddressSanitizer and UndefinedBehaviorSanitizer;
+LeakSanitizer is enabled at runtime. It instruments the C translation units
+compiled by those native test recipes, including focused production-C seams.
+It is **not** a full linked-engine, Vulkan-driver, or live Monad/JIT sanitizer
+run. System libraries and GPU drivers are outside this coverage. The standard
+test suite remains uninstrumented; =./make test headless= runs both suites in
+sequence and then the CPU benchmark family. Set =OBSIDIAN_GPU_TESTS=1= to append
+the real headless pixel and Vulkan-validation smokes.
+The first LSan run exposed a 144-byte leak in the skeletal-animation test
+fixture: reinitializing its graph discarded the test-owned index. Fixture
+reinitialization now destroys that index before clearing the graph.
+
+Geometry arenas no longer reserve hundreds of MiB at window startup. The
+vertex arena starts at 4 KiB, the index arena at 4 MiB for its existing
+1,048,576 sequential indices, and upload staging at 64 KiB. Geometry pools and
+staging grow geometrically when a preflighted upload exceeds capacity, copying
+the used GPU prefix before replacing an arena. Growth is a cold path and waits
+for device idle; normal allocations that fit do not wait or allocate new GPU
+buffers. This reduces configured initial capacity, not a claim about total
+process RSS or driver-resident memory.
+Texture pages start at 256 KiB, grow to fit an individual larger request, and
+increase geometrically for subsequent pages.
+
+* glTF cache and per-mesh footprint
+
+=Mesh= no longer embeds 256 bone override matrices in every mesh record.
+=MeshBoneOverride= storage is allocated on the first override, bounded to
+=min(jointCount, 256)=, and released on reset/removal/destruction. On this
+x86-64 C23 build, =sizeof(Mesh)= is 432 bytes; the native contract asserts the
+record stays below 8 KiB and verifies lazy allocation, bounds and release.
+Run it with =make test-mesh-bone-overrides=; =make test= includes it when Vulkan
+headers are present.
+Because =obsidian.h= re-exports =renderer.h=, this changes the public =Mesh=
+layout; downstream C consumers must rebuild against the matching header and
+library rather than mixing old binaries with this build.
+
+The glTF staging array starts with capacity one and grows geometrically. OMDL
+cache hits reserve from the validated mesh count before staging. The former
+64-entry initial reservation cost 1,337,344 bytes for the 20,896-byte old
+=Mesh= record, even for a one-mesh scene; the same one-mesh staging allocation
+is now 432 bytes. These figures are the requested staging-array allocation,
+not total process memory.
+
+OMDL source identity hashes the exact root-file bytes already retained by
+=cgltf_parse_file=, then hashes decoded buffer contents. This preserves the
+cache digest inputs while avoiding separate pre-parse and post-parse reads of
+the root document. =make test= checks that retained-byte hashing produces the
+same digest as the streaming file helper. The documented cold/warm GPU asset
+benchmark is a separate run; the native sanitizer target does not claim that
+renderer integration.
+
+On the RTX 3060 / Ryzen 7 3800X workstation, the 9,000-vertex, 143-meshlet
+headless fixture was measured at 256x256 for nine independent processes per
+cache mode:
+
+| Cache mode | Load wall median | Load CPU median | Wall CV | GPU geometry upload median |
+|------------+------------------+----------------+---------+-----------------------------|
+| Cold OMDL  | 12.118 ms        | 11.511 ms      | 4.37%   | 112.3 us                    |
+| Warm OMDL  | 10.891 ms        | 10.264 ms      | 2.39%   | 111.8 us                    |
+
+Run =python3 tools/bench/engine_bench.py --scene tests/fixtures/async-meshlet-growth.gltf --headless --width 256 --height 256 --runs 9 --warmup-frames 0 --frames 1 --scene-cache MODE --output build/bench/RUN= once with =MODE=cold= and once with =MODE=warm=; use a distinct new =RUN= directory each time.
+The prior five-process baseline was substantially noisier (25.1% cold and 53.6%
+warm load-time CV), so those medians do not establish a controlled before/after
+speedup. Current warm/cold medians differ by 1.23 ms (~10% of cold), but the
+runs are independent rather than paired. Geometry upload time is GPU timestamp
+time; the CPU changes do not affect it. Current whole-process peak RSS remains
+about 244--246 MiB and includes Vulkan/LLVM/driver allocations; Massif reported
+a 33.36 MB heap peak, including external runtime allocations.
+
+The warm path still parses glTF metadata and calls =cgltf_load_buffers= before
+the OMDL hit can be accepted, preserving decoded-buffer content validation.
+The aggregate load timer does not isolate the cost of those steps; add scoped
+CPU timings before attributing the remaining ~10 ms. Do not replace content
+validation with timestamp-only checks. Linux hardware counters reported a
+1,486,043 median cache-miss count for the warm benchmark process, but the
+counter scope includes initialization and teardown, not just the loader. The
+same profile attributes 32 MiB of live Vulkan allocation to shadow resources;
+changing that footprint needs a separate quality/correctness contract.
+
+* Selection and transform interaction
+
+In the hierarchy, Monad owns single-select, Ctrl-click toggle and Shift-click
+range/append decisions; the native adapter applies them to scene nodes. In the
+viewport, Shift-click appends mesh/SDF picks without clearing existing scene
+selection. Click-drag from empty background
+to select objects by their projected bounds: left-to-right drags select fully
+enclosed bounds; right-to-left drags select intersecting bounds. Selected visible
+objects share one orange outline and low-alpha fill around their combined screen
+bounds; the active marquee uses a blue translucent rectangle. Press =f= to frame
+the selected mesh or SDF. Monad chooses the =h= visibility target: hide all
+selected entries when any is visible, otherwise show them all; the host applies
+that target and ancestor visibility continues to determine effective mesh
+visibility. SDF primitives follow the same hierarchy
+visibility; each fenced frame slot compacts visible SDFs in stable scene order,
+without allocating on the frame path. SDF visibility changes only dirty the
+per-slot upload; they do not write into in-flight mapped buffers. =r= then =x=
+rotates around negative world X so its drag direction is inverted; Y/Z and
+gizmo-axis behavior are unchanged.
+
+* Startup and allocation controls
+
+Reports include process-relative startup milestones and constructor-attributed
+Vulkan allocation ownership. Owner live-byte/count sums must match heap totals.
+Native owner lifetime, failed-allocation and paired-statistics contracts run
+through =make test=. GPU dynamic lifetime contracts use the explicit targets
+above; both fail on validation diagnostics even if the executable exits zero.
+
+#+begin_src sh
+python3 tools/bench/startup_compare.py \
+  --baseline ./obsidian --candidate ./obsidian --pairs 5 \
+  --pipeline-cache warm --scene tests/fixtures/async-triangle.gltf \
+  --output build/bench/startup-control
+#+end_src
+
+Omit =--scene= for real-window startup. =--pipeline-cache cold= isolates a
+fresh empty engine cache for each process; it does not flush OS/vendor caches.
+The output directory must be new so previous experiment evidence is preserved.
+Baseline/candidate ordering alternates AB/BA and the report includes paired
+bootstrap intervals and matching workload/device/instrumentation identity.
+
+* Native reproducibility
+
+The UTF-8 suite checks overlong encodings, surrogates, invalid leaders,
+incomplete sequences and 20,000 deterministic malformed strings. The reload
+stats suite checks sample eviction and nearest-rank p50/p95/p99. The watcher
+suite checks first observation, debounce, acknowledgement, polling and reset.
+These are intentionally small C seam tests: Monad integration assertions are
+in =tests/monad=. All test binaries are generated under =build/tests/=.
+
+* Font profiling
+
+=OBSIDIAN_FONT_PROFILE=1= enables counters for L1/hash cache hits, glyph misses,
+FreeType rasterization, atlas uploads, atlas resizes, emitted glyphs, text CPU
+time and upload CPU time. A summary is written at font destruction; there is
+no per-glyph logging on the frame path. Timings are CPU wall times, not GPU
+completion or Vulkan frame-pacing metrics. Compare the same scene, font size,
+window resolution, warmup and input sequence before asserting improvements.
+
+A genuinely complete font optimization ratchet additionally needs GPU timestamp
+queries, sampled glyph rasterization time, upload bandwidth, per-frame atlas
+mutation counts, p50/p95/p99 frame times, a capture of multilingual/fallback
+workloads, and end-to-end MSDF atlas rendering. None is supplied by this host.
+
+* Integration runner requirements
+
+=make test= runs the available native tests and SDK-backed declaration checks,
+then prints explicit =SKIP= results when live Monad or rendered-frame runners
+are not configured. =make test-all= is the strict gate: provide both
+=OBSIDIAN_MONAD_TEST_RUNNER= and =OBSIDIAN_MONAD_FRAME_RUNNER= to execute the
+real embedded-runtime contracts and active-frame callbacks. Header-only ABI
+tests and C host-policy tests do not substitute for those runtime checks.
+The native visibility contracts also exercise multi-selection toggles,
+ancestor visibility, and per-frame SDF compaction using the production C paths.
+
+* Cycle 7 frame capability checks
+
+=make test= also exercises =tests/native/frame_state.c= against the actual
+=src/core/frame_state.c= implementation (expiry after end/rebegin, bad dt,
+and snapshot fields), with no GPU or compiler dependency.
+
+=make test-frame= requires =OBSIDIAN_MONAD_FRAME_RUNNER=, distinct from the
+ordinary top-level expression evaluator: frame tests must actually execute
+>= 2 CPU frames, confirm at least two successful callbacks, and prove
+that a frame handle retained past =endFrame= is rejected. The harness is
+not in the source archive: it requires real MonadC and a live renderer.
+=make test-all= rejects an unconfigured frame harness.
+
+* Engine frame profiling and optimization baseline
+
+=./make bench engine= (backend: =make bench-monad=) runs an offscreen Vulkan
+workload from =tests/monad/bench-scene.mon= by default (no editor window),
+using 120 warm-up and 600 measured frames per process, five processes by
+default. Reports go to =BENCH_OUTPUT= (default
+=build/bench/monad-<UTC timestamp>/=) and include CPU frame stages, Vulkan
+timestamp duration,
+geometry upload, acquire/fence/record/submit/present, lifecycle timings, host,
+GPU, and driver metadata. Use =./make bench engine --runs N
+--warmup-frames N --frames N --asset-root PATH --manifest PATH --output DIR=
+to set the workload.
+
+The timestamp profiler must report valid GPU samples whenever timestamp
+support is enabled. It writes TOP_OF_PIPE and BOTTOM_OF_PIPE queries around
+the recorded command buffer and collects them only after its frame fence
+signals. A support flag without captured samples is a benchmark failure.
+Frame CPU stages include event polling, swapchain maintenance, scene/physics/
+camera/editor update, geometry upload, acquire and image-fence waits, command
+recording, queue submit, and present.
+CPU recording time also splits render-graph callback execution,
+transmission/transparent recording, and UI recording inside
+=command_record_ns=. These use the monotonic CPU clock and are not GPU pass
+durations. Their sum need not equal the outer interval: render-graph setup,
+query commands, transitions, and timer overhead lie outside or straddle those
+subscopes.
+
+The latest 600-frame 1280x720 profile observed command-record p50 111.9 us,
+render-graph p50 66.6 us, transmission/transparent p50 10.5 us, and UI p50
+1.75 us. GPU frame p50/p95 was 1.463/2.670 ms while boundary utilization
+snapshots showed 84-99% device-wide busy. This proves reporting is wired, not
+that timings are stable baselines. Raw report:
+=build/bench/profile-final-20261012/run-01.json=.
+
+2026-06-21, Ryzen 7 3800X + RTX 3060, five runs × 600 measured frames:
+
+| Metric | Before | After |
+|--------+--------+-------|
+| CPU frame update p50 | 2.486 ms | 0.0155 ms |
+| Total CPU frame p50 | 2.650 ms | 0.196 ms |
+| Swapchain-maintenance p50 | 2.470 ms | 0.000080 ms |
+| GPU command-buffer p50 | 0.118 ms | 0.109 ms |
+
+The measured update bottleneck was a swapchain recreated every frame after
+either stale-state flag became set. Successful recreation rebuilt the Vulkan
+resources but never cleared =swapchainOutOfDate= or =framebufferResized=.
+Clearing both after recreation reduced median update time by about 99.4% and
+median total CPU frame time by about 92.6% on this workload. The GPU change is
+within workload/device variation; no GPU optimization is claimed. The
+remaining median app draw includes image-fence and presentation pacing and is
+not equivalent to CPU rendering cost.
+
+This is an initial workload, not a complete engine performance suite. The
+default demo's 2D vertex counters are zero because it does not exercise the
+2D batch path. Window creation, app asset setup and cleanup are currently
+reported as aggregate lifecycle phases; they need subphase measurements and
+representative uncached asset workloads. Compare identical host, scene,
+window, warm-up, frame count and input before interpreting deltas. Do not use
+screenshots as performance evidence.
+
+The historical readback-overhead figures below are not a valid source-backed
+comparison. Code inspection found that the benchmark set
+=context.headlessReadbackEnabled=false= after initialization, but command
+recording still copied every headless frame into a host buffer. The previous
+documentation incorrectly described that copy/barrier as disabled. Do not use
+the recorded 1.518/1.020 ms GPU p50 values as a confirmed readback comparison.
+The headless mode is now explicit: raw-image runs request readback; performance
+runs do not allocate/map a readback buffer, record the image-to-buffer copy, or
+record its host-read barrier. The raw-pixel regression still requests raw RGBA
+output. A subsequent full build, raw-cube pixel test and headless Sponza profile
+passed. The report showed =readback: null= in measured performance frames.
+This validates mode separation, not a controlled readback-on/off performance
+comparison.
+
+* Large-scene benchmark
+
+=make bench-scenes= loads the bundled Sponza glTF before the measured frame
+window, then verifies nonzero mesh/vertex counts and requires real Vulkan GPU
+timestamp samples. The report contains the scene path and source .gltf file
+size, load wall duration, glTF instance/mesh/texture counts, vertex/index
+counts, process CPU time, scene-load process CPU time, per-frame CPU stage
+breakdowns, GPU geometry-upload duration, and GPU command-buffer duration.
+The explicit-scene target accepts =BENCH_SCENE_LARGE=,
+=BENCH_WIDTH=, =BENCH_HEIGHT=, =BENCH_RUNS=, =BENCH_WARMUP_FRAMES=,
+=BENCH_FRAMES=, and =BENCH_SCENE_CACHE=. =cold= disables the OMDL model cache
+without deleting user cache files; =warm= primes it in a separate process and
+requires a validated hit in each measured process.
+
+#+begin_src sh
+make bench-monad
+make bench-monad BENCH_MONAD_MANIFEST=tests/monad/bench-scene-warm.mon BENCH_COLOR=always
+make bench-monad BENCH_MONAD_MANIFEST=tests/monad/bench-scene-trees.mon
+make bench-monad BENCH_MONAD_MANIFEST=tests/monad/bench-scene-textures.mon
+make bench-monad BENCH_GPU_TIMESTAMPS=off
+# Preserve a five-process baseline, then compare a same-configuration candidate.
+make bench-monad BENCH_RUNS=5 BENCH_OUTPUT=build/bench/baseline
+make bench-monad BENCH_RUNS=5 \
+  BENCH_COMPARE_TO=build/bench/baseline/summary.json \
+  BENCH_MAX_REGRESSION_PCT=3.0 \
+  BENCH_OUTPUT=build/bench/candidate
+#+end_src
+
+=scene.load_wall_ns= is elapsed time around synchronous =load_gltf=, including
+Vulkan waits and work scheduled to background threads. =scene.load_cpu_ns=
+and =process_cpu_ns= use process CPU time, so they include engine threads and
+exclude time blocked without executing. Neither load metric isolates geometry
+decode, texture cook or GPU upload. =scene.geometry_upload_gpu_ns= timestamps
+the geometry-copy/barrier command and excludes texture uploads. =frames.gpu_ns=
+is GPU timestamp duration for the recorded frame command buffer.
+The legacy =scene.source_file_bytes= field counts only the root file. Separate
+=asset_inputs= stores SHA-256 and byte size for the glTF/GLB plus its referenced
+local buffers and images; missing dependencies fail the headless runner.
+“Cold” disables the OMDL geometry cache only; it does not flush OS file cache,
+texture caches or pipeline caches. Benchmark targets resolve bundled paths
+beneath =BENCH_ASSET_ROOT= (default =assets=); point it at an external asset
+tree without copying user assets into the repository.
+
+Headless performance mode submits up to =MAX_FRAMES_IN_FLIGHT= frames before
+waiting to reuse a slot. Each slot owns its command buffer, color target, depth
+image, HZB/transmission resources and timestamp queries; query results are
+collected only after that slot's fence signals. =frames.total_ns= is host-side
+per-submission wall time, including any wait when reusing a slot; it is a
+throughput measurement, not end-to-end completion latency. GPU duration comes
+from device timestamps. =--headless-raw= enables per-slot readback and waits
+for completion before returning the image.
+
+=make bench-monad= runs a headless workload declared in Monad from
+=tests/monad/bench-scene.mon=. Each Monad module defines seven closed native
+=Int -> Int= accessors for scene ID, resolution, warm-up, measured frames,
+cache mode and minimum mesh count. Obsidian invokes these exports after
+publication, validates their bounds, and uses them to configure the Vulkan
+run. Bundled scene IDs are =1= Sponza, =2= trees.glb, =3= NodePerformanceTest,
+=4= VertexColorTest, =5= xmp, =6= TransmissionTest, =7= Unicode❤♻Test,
+=8= UnlitTest and =9= TextureCoordinateTest. Cache mode =0= is cold and =1=
+is warm. =tests/monad/bench-scene-warm.mon= is the warm-cache companion;
+=bench-scene-trees.mon= and =bench-scene-textures.mon= select the bundled trees
+and TextureCoordinateTest scenes for additional workload shapes.
+Adding a bundled asset requires extending the scene-ID table in
+=src/monad/runtime.c=.
+
+=make bench-portable= runs checked-in Monad modules without an external asset
+pack: =bench-minimal.mon= (scene 10, triangle), =bench-instancing.mon= (scene 11,
+six mesh instances) and =bench-meshlet-growth.mon= (scene 12, 9,000 vertices,
+143 meshlets). These scene IDs resolve under =tests/fixtures= independently
+of =BENCH_ASSET_ROOT=. Module and glTF inputs are hashed by the existing runner.
+Each declares 640x360, 30 warmup and 120 measured frames. These are bounded
+portable workload shapes, not a complete production benchmark portfolio.
+They do not replace the missing Sponza/texture/animation assets or exercise
+scripted upload contention and resize. =make profile-check= retains its
+production-workload requirements.
+
+Headless startup reports leave =first_present= null: no presentation API is
+called. =first_submit= records successful queue submission; it is not a GPU
+completion measurement.
+
+GPU timestamps include the whole frame plus dynamic geometry transfer, meshlet
+bounds refit, aggregate shadows and four cascade intervals, opaque main-forward,
+transmission-image copy, transparent/wireframe, 2D UI, raw-image readback (only
+when enabled), aggregate HZB and up to 16 mip intervals. Stage names, parents,
+IDs, units and inclusive timing semantics come from the C-owned schema; JSON,
+CSV, CLI stage validation and the dashboard consume that schema. Each timestamp
+pair is reset and collected only after its frame-slot fence completes.
+Raw JSON adds =frames[].gpu_pass_ns=; =summary.json= and =frames.csv= include
+per-stage p50/p95/p99 and samples. Stage timestamps are elapsed GPU timeline
+durations, not utilization, isolated shader cycles, or exclusive GPU
+occupancy. Empty stages can be legitimate (for example, no HZB pipeline).
+
+When Linux =perf= is present and the kernel permits it, the runner wraps each
+measured process with =perf stat= for cycles, instructions, cache references,
+cache misses, context switches and CPU migrations. Results are process-run
+totals, include initialization and teardown, and are not frame-attributed.
+Unsupported or inaccessible counters remain unavailable; the runner probes
+permissions before using =perf=. When =nvidia-smi= is available, each engine
+process also gets before/after snapshots of GPU temperature, graphics/memory
+clocks, power, utilization and VRAM. These probes run outside the timed child
+process. They are boundary context only—not per-frame telemetry, attribution,
+or a substitute for Nsight Systems/Graphics. Other vendors and unavailable
+fields remain explicitly absent.
+
+Scenario choices and parameters live in Monad scripts; C resolves bounded
+scene IDs and drives Vulkan, while the existing Python runner handles process
+launch, aggregation and terminal output. The embedded compiler currently
+cannot link native exports that use =string-length=, =string-ref= and
+=char->integer=; a direct compiler probe failed with unresolved symbols.
+Therefore arbitrary path-valued Monad manifests and a pure-Monad OS runner
+are not available with the current compiler/runtime ABI. Do not claim this
+benchmark stack is wholly implemented in Monad.
+
+The embedded Monad compiler previously failed native materialization because
+its internal call-profiler hooks were hidden by the shared-library export map.
+=monadc/src/embed/native_compile.c= now binds those three internal hooks as
+ORC absolute symbols without exporting them publicly. The integrated
+=make bench-monad= run proved module publication, scalar export execution,
+headless scene loading, and a complete 600-frame measurement. This workload
+does not register a per-frame Monad callback; Monad frame callback coverage
+remains unverified: attempting an opaque =Frame= callback is rejected by
+MonadC with =MONAD-C0004= (no closed native ABI). A separate attempt to invoke
+the manifest host binding from a compiled Monad function hit =MONAD-C0005=
+(missing QTT resource certificate); the supported scalar-export manifest
+avoids that unsupported effect path. =make test-monad= needs
+=OBSIDIAN_MONAD_TEST_RUNNER=.
+
+One-process × 600-frame Sponza runs on Ryzen 7 3800X + RTX 3060, at 1280x720:
+
+| OMDL cache | Frame wall p50 | GPU command p50 | Scene load wall | Scene load CPU | Geometry upload GPU |
+|------------+----------------+----------------+----------------+----------------+---------------------|
+| Cold       | 3.599 ms       | 2.539 ms       | 287.039 ms     | 280.486 ms     | 4.461 ms            |
+| Warm       | 3.624 ms       | 2.544 ms       | 157.984 ms     | 151.448 ms     | 4.908 ms            |
+
+These are reproducibility samples, not a cold/warm speedup claim: each row is
+one process, runs serialize frame completion on a GPU fence, and “cold” only
+disables OMDL geometry caching. The frame-wall metric includes that wait;
+process CPU time is reported separately.
+
+Every runner-produced per-run JSON and summary records Git revision/worktree
+state when Git metadata is available, compiler command/flags, executable
+SHA-256, a deterministic hash of benchmark source/compiler inputs, host
+OS/CPU, Vulkan device/driver, selected Monad module hash, scene asset manifest
+hash, workload/cache settings and sample counts. Missing Git metadata remains
+null; this checkout currently has no available revision/state. Source and
+asset hashes identify bytes but do not archive an exact patch. The dashboard reports
+run-level wall p50, median absolute deviation and a deterministic 95% percentile
+bootstrap interval over independent process medians only when at least five
+processes ran. Frame percentiles remain descriptive; frames from one process
+are temporally correlated and are not counted as independent replicates.
+A five-process 600-frame Sponza run reported run-median wall p50 1.374 ms,
+MAD 0.016 ms and interval [1.350, 1.397] ms. GPU busy snapshots ranged from
+7% to 94%, so this noisy capture is evidence the statistic is wired, not an
+accepted baseline or regression threshold. Dirty worktree state is recorded,
+but the exact patch is not archived; do not treat it as fully reproducible.
+
+=BENCH_COMPARE_TO= accepts a saved =summary.json=. The runner compares
+configuration identity (host/CPU, Vulkan device/timestamps, compiler flags,
+workload and asset hashes, resolution, cache mode and instrumentation) while
+deliberately allowing source/binary hashes to differ between baseline and
+candidate. Each summary retains the individual process-level p50 samples.
+Comparison requires at least five independent processes in both summaries and
+uses a deterministic 10,000-resample bootstrap of the difference between the
+two medians. With no threshold, it is diagnostic only. Set
+=BENCH_MAX_REGRESSION_PCT= explicitly to gate: exit 0 when the upper 95% bound
+is at or below the limit, exit 1 when the lower bound exceeds it, and exit 2
+when the interval overlaps the limit or configurations/replicates are
+incompatible. There is no default threshold. This is an unpaired independent
+run comparison; thermal/power drift can confound it, so it is not a paired
+release gate.
+A same-executable five-run/five-run comparison was exercised with an explicit
+100% smoke limit: observed wall p50 change +0.87%, independent-run CI
+[-0.47%, +2.48%], status =PASS=. The permissive limit tested the gate path; it
+is not an accepted engine regression threshold or before/after optimization.
+
+When the selected Vulkan device supports =VK_EXT_memory_budget=, benchmark
+reports sample per-heap current-process usage estimates after renderer setup
+and before engine teardown, plus the final driver budget. These are not
+engine-owned allocation totals; the extension's usage is approximate and its
+budget can change with system activity. Unsupported devices report an empty
+heap list. A headless Sponza smoke reported heaps at 1266.1 MiB, 843.1 MiB and
+31.4 MiB usage, with budgets 9928.0 MiB, 11948.0 MiB and 214.6 MiB respectively.
+Heap-0 budget changed between nearby captures; this one-process sample is not
+an allocation baseline.
+
+The raw benchmark report also tracks every engine-side
+=vkAllocateMemory=/=vkFreeMemory= call. =engine_vulkan_memory= reports exact
+requested =VkDeviceMemory= allocation bytes and live allocation counts per
+physical-device heap: initial values after renderer setup, final values after
+the workload, and peak live values over the process lifetime. This is distinct
+from driver-wide heap estimates and logical geometry-buffer capacity. It
+attributes only totals by heap, not individual images/buffers or subresource
+residency. The runner requires the counter for headless benchmarks and the
+colored dashboard displays live and peak values. A one-run
+Sponza smoke recorded 1289.2 MiB on heap 0 and 840.1 MiB on heap 1 after
+renderer setup; its heap-1 peak reached 936.5 MiB during the workload. These
+instrumented smoke values establish attribution, not a performance baseline.
+The C test =tests/native/vk_memory_stats.c= mocks only Vulkan's allocation API
+and checks heap mapping, allocation reuse, current/peak bytes, and counts;
+=make test= runs it when Vulkan SDK headers are installed.
+
+=./make bench= is the canonical benchmark frontend. It lists each registered
+workload, reports its dependency scope, and runs selected targets sequentially.
+=./make bench cpu= runs the CPU-only family; =./make bench engine= runs the
+headless Vulkan/Monad workload; =./make bench validation= runs its separate
+synchronization-validation diagnostic. =make bench= delegates to the same
+frontend. Individual Make targets remain available as backend implementation
+details, not as a second user-facing benchmark catalog; use
+=make bench BENCH_SELECTION=keymap= to select through GNU Make. Opt-in live
+runtime
+profilers such as =OBSIDIAN_FONT_PROFILE=1= and =:dispatch= remain interactive
+instrumentation, not repeatable batch benchmark targets.
+
+=make profile-check= runs native profiler contracts, tooling-schema checks,
+=make test-headless-startup-render= (raw RGBA pixel assertion), then
+=make test-vulkan-validation-headless= (the same image contract under
+=VK_LAYER_KHRONOS_validation= with synchronization validation, failing on
+validation errors), then the
+Monad-configured Sponza benchmark and a separate synchronization-validation
+Sponza run. The validation run is diagnostic, not a comparable performance
+sample. It never starts the editor window. The
+validation target requires the Khronos validation layer and
+=VK_EXT_debug_utils=. Set =BENCH_ASSET_ROOT= when assets live outside the
+repository.
+=./make= provides a terminal entrypoint:
+
+#+begin_src sh
+./make --help
+./make build
+./make test --asset-root ../assets --runs 1
+./make profile --asset-root ../assets --runs 5
+./make bench --list
+./make bench keymap
+#+end_src
+
+The dashboard highlights frame/GPU/process-CPU p50 and p95, per-pass p50/p95
+with relative bars, frame variability, GPU timestamp availability, the scope
+of Linux process-level counters and NVIDIA state snapshots bracketing each
+timed process. Workload output includes the loaded scene's meshlet count; it
+does not claim that count is submitted or GPU-executed work. It also reports
+renderer-wide static geometry buffer cursors against logical =VkBuffer=
+capacities. One cold Sponza process had 23.5/256 MiB vertex and 7.0/128 MiB
+index cursor/capacity. The cursor includes all geometry uploaded in that
+process, not only Sponza. These are not total VRAM or backing =VkDeviceMemory=
+sizes; capacity changes require larger-workload and reallocation evidence.
+The dashboard falls
+back to ASCII where the terminal cannot encode box-drawing characters.
+=--color auto|always|never=
+controls styling. Bars compare each pass interval against whole-frame GPU
+time; they do not imply additive GPU occupancy.
+
+Work counters default on for =make bench-monad= and are independently
+disableable with =BENCH_WORK_COUNTERS=off. They record CPU-encoded draw calls,
+indirect draw count, explicit vertex/index counts, mesh-task workgroups and
+compute dispatch/workgroup counts per frame. Indirect index/vertex totals are
+unavailable; counters do not represent GPU post-cull execution.
+=work_counters_by_stage= reports inclusive per-stage
+totals over captured frames; the dashboard normalizes by frame count and
+reports the median across process runs. Parent/child stages overlap and must
+not be summed. The runner checks frame totals against per-stage totals and
+checks that shadow cascades and HZB mip children reconcile with their parents.
+Five-process Sponza runs measured wall-frame p50 1.398 ms enabled and 1.414 ms
+disabled, with frame CV 27.3% and 25.6%; the noise prevents estimating
+instrumentation overhead.
+
+The benchmark requests no readback at headless initialization. It skips the final
+headless image transition, image-to-buffer copy, and host-read barrier because
+profile frames consume timings/scene state only. Raw-image runs request readback
+explicitly; =obs_headless_render_raw= rejects a target initialized without it.
+The complete executable, raw-image smoke and Sponza profile were exercised on
+the RTX 3060; raw JSON confirmed readback samples are absent in benchmark mode.
+
+The renderer also skips its full-resolution opaque-to-transmission image copy
+unless a visible transmissive mesh is eligible for the mesh-shader pass. The
+eligibility check mirrors that draw loop; alpha-blended meshes still render
+without the copy. The =transmission_copy= GPU timestamp verifies that the
+20-frame-warmup/120-frame TransmissionTest smoke executes the real copy path.
+In the observed RTX 3060 run that pass was p50/p95 0.016 ms at 1280x720;
+Sponza produced no copy-stage samples. Treat the measured cost as
+workload/device-specific. Five Sponza process runs (600 frames each) after
+the optimization reported GPU-frame p50 1.027 ms, p95 1.827 ms and CV 22.9%;
+the shadow pass was p50 0.539 ms, p95 0.564 ms and CV 2.5%. This is not a
+paired before/after speedup claim. The pass-level measurements put shadows
+next for profiling; HZB tails also need investigation because that workload's
+p95 varied substantially. NVIDIA boundary snapshots showed the first run
+starting at 690 MHz graphics clock and ending at 1965 MHz; later runs started
+near the boosted clock. This supports controlling GPU state before comparing
+results, but does not explain frame-attributed variance. Raw data:
+=build/bench/sponza-gpu-state/summary.json=.
+
+The next shader experiment computed six normalized frustum planes once per
+task workgroup using shared memory and a barrier. It compiled and passed the
+headless image/scene suite, but did not improve the stable shadow pass
+(0.539 ms before, 0.538 ms after); the Sponza GPU-frame median moved within
+high run-to-run noise. The synchronization variant was reverted. A duplicate
+identical mesh-shader output store was removed as dead code; no performance
+gain is claimed. The final 5 × 600-frame run is
+=build/bench/sponza-final/summary.json= (GPU frame p50 1.177 ms, shadow p50
+0.538 ms, frame CV 27.5%). No lower shadow resolution or cascade-quality
+tradeoff was accepted without an image-quality contract.
+
+Moving normalized camera and cascade frustum-plane extraction from each task
+workgroup into a CPU-precomputed lighting UBO was also tested headlessly. The
+candidate measured GPU-frame p50 1.173 ms, shadows 0.527 ms and main-forward
+0.425 ms (5 × 600 frames; frame CV 25.3%). After reverting it, a matching
+five-run capture measured 1.178 ms, 0.539 ms and 0.437 ms respectively (CV
+26.7%). These small deltas are within the observed frame noise; the candidate
+was not retained as a demonstrated optimization. The raw startup cube and
+TransmissionTest copy-stage assertions passed both with the candidate and
+after reverting. Current baseline capture:
+=build/bench/monad/summary.json=. A paired low-noise test and image-level
+golden coverage are still needed before accepting this culling change.
+
+The runner prints a compact ANSI-colored report (=BENCH_COLOR=never= disables
+color; =always= forces it) and writes:
+
+The terminal report also flags GPU stages with at least 100 samples, p95 at
+least 3× p50, and coefficient of variation at least 50%. This is a
+measurement warning, not a diagnosis or an automatic rejection. In a
+5 × 600-frame Sponza run, HZB measured p50 0.028 ms, p95 0.315 ms and CV
+176.6%; the latest repeat measured p50 0.029 ms, p95 0.726 ms and CV 172.9%.
+NVIDIA device-wide utilization snapshots reached 90–93% outside the timed
+child processes. That is evidence of a noisy/shared device, not proof that a
+particular process caused the frame spikes. The HZB pass itself is unchanged;
+its timestamp scope includes the depth/image transitions, every mip dispatch
+and inter-mip barriers. Do not optimize this based on the tail until captures
+run on an isolated GPU and per-mip timing is available.
+
+- =summary.json=: workload, machine, lifecycle and p50/p95/p99/mean/standard
+  deviation/coefficient-of-variation summaries.
+- =frames.csv=: one row per measured frame across process runs, with CPU stage
+  timings, whole-frame GPU timestamps and per-pass GPU timestamps.
+- =run-NN.perf.csv=: Linux perf counters for a measured process when available.
+- =run-NN.json= and =run-NN.log=: raw per-process report and complete log.
+
+Raw reports include Vulkan device name/vendor/device/driver/API identity and
+timestamp support, queue-family index, valid-bit width, and period in ns.
+The runner rejects malformed metadata and refuses to aggregate runs when device,
+queue/clock metadata, or stage schemas differ. Current GPU pass values remain
+inclusive same-queue durations. The profile has one-shot integration proof but
+does not yet provide measured instrumentation overhead, calibrated CPU/GPU
+correlation or multi-frame in-flight throughput.
+
+The color output distinguishes GPU timestamp availability from CPU results;
+it does not convert GPU timestamps into utilization or infer GPU busy time
+outside the measured command buffer. In headless mode every sample waits for
+its GPU fence before proceeding; this measures serialized completion latency,
+not multi-frame-in-flight throughput or presentation pacing. Monad scalar
+exports define the selected bundled scene, resolution, warm-up, sample count,
+cache policy and mesh-count assertion. CPU stage timings are instrumented
+inside the offscreen frame loop; total frame wall time includes the explicit
+GPU-fence wait, while process CPU time measures CPU execution across engine
+threads. Linux perf counters are process totals, not frame-attributed
+measurements. Vulkan pipeline statistics, vendor GPU power/clocks/utilization,
+GPU memory bandwidth and multi-frame-in-flight throughput are not captured.
+Raw reports identify whole-process peak RSS from =getrusage.ru_maxrss= (Linux
+KiB converted to bytes) and post-engine-teardown resident bytes from
+=/proc/self/statm= (resident pages × page size). A one-process Sponza profile
+observed 1288.8 MiB peak and 172.7 MiB after engine teardown:
+=build/bench/profile-rss-final-20261012/summary.json=. These are process-wide
+host-memory observations; they do not attribute allocations to engine
+subsystems or measure Vulkan heap/VRAM usage.
+The separate =--headless-raw= mode validates one offscreen image and is not
+itself a performance benchmark.
+
+GPU timestamp queries are enabled by default. Set
+=BENCH_GPU_TIMESTAMPS=off= to skip query-pool creation, query reset, and GPU
+timestamp writes while preserving the same headless scene, workload, fences
+and CPU timing. GPU duration fields, including geometry-upload GPU time, remain
+null and are excluded from the summary. Compare timestamp-on/off captures with
+multiple interleaved independent runs on an isolated GPU; one-run samples are
+not sufficient to quantify instrumentation overhead.
+
+One 600-frame timestamp-off/on pair observed frame-wall p50 1.315/1.380 ms and
+process CPU totals 1.119/1.139 s. Device-wide GPU utilization shifted from
+28% before/16% after in the off run to 91%/88% in the on run. These
+single-process runs are not controlled enough to estimate instrumentation
+overhead. Artifacts:
+=build/bench/profile-ts-off-final-pass/summary.json= and
+=build/bench/profile-ts-on-final-pass/summary.json=.
+
+* Cycle 8 — QTT publication host gate
+
+=make test-native= now additionally executes =build/tests/publication=, a
+standalone C host-policy test requiring no engine SDK. It tests matching
+compiler contract descriptors, every known mismatch type, repeated-borrow
+rejection, active-call reload exclusion, legacy failure poisoning, retry and
+50,000 seeded state transitions. Build with sanitizers when available:
+
+#+begin_src sh
+cc -std=c23 -O1 -g -fsanitize=undefined -fno-sanitize-recover=all \
+  -Isrc/monad tests/native/publication.c src/monad/publication.c \
+  -o /tmp/obsidian-publication-ubsan
+/tmp/obsidian-publication-ubsan
+#+end_src
+
+=tests/monad/publication-boundary.mon= requires the *real* embedded Monad
+runner; it is covered by =make test-all= and never passed by the C seam test.
+SDK-dependent staged commit/abort, QTT lifetime/type failures and GPU-fence
+retirement remain pending compiler/engine integration tests.
+
+* Cycle 11 — Native export/QTT catalog test
+
+=make test= now executes =test-export-catalog= whenever genuine Monad SDK
+headers are present, alongside the native generation-read tests. The catalog
+test links deterministic =monad_source_result_t= doubles against the actual
+=monad/monad.h= and =monad/qtt.h= API signatures, not a fabricated interface.
+Run strictly with =make test-export-catalog= when the SDK is provisioned.
+=tests/monad/native-certificates-contract.mon= remains an integration contract
+until the actual engine/Monad runner executes it; loading or parsing its source
+alone is not sufficient to mark it passing.
+
+* Cycle 13 publication scheduler
+
+=make test-native= now includes =publication-queue= (100K deterministic
+state transitions) and =publication-queue-repl= (integration with the bounded
+REPL submission model). Neither requires graphics or compiler installation.
+With the supplied public Monad embed headers installed, =make test= continues
+to compile the engine's host procedures against the SDK. Actual Monad/JIT
+and Vulkan rendering remain explicitly gated by separate integration runners.
+
+=make test-native= also runs =arena-growth=: minimum-capacity selection,
+geometric growth, the uint64 overflow edge, and unchanged output on invalid
+requests. This checks the policy used by the persistent Vulkan upload staging
+arena; it does not simulate Vulkan allocation failure or exercise a GPU-side
+growth on its own.

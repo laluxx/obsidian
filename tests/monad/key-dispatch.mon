@@ -1,0 +1,32 @@
+;;; key-dispatch.mon --- Experimental host-object module, pending the MonadC compiled-image vs object-space dynamic-binding integration gate O...
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract key-dispatch
+
+;;; Commentary:
+
+vs object-space dynamic-binding integration gate OBS-C005.
+key-dispatch.mon — interactive Monad command dispatch test.
+Load in Obsidian, press C-M-k, then call (test-key-dispatch-ran?).
+(test-key-dispatch-reset) restores the camera's original speed.
+
+;;; Code:
+(define obsidian-test-key-original-speed
+  (obs-camera-speed (obs-current-camera)))
+
+(define (obsidian-test-key-command)
+  (obs-camera-set-speed
+   (obs-current-camera)
+   (+ obsidian-test-key-original-speed 1.0)))
+
+(define (test-key-dispatch-ran?)
+  (= (obs-camera-speed (obs-current-camera))
+     (+ obsidian-test-key-original-speed 1.0)))
+
+(define (test-key-dispatch-reset)
+  (obs-camera-set-speed
+   (obs-current-camera)
+   obsidian-test-key-original-speed))
+
+(obs-bind-key "C-M-k" obsidian-test-key-command)

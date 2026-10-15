@@ -1,0 +1,87 @@
+#+TITLE: Obsidian — Cycle 25: Animation-safe glTF nodes and material assets
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Cycle 25 is an incremental overlay on Cycle 24. Engine-owned code retains
+ownership of scene data, native graph allocations and GPU resources. Monad sees
+typed foreign capabilities and compositional library functions; this cycle
+does not add a second VM, garbage collector or compiler/QTT semantics.
+
+* Changes
+
+** Native animated node-local offsets
+
+- =OmdlSceneGraph.script_translations= is runtime-only per loaded graph. It does
+  not change the serialized =OmdlNode= layout or .omdl cache format.
+- =animate_scene()= post-composes the script translation with the current
+  sampled local transform each update, before hierarchy/world and skinning work.
+  Offsets use the node's local axes, survive animation sampling and affect
+  descendants. They are not edits to authored animation channels.
+- =obs_node_offset_set= validates finite, representable XYZ and commits
+  atomically. The per-frame composition uses fixed matrix arithmetic and does
+  not allocate.
+- New =obsidian.gltf-node= foreign capability exposes node index/name and
+  offset read/write/clear. These borrowed handles expire whenever the glTF
+  instance structure changes; unlike Mesh handles, they are not stable IDs.
+
+** Independent scene material presets
+
+- =ObsMaterialLibrary= owns bounded PBR-factor and RGBA value snapshots,
+  independent of mesh fields. They are presets, not Vulkan descriptors or a
+  shared material table.
+- The stable identity registry adds =OBS_ID_MATERIAL=. Handles survive library
+  growth/reallocation and expire on scene reset.
+- Monad exposes =material-store=, =material-asset=, count/index/read/update,
+  and explicit =material-apply!=. Applying copies values to one mesh and marks
+  its GPU slot dirty only when the values change. Editing the preset later does
+  not implicitly reapply it.
+- =with-gltf-node= / =with-material-asset= syntax helpers, plus
+  =modules/obsidian/animation.mon= and =modules/obsidian/material-asset.mon=.
+
+** Native scene graph cleanup
+
+=GLTFInstance.gltf_data= owns an =OmdlSceneGraph= after loading, not the
+=cgltf_data= parser allocation. Cleanup now destroys all native graph arrays,
+including the new runtime-only offset buffer, instead of passing that pointer
+to =cgltf_free=. The field is now typed as =OmdlSceneGraph *= to make ownership
+explicit. The temporary parser object is also freed after graph conversion on
+both cache hit and miss; the old code leaked the parser on cache hits. A real
+glTF load/teardown under sanitizers remains unverified.
+
+* Integration notes
+
+The archive's Makefile and =bindings.c= include unrelated historical state.
+Only Cycle 25 API registrations and native test targets were merged into the
+current cumulative files; current renderer, resize, profiling, Monad host and
+Cycle 24 changes were retained. =TODO.org= was updated surgically rather than
+replaced by the archive's full planning tree.
+
+The first local full build found a missing public declaration for
+=omdl_scene_graph_destroy=; adding it to =scene.h= fixed the C23 compile error.
+
+* Verification performed locally
+
+- =make -j=: full engine compilation and executable link passed after the
+  declaration fix.
+- =make test=: all available native and SDK-backed host tests passed,
+  including 50,000 material-asset append/identity cases and 50,000 animation
+  overlay/failure-atomicity cases.
+- The suite explicitly skipped live Monad/JIT and frame/Vulkan integration
+  because =OBSIDIAN_MONAD_TEST_RUNNER= and =OBSIDIAN_MONAD_FRAME_RUNNER= are
+  not configured. No actual animated glTF playback, live foreign call,
+  rendering output, or real scene teardown was exercised.
+
+* Limitations
+
+- Verify an animated glTF fixture across multiple playhead ticks, skinning,
+  cache hit/miss, scene teardown and GPU updates with a real engine runner.
+- Borrowed glTF node handles expire on any glTF structure revision, including
+  adding an unrelated instance.
+- Presets currently contain scalar PBR factors and base RGBA only: no texture
+  references, descriptors, shader selection or automatic subscriptions.
+- Partial-load fault injection and sanitizer-backed engine teardown remain
+  needed before claiming all failure paths safe.
+- Compiler-enforced QTT host-effect proofs and atomic compiler+engine live
+  publication remain MonadC obligations.

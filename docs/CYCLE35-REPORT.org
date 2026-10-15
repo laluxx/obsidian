@@ -1,0 +1,71 @@
+#+TITLE: Obsidian — Cycle 35: Pending scene ownership and Vulkan activation seam
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+Cycle 35 adds an owner-thread pending-scene lifecycle and connects its geometry
+submission callbacks to Cycle 34's real Vulkan async geometry API. A fully
+prepared candidate remains private through fence polling; only a safe-point
+publish commits renderer geometry cursors and invokes its infallible activation
+callback. Completed but unwanted candidates can be discarded. Uncertain work
+retains its candidate until the backend accepts an explicit GPU-quiescence
+proof.
+
+This is a reusable seam, not asynchronous glTF loading. No caller currently
+routes =load_gltf= through it. The live loader still parses and mutates live
+scene state synchronously; textures, physics, and Monad identity publication
+are not integrated.
+
+* Implementation
+
+- =src/scene/pending_load.[ch]= owns one move-transferred payload, generation
+ticket, lifecycle state, counters, and backend hooks. Clean start rejection
+leaves payload ownership with the caller. A readiness callback may defer
+publication. Activation must be allocation-free and infallible after GPU
+commit.
+- =src/graphics/scene_load_vk.[ch]= adapts the API to
+=megaGeometryAsyncBeginCooked=, =Poll=, =Commit=, =DiscardReady= and
+=RecoverDeviceIdle=. It validates byte extents for all eight geometry streams
+and rejects unequal meshlet/bounds/skin counts. One active bridge ticket only.
+- =tests/native/pending_load.c= tests candidate ownership over 50,000
+publish/discard cycles, clean rejection, stale tickets, readiness deferral,
+quarantine, recovery, and shutdown refusal.
+- =tests/native/scene_load_vk_contract.c= compiles the actual adapter source
+against interface-shaped test types. A build define selects the fixture header;
+the regular engine build compiles against the real Vulkan/renderer headers.
+- =Makefile= includes both test executables in =make test-native=.
+
+* Verification
+
+- Incremental archive SHA-256 manifest: all listed members verified before
+  application; the archive's stale =Makefile= and =TODO.org= were not copied.
+- =make test-native=: PASS, including the new 50,000-lifecycle owner test and
+  Vulkan adapter contract test.
+- =make test=: PASS for available native and Monad SDK syntax suites. The
+  Monad integration and live-frame suites explicitly skipped because
+  =OBSIDIAN_MONAD_TEST_RUNNER= is unset.
+- Both new native test executables: PASS under AddressSanitizer and
+  UndefinedBehaviorSanitizer.
+- =make -j$(nproc)=: PASS. This compiles and links the full Vulkan engine and
+  Jolt dependencies, including =scene_load_vk.c= and =pending_load.c=.
+- Engine launch on the NVIDIA GeForce RTX 3060: initialized Vulkan renderer,
+  loaded the normal editor/runtime resources, and remained running through the
+  8-second launch window. The smoke was stopped by timeout; it did not exercise
+  pending scene publication or prove clean shutdown.
+
+* Boundaries and follow-up
+
+- No real glTF load uses this seam yet. The candidate fixture's graph, material,
+  texture, animation, and physics allocations test lifecycle ownership only;
+  they are not actual engine resources.
+- No Vulkan GPU upload used the new bridge during the smoke. The adapter's
+  test uses API-shaped doubles, not a live Vulkan call.
+- No driver failure/device loss, validation-layer run, multi-flight behavior,
+  rendered parity, load latency, frame impact, or GPU memory measurement was
+  tested.
+- Next: make =load_gltf= prepare an isolated candidate, move all texture and
+  physics side effects behind preparation/publication, then wire the bridge at
+  a renderer owner-thread checkpoint and verify real assets, failure cleanup,
+  and scripting identity generations. Keep synchronous loading until parity
+  and rollback are proven.

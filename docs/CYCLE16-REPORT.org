@@ -1,0 +1,53 @@
+#+TITLE: Obsidian — Cycle 16: Thread-affine compiler preflight
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Goal
+
+Move real, compiler-backed *semantic analysis* into the asynchronous source
+pipeline while preserving a single authoritative live Monad runtime and the
+existing safe publication checkpoint. No new scripting VM or fake native
+candidate compiler is introduced.
+
+* Implemented
+
+** DONE Optional compiler session per source worker
+- =src/monad/semantic_preflight.[ch]=: API declarations come from the supplied
+  =embed/include/monad/compiler.h=, not API-shaped inventions.
+- Compiler session created, checked and destroyed entirely on the source-stage
+  pthread, with no sharing of runtime or foreign objects.
+- =source_stage.[ch]=: optional, typed hook table; copied bounded diagnostics,
+  independent of compiler diagnostic result lifetime; latest-ticket ownership.
+- Opt in with =OBSIDIAN_MONAD_PREFLIGHT=1=; off by default for compatibility.
+
+** DONE Live engine/REPL observability
+- =runtime.c=: engine-owned latest completed snapshot report; no compiler
+  pointer crosses into publication.
+- =hotreload_api.c=: =(preflight-status)=, =(preflight-us)=,
+  =(preflight-diagnostics)= as owner-thread-only, checked foreign procedures.
+- GPU REPL =:preflight=; =modules/obsidian/live-reload.mon= composable helpers.
+
+** DONE Test gates
+- =tests/native/source_preflight.c=: 1,000 tickets, supersession, thread
+  confinement, diagnostic ownership, failed worker session init, shutdown.
+- =tests/native/semantic_preflight.c=: SDK-header test doubles, compiler
+  session source-check ownership and worker thread; not real compiler execution.
+- =tests/monad/semantic-preflight-contract.mon=: requires live engine runner.
+- New native and SDK-backed targets wired into =make test=.
+
+* What is *not* implemented
+
+- No native candidate compilation: =monad_compiler_check_source= ends before
+  QTT-certified native codegen and is advisory only. The session may not have
+  the live compiler environment; its error may be a false negative.
+- =monad_load_source= remains a synchronous, owner-thread operation, even with
+  the preflight worker enabled.
+- Complete Vulkan build, real compiler integration, scene runtime tests,
+  GPU/CPU frame pacing and state migration are NOT certified by headless tests.
+
+* Next
+
+With compiler ABI-001/002/003: thread-owned candidate compile, full QTT/effect
+verification, immutable result handoff, owner-thread commit, safe cancellation,
+and old-image retirement. Benchmark native compile vs staged compile with real
+engine frame data, not synthetic single-thread microbenchmarks.

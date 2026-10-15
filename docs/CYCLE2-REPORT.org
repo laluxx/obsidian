@@ -1,0 +1,80 @@
+#+TITLE: Obsidian — Embedded Monad Incremental Cycle 2
+#+DATE: 2026-10-10
+#+STARTUP: overview
+
+* Scope
+
+Incremental patch on top of =obsidian-monad-cycle1-20261010.tar.gz=.
+This archive is NOT a standalone replacement for the original engine.
+Extract over a clean cycle 1 =obsidian/= directory from its parent directory.
+The legacy Vulkan renderer, editor and audio implementation are preserved.
+No new C test has been checked into the engine: new test programs are Monad
+source files under =tests/monad/=.
+
+* Implemented changes
+
+1. The scene tree has a process-monotone structural revision. Node creation,
+   deletion/compaction, initialization, and cleanup advance the revision.
+   This enables an opaque =obsidian.node= handle, rejected on stale revision.
+   This is conservative invalidation: all handles expire on any edit.
+2. Separate =scene_api.c=, =camera_api.c=, =input_api.c= register foreign
+   procedures into one long-lived owned Monad object space. The first
+   mutation APIs set UI hierarchy visibility and guarded camera position /
+   angles; the input service is strictly read-only. No C struct ownership
+   passes to scripts.
+3. Camera translation and angle updates validate all arguments before a
+   mutation. The native compiled policy additionally checks the resulting
+   camera coordinate before applying it.
+4. Binding a Monad command refuses to overwrite an existing C-owned chord;
+   Monad-owned bindings can still be rebound. Unbinding is owner-restricted.
+5. =<f5>= queues reload instead of compiling inside GLFW callback dispatch.
+   =obs_poll_events= and =obs_wait_events_timeout= run the coalesced request
+   after event callback dispatch. The demo =beginFrame= now polls events.
+6. Reports of loader publication/failure are stored in an engine-owned
+   struct instead of returning ephemeral compiler error pointers. Modules
+   can request reload and query the coarse status.
+7. A native typed Monad gameplay example and new Monad source contracts
+   exercise the expanded proposed host surface. They are *not* yet marked
+   passing in the absence of MonadC integration.
+
+* Validation performed
+
+- All five =src/monad/*.c= files passed =gcc -std=c2x -Wall -Wextra
+  -Werror -fsyntax-only= using mock headers matching the API shapes observed
+  in Glemax. The mock fixtures are external to this incremental archive.
+- Archive contents and the complete patch manifest were compared against
+  clean Cycle 1 before packaging.
+- No full native executable, GPU pipeline, Jolt or audio runtime was built:
+  Vulkan, GLFW, CGLM and MonadC dependencies are missing here.
+- No actual MonadC compiled tests, dynamic foreign method calls, hot reload
+  or editor behavior tests were executed. =tests/monad/*.mon= are source
+  contracts awaiting an engine-connected test runner.
+
+* Critical engineering limitations
+
+- Native =Int -> Int= function lookup and dynamic foreign-object bindings are
+  **two distinct APIs**. The actual compiler-to-object-space interoperation
+  is not established. Do not treat dynamic tests as compiled Monad proof.
+- Reload is still synchronous in the owner thread: no GLFW callback
+  reentrancy, but frame latency may spike. Source publication is not a
+  transaction with guaranteed rollback or preserved runtime state.
+- Stale native JIT code pointers are cleared on failed publication; a
+  previous working behavior is not automatically rolled back. This is
+  intentionally fail-closed pending real MonadC validation.
+- Scene nodes are UI-facing and indexed; =visible= is not guaranteed to
+  mean GPU mesh culling. Stable gameplay entities need a future registry.
+- Full Vulkan and MonadC ABI checks are necessary before claiming a usable
+  live game scripting environment, and before removing any legacy C paths.
+
+* Cycle 3 recommended work
+
+1. Build against the exact MonadC embed revision and run Monad-native tests.
+2. Implement or prove a compiler-native bridge to the dynamic object space
+   instead of extending a second scripting syntax.
+3. Add an engine-facing diagnostics console and safe reload/source history.
+4. Introduce stable entity IDs and coherent edit transactions (scene DAG).
+5. Benchmark FFI and 1000x reload with sanitizers and versioned script state.
+6. Only then expose materials, meshes, physics handles and GPU resources with
+   explicit lifetime/effect constraints.
+
+See the root =TODO.org= for the authoritative work queue and dependencies.

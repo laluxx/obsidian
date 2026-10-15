@@ -1,0 +1,68 @@
+#+TITLE: Obsidian — Cycle 31: Fresh glTF upload parity
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+Cycle 31 is a changed-files-only overlay on Cycle 30. It extends the checked
+OMDL cache-hit geometry upload transaction to freshly cooked glTF data without
+introducing any new renderer-side GPU ownership layer.
+
+* Implementation
+
+- =obs_geometry_upload_prepare_memory= accepts eight borrowed CPU spans, each
+  with an explicit size. It checks all spans against the planned source sizes
+  before any allocation or copy, retaining output state on rejection.
+- It creates an owned immutable CPU staging snapshot, with checked four-byte
+  Vulkan copy alignment and explicit zero padding for meshlet triangle bytes.
+- =mega_geometry_submit_prepared= is now the single internal Vulkan transfer
+  path for both =megaGeometryUploadCacheBatch= and
+  =megaGeometryUploadCookedBatch=. It submits one command buffer, checks fence
+  completion, quarantines unconfirmed resources and publishes mega-buffer
+  offsets only after confirmed completion.
+- Fresh glTF cooking supplies all eight streams, including meshlet bounds and
+  skin data, and no longer uses six per-stream GPU upload helpers. The loader
+  publishes staged mesh addresses only after a successful prepared batch.
+- The public cooked-source structure uses distinct typed pointers; it does
+  not expose low-level Vulkan buffers to Monad or new foreign lifetimes.
+
+* Tests and evidence
+
+- =make test-native=: PASS, including both 50,000-case geometry upload tests.
+- =make test=: PASS; real embedded Monad and live-frame runners are explicitly
+  skipped because their runner variables are unset.
+- =tests/native/geometry_upload_memory.c=: CPU parity against cache-file
+  preparation, exact sizes, ownership, padding, rejection atomicity, zero
+  streams, 50,000 deterministic layouts.
+- =tests/native/geometry_upload_batch.c=: existing 50,000 randomized checked
+  copy layouts and submission journal state machine.
+- New memory test: ASan/UBSan PASS; file-based batch test: UBSan PASS.
+- =make -B src/graphics/geometry_upload_batch.o && make -j$(nproc)=:
+  PASS after forcing the archive-updated object to rebuild. The first plain
+  incremental link used the older Cycle 30 object and failed to resolve the
+  new memory-preparation symbol.
+- Actual editor startup initialized Vulkan on an NVIDIA GeForce RTX 3060.
+- Actual Vulkan runtime smoke loaded =assets/gltf/VertexColorTest.glb= once
+  with a fresh temporary cache, exercising fresh cooked geometry upload; it
+  wrote the OMDL cache and reported two meshes in the instance. A second run
+  with the same cache reported a validated OMDL cache hit and loaded two
+  meshes through the cache upload path. Both selected the RTX 3060. The smoke
+  hook in =src/app/main.c= was removed and the production build restored.
+- SHA-256 manifest verified before applying. Kept the current Makefile/TODO
+  and Cycle 29 loader ownership cleanup instead of replacing them with stale
+  archive snapshots.
+
+* Limitations and next work
+
+- The transfer still blocks on fence completion; this is not asynchronous
+  loading. It transiently holds a cooked source array, a host CPU snapshot,
+  and a Vulkan upload staging allocation. Benchmark peak memory and throughput.
+- Vulkan device loss and driver-level transfer failures can poison the upload
+  path and quarantine staging resources; actual recovery/reclamation remains
+  unverified. Do not recycle offsets before a real fence/idle proof.
+- Runtime validation used one small real glTF fixture. Larger/more complex
+  assets, Vulkan validation layers, and fault injection remain untested.
+- Other loader-owned side effects such as texture loading and graph staging
+  are outside this geometry-specific transaction.
+- A future cycle should own uploads until asynchronous fence completion and
+  publish scenes at a safe engine checkpoint, with QTT-aware handle expiry.

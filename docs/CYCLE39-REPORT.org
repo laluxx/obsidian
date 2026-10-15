@@ -1,0 +1,101 @@
+#+TITLE: Obsidian — Embedded Monad Cycle 39
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Connect the previously tested =ObsCacheTextureLease= contract to real renderer
+texture-pool indices. Keep the legacy texture-pool ABI and live C scene intact.
+Do not mistake logical reference ownership for safe GPU memory recycling.
+
+* Implemented
+
+** Real renderer acquisition and release
+
+- =src/graphics/texture_refs.[ch]= provides an owner-thread-only indexed
+  retained-reference registry. Paths are hashed with open addressing, with
+  tombstones after retirement. Only managed entries are interned; old
+  =texture_pool_add= references remain legacy/untracked and cannot be released
+  through =texture_pool_release=.
+- =texture_pool_acquire= deduplicates managed paths and increments a reference.
+  =texture_pool_release= decrements and makes zero-ref entries *pending*.
+- Pending entries can be acquired again and rescued before retirement.
+- No slot or descriptor index is reused after retirement, because old mesh
+  records or draw packets may still contain those indices. This deliberately
+  bounds lifetime allocations to =MAX_TEXTURES= entries per pool generation.
+- =texture_pool_collect_retired= is an explicitly BLOCKING, owner-thread
+  quiescence checkpoint. It drains known DMA work, requires successful
+  =vkDeviceWaitIdle=, and retires only entries whose texture cooker and upload
+  are complete (READY+loaded or FAILED). The bindless entry is repointed to a
+  live fallback before image/view/sampler destruction. Unfinished loads stay
+  pending for a later checkpoint; no work is destroyed while uncertain.
+- =bindlessRegisterTexture= no longer decreases the global high-water count
+  when repointing an earlier descriptor slot.
+
+** Cache-hit glTF now owns texture references
+
+- On OMDL cache hits, after confirmed geometry completion, call Cycle 38
+  =obs_cache_textures_stage_retained= with the real renderer callbacks.
+- This now deduplicates all paths in a cache-hit scene; failed acquisitions
+  release previous successful acquisitions before returning.
+- Attach the resulting lease to =GLTFInstance= only after verified staging,
+  and release it on scene cleanup. Aborted mesh publication releases it.
+- At program shutdown, release all instance-owned leases before destroying
+  the texture pool. Removed the duplicate early pool cleanup from =main.c=.
+
+** Performance
+
+=make bench-texture-refs= benchmarks path membership (not Vulkan frames),
+4096 paths, 200,000 lookups, GCC -O3. In this container one run measured:
+
+| Lookup | ns / lookup |
+|--------+-------------|
+| Linear strcmp scan | 7270.55 |
+| Indexed FNV/open addressing | 53.21 |
+
+These times exclude texture loading, actual Monad calls, Vulkan descriptors,
+and resource retirement. They are illustrative, not engine speedup claims.
+
+* Verification
+
+- =make test-native= passed, including the Cycle 39 managed-reference suite.
+- =make -j$(nproc)= compiled and linked the engine, including the renderer and
+  Vulkan setup source; this does not prove runtime GPU behavior.
+- =tests/native/texture_refs.c= passed managed reference lifetimes, duplicate
+  and cancelled retirement, non-reused slots, Cycle 38 retained leases,
+  malicious/invalid input and 50,000 deterministic stress operations.
+- =tests/native/texture_refs.c= passed with ASan and UBSan.
+- Public SDK headers were provided separately; no real Monad execution ran.
+- No Vulkan launch or validation-layer GPU test was run; compilation is NOT
+  GPU validation.
+
+* Explicit limitations
+
+1. The app does not automatically invoke =texture_pool_collect_retired= each
+   frame: it blocks on device idle, so it is intentionally an explicit safe
+   checkpoint. Zero-ref pool textures may remain resident until this function
+   is called or final shutdown. A true fence/epoch-driven, nonblocking retire
+   queue is still required for interactive reclamation.
+2. Allocated pool indices and bindless descriptor slots are *not recycled*,
+   even after physical retirement. Reuse requires generations, immutable draw
+   ownership and a descriptor-safe retirement mechanism.
+3. Texture status publication is atomic after Cycle 40's worker integration,
+   but renderer-owned image/view/sampler fields remain owner-thread objects;
+   only the status value may be observed across cooker/owner threads.
+4. The legacy cache-miss glTF path still registers textures outside leases.
+   No claim of fully transactional scene loading or texture acquisition.
+5. Descriptor sets from the legacy per-texture pool are not individually freed.
+   The descriptor pool owns their final reclamation at shutdown.
+6. The higher-level SceneLoad candidate and Vulkan descriptor/texture upload
+   state still require a live engine validation-layer test.
+
+* Next steps
+
+- Integrate owner-thread retirement at an appropriate nonblocking frame
+  checkpoint using confirmed per-frame fence epochs, not =vkDeviceWaitIdle=.
+- Move remaining glTF texture registration to retained references without
+  prematurely publishing scene state.
+- Make texture cooking state atomic and validate idle/late upload/device-loss
+  paths with Vulkan validation layers and fault injection.
+- Design generation-safe descriptor/slot recycling and benchmark real texture
+  churn and frame-time effects before enabling reuse.

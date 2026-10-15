@@ -1,0 +1,20 @@
+;;; native-camera-policy.mon --- native Monad compiler smoke function.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract native-camera-policy
+
+;;; Commentary:
+
+native-camera-policy.mon — native Monad compiler smoke function.
+Valid under the same monad_load_string / monad_find_i64_function contract
+as Glemax's tests/monad-host.c.  C passes 0; result should equal 500.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm [current : Int] -> Int)
+  (+ current 500))
+
+(define (obsidian_camera_policy_test [current : Int] -> Int)
+  (- (obsidian_camera_step_mm current) current))

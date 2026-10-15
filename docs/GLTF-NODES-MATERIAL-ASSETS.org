@@ -1,0 +1,46 @@
+#+TITLE: Obsidian language: glTF nodes, animation overlays and material presets
+#+STARTUP: overview
+
+* Two distinct transform authorities
+
+An animation chooses a native node TRS/local matrix. A Monad script owns an
+optional local translation OFFSET, not the animation keyframes. Each frame:
+
+  authored/base local OR sampled animated local
+       -> postcompose local Translate(script_offset)
+       -> hierarchy world transforms -> mesh / skinning GPU updates
+
+This ensures that changing the animation playhead does not erase a live offset.
+Do not confuse this with =(transform-position! (transform (mesh ...)))=,
+which writes the immediate mesh world-model matrix and can still be replaced
+by the next animation tick.
+
+#+begin_src scheme
+(define root (gltf-node (gltf 0) 0))
+(gltf-node-offset! root 1.0 0.0 0.0)
+(gltf-node-offset-x root) ; 1.0
+(gltf-node-offset-clear! root)
+#+end_src
+
+* Two distinct material abstractions
+
+- =(material (mesh 0))=: typed, mutable PBR VIEW of the mesh.
+- =(material-store (mesh 0))=: NEW scene-owned independent asset snapshot.
+- =(material-asset i)=: borrow that asset by current scene index.
+- =(material-apply! asset mesh)=: explicitly copy the asset to a mesh.
+
+#+begin_src scheme
+(define m (mesh 0))
+(define preset (material-store m))
+(material-asset-factors! preset 0.2 0.9)
+(material-apply! preset m)
+#+end_src
+
+This is not yet an automatic shared GPU material table. Scene cleanup owns
+asset reclamation, and Monad objects have no finalizer that frees GPU memory.
+
+* Integration gates
+
+The examples are design/implementation fixtures, not verified real MonadC
+executions. Assertions must be run with a real compiled embedded Monad module
+and glTF scene; extend =make test-all= only when a real runner is provided.

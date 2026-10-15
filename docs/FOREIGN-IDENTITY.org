@@ -1,0 +1,47 @@
+#+TITLE: Obsidian — Logical Foreign Identity Contract
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Identity versus location
+
+=(mesh i)= and =(node i)= produce nominal Monad host references to an
+engine-owned *identity token*, not an address inside a relocatable C array.
+The token is an address in a nonmoving identity registry page. A generation
+separates different logical objects that reuse the same identity slot.
+The engine's runtime incarnation is folded into the host-ref epoch.
+
+The foreign boundary checks, in order:
+
+1. Current owning Monad host/thread and nominal host-ref type.
+2. Structural revision and registry reconciliation.
+3. Token address belongs to an allocated registry page, is aligned, and
+   references an issued, live entry of the expected kind.
+4. Saved host-ref epoch agrees with *current* token generation and host.
+5. Registry entry points to a current dense-array item with matching stored ID.
+
+Only after these checks does the engine dereference the current =Mesh= or
+=SceneNode=. C/UI operations may relocate the object at any time between
+owner-thread checkpoints; the token is not the object pointer.
+
+* Expiration
+
+- Unrelated insertion, removal or compaction: retain logical identity.
+- Delete THIS object: invalidate the token, increment its generation.
+- Reuse its former registry slot: old-generation tokens remain invalid.
+- Scene reset: invalidate previous scene identities lazily on next access.
+- Runtime restart: previous values no longer belong to the current host.
+- Frame-scoped objects still expire per frame. Do not apply stable engine
+  identity semantics to ephemeral renderer/command-buffer capabilities.
+
+* Constraints
+
+- No script-side explicit =free= is needed, but the engine still owns scene
+  records and GPU resources and must retire them correctly.
+- The engine must increment =mesh_revision= / =tree.revision= after every
+  structural array mutation. A new object must begin with =foreign_identity=0=.
+- Identity pages must not be freed while Monad may hold a host reference.
+  Application shutdown releases them after =obs_monad_engine_stop=.
+- These IDs are process-local. Serialization/network entity IDs need a
+  separate documented stable ID scheme.
+- Material, SDF and glTF foreign types are not automatically converted by this
+  change; their lifetime model remains the preexisting structural epoch.

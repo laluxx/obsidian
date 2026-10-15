@@ -1,0 +1,84 @@
+#+TITLE: Obsidian — Publication Request Scheduling (Cycle 13)
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope and ownership
+
+=src/monad/publication_queue.[ch]= is an *owner-thread request mailbox*, not
+an LLVM/MonadC candidate compiler. This distinction is essential:
+
+- MonadC owns type checking, QTT evidence, native images, atomic publication,
+  pinned native generation reads, and eventual native code reclamation.
+- Obsidian owns engine input, the file watcher, the embedded REPL UI, and the
+  sequencing of calls that may mutate its scene and runtime.
+- The mailbox holds only bounded request *identities* (boot module and REPL),
+  not source ASTs, compiler-owned object pointers, native addresses or GPU
+  resources. REPL source remains in its pre-existing bounded model.
+
+* State machine
+
+#+begin_example
+watcher / F5 --> BOOT pending ---+
+                                 |--> checkpoint --> MONADC load --> complete
+REPL submit --> REPL pending ----+
+                    |                  |
+                    +-- no compilation while engine callback leases are live
+#+end_example
+
+Both lanes are size one. Repeated BOOT requests replace the pending ticket,
+so file-change storms do not trigger an unbounded compilation backlog. REPL
+requesting is idempotent while its single submitted source remains pending;
+its editor input and history cannot be dropped by boot reload requests.
+
+If both lanes have work, the engine alternates them under contention, serving
+REPL first on a cold start. Exactly one compiler invocation is admitted per
+=obs_monad_engine_process_pending= checkpoint. Completion tickets are
+monotonically generated (no wrap) and must match the active request. Only
+work that has not started can be cancelled. The scheduler never interrupts
+native execution or a compiler call and is not thread-safe; only Obsidian's
+runtime owner thread may drive it.
+
+=:queue= reports counters. =:cancel-boot= discards only a pending boot load.
+In Monad, =(publication-queue)= and =(publication-queue-idle?)= compose the
+five =publish-*= foreign diagnostics.
+
+* Correctness boundaries
+
+- A successful BOOT attempt requires an attempted load AND a new publication.
+  A missing environment module does not count as success.
+- REPL success is based on its model completing with no new rejection; =:check=
+  succeeds without publication and is counted as a successful REPL *request*,
+  not an image publication.
+- Rejected MonadC loads are governed by the compiler's native atomic-load
+  guarantee. Engine-side host effects, GPU state and persistent-state
+  migration are NOT transactional yet.
+- File watcher acknowledgement is after an attempted BOOT load. Failed loads
+  do not cause a compiler retry storm until the source changes again.
+- Startup's explicit boot call remains independent of the queue. The mailbox
+  schedules *interactive runtime requests* only.
+
+* Next compiler integration
+
+When real candidate APIs exist, the same admission layer can pass a ticket to
+an asynchronous candidate compiler. The engine still needs a distinct state
+machine for candidate ownership and retirement, including:
+
+1. Prepare immutable source snapshot on a worker (no scene access).
+2. Compile candidate against a compiler-owned typed/quantity/effect snapshot.
+3. Verify region/loan obligations and state migration before publication.
+4. At a bounded checkpoint, atomically commit an already verified candidate.
+5. Release worker artifacts and retire old native generations only after
+   pinned calls finish. Publish diagnostics without borrowing compiler memory.
+
+No functions named =monad_candidate_*= are called in this patch: such APIs were
+not present in the supplied embed SDK. Without them, native compilation may
+still block Obsidian's render/event thread; CPU/GPU frame-time claims are OPEN.
+
+* Testing
+
+- =make test-native= executes a 100,000-step scheduler fuzz test and a REPL
+  queue/model integration test (failure, supersession, completion ordering).
+- =make test= also checks the actual supplied public SDK headers if installed.
+- =tests/monad/publication-queue-contract.mon= requires a real embedded
+  Monad runner. Its presence is not a passing end-to-end integration result.
+- Full GUI/Vulkan + real MonadC load/reload + frame p95/p99: NOT VERIFIED.

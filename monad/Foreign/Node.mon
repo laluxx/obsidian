@@ -1,0 +1,33 @@
+;;; Node.mon --- Foreign methods for stable scene-tree nodes
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign scene-node
+
+;;; Code:
+
+module Foreign.Node
+  [◯ Node at index name parent first-child visible? visible!]
+
+type ◯ :: {Node}
+
+define at :: Int -> ◯
+  index -> obs-scene-node (obs-current-scene) index
+
+method index :: ◯ -> Int
+  node -> node-index node
+
+method name :: ◯ -> String
+  node -> node-name node
+
+method parent :: ◯ -> Int
+  node -> node-parent node
+
+method first-child :: ◯ -> Int
+  node -> node-first-child node
+
+method visible? :: ◯ -> Bool
+  node -> node-visible? node
+
+method visible! :: ◯ -> Bool -> ()
+  node visible -> node-visible! node visible

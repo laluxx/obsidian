@@ -1,0 +1,42 @@
+#+TITLE: Sphere Inspector: Gesture Transaction and Input Ownership
+#+DATE: 2026-10-12
+
+* Contract
+
+A continuous edit from a sphere's inspector field is a single atomic
+Emacs-style command, not one command per sample. Field widgets mutate
+editor-owned persistent proxy values; validated deltas are published by the
+production SDF journal, never directly into journal-backed sphere state.
+
+- =obs_sdf_property_begin(index)= selects a checked sphere ticket and opens a
+  private group, saving its scene-epoch-scoped group identity.
+- =obs_sdf_property_preview(index,mask,values)= applies checked absolute
+  values to one coalesced BEFORE/AFTER record. It refuses wrong targets,
+  viewport-owned groups, stale tickets and invalid inputs.
+- =obs_sdf_property_commit()= validates the latest scene state and records
+  one undo command only when the final state differs from the original.
+- =obs_sdf_property_cancel()= validates and restores the original state
+  without erasing history. Conflicts leave the group open and owned.
+
+A color picker retains its target pointer across frames. Sphere color and
+emission therefore use persistent proxy arrays; drag IDs likewise point only
+into persistent storage, never temporary stack values.
+
+* Integration boundaries
+
+- Sidebar and viewport share a journal. The panel cannot adopt another
+  transaction merely because a group is active; the group token is checked.
+- Mouse drag ownership follows exact widget-pointer identity. Modal picker
+  ownership follows its persistent RGBA target pointer.
+- Escape and focus loss call =editor_cancel_sdf_property_gesture=. Selection
+  changes and closing the Inspector request the same checked cancellation.
+  Release/picker close commits only after the editor render pass samples final
+  widget values. A conflict keeps the Inspector open and refuses the close.
+- Real SDF writes flow through =flushSdfSSBO= and its owning Vulkan frame-slot
+  fence. No shadow scene or second renderer is introduced.
+- Only translation-only spheres use this sphere-state record. Boxes, terrain,
+  meshes and glTF data are not misrepresented as spheres; unsupported types
+  retain their previous edit behavior.
+
+Use =make test-sdf-property-gesture= for deterministic production-source
+coverage. It does not replace real GUI, picker, focus, DPI, or GPU acceptance.

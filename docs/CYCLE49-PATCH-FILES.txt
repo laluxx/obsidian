@@ -1,0 +1,14 @@
+Makefile
+README.md
+TODO.org
+docs/AGENT-ABI.org
+docs/CYCLE49-PATCH-FILES.txt
+docs/CYCLE49-REPORT.org
+obsidian_agent.h
+src/app/agent_engine.c
+src/graphics/sdf.c
+src/scene/scene.c
+src/scene/scene.h
+tests/fixtures/agent_engine_contract.h
+tests/integration/agent_client.c
+tests/native/agent_engine.c

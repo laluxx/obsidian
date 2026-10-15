@@ -1,0 +1,201 @@
+#+TITLE: Obsidian external agent ABI — Cycle 48
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Scope: a real outer host, not a new language interpreter
+
+=obsidian_agent.h= is a C23/C++-compatible standalone public interface.
+It intentionally includes no Vulkan, MonadC, GLFW, Scene, Camera or other
+engine-private header. Its opaque =ObsAgentEngine*= is a session token;
+this is NOT a multi-instance VulkanContext or a foreign Monad value.
+
+A single process may operate only one engine session at a time. The API must
+be used on the creating thread, including capture, shutdown and module
+publication. Entry points reject reentrant calls from draw callbacks and
+never allow a second engine to overwrite the process-global renderer.
+
+* External lifecycle
+
+1. Initialize =ObsAgentConfig= with =abi_version=1= and bounded dimensions.
+   =obs_agent_open= uses =obs_headless_init= and starts the *existing*,
+   engine-owned MonadC runtime. The caller owns the returned opaque handle.
+2. Publish or replace a Monad source file with =obs_agent_load_file= or an
+   owned source string with =obs_agent_load_source=. Both use the existing
+   compiler source-unit publication path. They do NOT evaluate expressions.
+   Failed publication cannot be reinterpreted as successful engine rollback.
+3. =obs_agent_step= advances one actual offscreen Vulkan frame. The optional
+   draw callback executes during the host's frame dispatch. NULL draws only
+   scene/Monad-driven content already present in the engine.
+4. =obs_agent_capture= submits a further frame, waits for readback and
+   atomically writes the raw RGBA8 image. An optional =obsidian.headless.v1=
+   JSON receipt reports *total successful frame submissions in the session*.
+   The image and receipt are independently atomic files, not one transaction.
+5. =obs_agent_close= waits for GPU quiescence, closes MonadC, and tears down
+   all engine-owned resources. If the idle wait or compiler close fails,
+   the session remains live for a retry, rather than claiming ownership has
+   been returned. The pointer becomes invalid after successful close.
+
+An optional =call_camera_policy= selects whether the session invokes
+=obsidian_camera_step_mm : Int -> Int= before every frame. When enabled,
+calling step/capture without a published policy, a valid native code lease,
+or a bounded return value fails and does not submit the frame. When disabled,
+no camera policy is required; native =on-frame!= callbacks can still execute
+via the existing production frame bridge. No claim is made that these scripts
+are full editor scene-construction APIs or that QTT validates all host effects.
+
+* External C integration test
+
+=tests/integration/agent_client.c= imports only =obsidian_agent.h=. It creates
+an engine session, loads =tests/monad/native-camera-policy.mon=, steps three
+frames, captures a fourth, checks the raw byte extent and verifies the
+machine-readable receipt. On a machine with complete MonadC, Vulkan,
+GLFW, CGLM and Jolt dependencies, run:
+
+#+begin_src sh
+make test-agent-runtime
+#+end_src
+
+This is an intentionally STRICT runtime gate (not included in default native
+seam tests). It must compile/link actual =libobsidian.so= and execute against
+a real Vulkan device. Do not claim it passed in an environment missing those
+libraries or a working driver.
+
+The available deterministic tests do compile *actual* =src/app/agent_engine.c=
+with only its external host services substituted. They check ABI argument
+validation, one-owner restrictions, wrong-thread rejection, source failure,
+reload, policy rejection, recursive draw calls, raw/receipt file publication,
+stale receipt invalidation and GPU-quiescence refusal:
+
+#+begin_src sh
+make build/tests/agent-engine
+build/tests/agent-engine
+make test-agent-api-compile
+make test
+#+end_src
+
+* Missing until driver acceptance
+
+- Actual linked external-client startup, GPU frame capture, validation layers,
+  leak/device-loss tests and real MonadC/native QTT behavior.
+- Stable typed scene-manipulation and fixed-delta physics capabilities for
+  autonomous gameplay agents (the current engine frame delta is zero).
+- Multiple concurrently independent scene/world instances (global singleton
+  must be explicitly removed before claiming multi-instance support).
+- Async/off-thread native image compilation, frame-spike budgets, and host/
+  compiler joint transactionality remain separate MonadC/engine work.
+- Compatibility review before incrementing the ABI. No future struct or
+  callback extension is implied by publishing ABI v1.
+
+* Cycle 49 — Typed SDF primitives through the *actual* renderer
+
+The additive v1 outer C functions =obs_agent_sphere_create=, =_query=,
+=_set_position= and =_set_material= accept =ObsAgentSphere= (bounded, finite
+position and radius, [0,1] RGBA and PBR). Creation inserts a sphere into
+the engine's actual =Scene.sdfs= and 2-node UI scene tree, then flushes the
+existing mapped GPU SSBO. The external caller never sees internal mesh,
+scene-tree, pointer, texture, native JIT or Vulkan handles.
+
+A nonreused 64-bit ticket refers to the agent-created sphere within that
+headless engine session. Scene reset/cleanup invalidates all tickets even if
+an SDF index is reused; an ordinary append/reallocation preserves others.
+The engine cannot currently detect a legacy direct overwrite of an SDF slot
+outside the supported scene mutation functions. Caller-owned value structs
+must not be confused with compiler-authored Monad QTT provenance.
+
+The real SDF GPU SSBO supports 1024 primitives, and creation requires two
+available scene-tree slots. Failures do not advance the count. Position and
+material operations validate all values before changing any field. For GPU
+safety the outer C API waits for =vkDeviceWaitIdle= before changing mapped
+SDF memory: predictable correctness but a known latency cost. Replacing
+these waits with fence-scoped per-frame dirty uploads is the next renderer
+cycle. This does not change legacy editor writes outside the agent ABI.
+
+The real external-client fixture now verifies edited scene state, rejects an
+invalid capability, advances three normal headless frames and captures a
+fourth frame. It remains a strict full-driver/MonadC gate, not a passed test
+in environments without the Vulkan and compiler SDKs.
+
+* Cycle 50 — Monad-created scene inspection and deferred SDF GPU buffers
+
+The additive v1 =obs_agent_scene_sphere_count= / =_at= functions inspect the
+production SDF scene, including those spheres constructed by compiled Monad.
+Indices are **read-only snapshots**, not persistent mutation references.
+Compiler-owned scene construction takes place during =on-frame!=, not in
+=obs_agent_load_file= source publication: the provided integration client
+asserts the count is zero immediately after load, then checks five objects
+after stepping. This makes failure to actually invoke the Monad callback a
+visible integration failure rather than a false-positive image capture.
+
+Cycle 49's conservative =vkDeviceWaitIdle= on every agent SDF mutation is now
+superseded: =flushSdfSSBO= marks dirty frame slots and only the real renderer
+sync point copies CPU SDF content after waiting that particular slot's fence.
+The C ABI still enforces one process-global engine, one owner thread, and
+no recursive calls during draw callbacks. The linked driver test for real
+MonadC source -> SDF scene -> Vulkan capture + PNG is
+=make test-sculpture-runtime= and is NOT asserted to pass without its SDK.
+
+* Cycle 51 — A single sphere ticket namespace and checked ray queries
+
+Agent and Monad now use the SAME process-monotone, scene-epoch-validated
+SDF ticket registry. A Monad-created sphere can be directly edited with the
+outer =obs_agent_sphere_query=, =_set_position= and =_set_material= methods,
+and an agent-created sphere can be passed to Monad =sdf-move!= and =sdf-tint!=.
+No allocation address, moving SDF pointer, or Vulkan handle is exposed.
+
+The additive ABI v1 =obs_agent_scene_pick_ray= accepts finite world-space
+origin, nonzero direction, positive finite max distance, and a caller-owned
+=ObsAgentRayHit= result; on a miss it returns =OBS_AGENT_NO_HIT= without
+writing the result. It returns nearest translation-only *primitive sphere*
+intersection, normal, distance, SDF index and shared lifetime-checked ref.
+It is neither a screen-space GPU ID buffer nor an exact raymarch of smooth-
+union SDFs or arbitrary rotated/scaled shapes. Capacity remains bounded to
+1024 SDFs. The owner-thread, no-recursion and current-epoch checks still hold.
+
+* Cycle 52 — Shared selected-object inspector and undo journal
+
+The additive C ABI offers =obs_agent_scene_select/selected=, =_edit_selected=,
+=_undo=, =_redo=, =_history= and =_discard_history=. =ObsAgentSphere= is
+still a caller-owned value; =OBS_AGENT_EDIT_POSITION= and
+=OBS_AGENT_EDIT_MATERIAL= select changed fields. Radius is deliberately
+immutable in this edit operation. A selection is the same checked Int64 SDF
+sphere ticket used by compiled Monad; selection of zero clears it.
+
+The bounded (64) in-memory journal stores only full before/after *editable*
+values of the affected translated primitive sphere. It does not clone the
+scene tree or attempt to rewind the physics engine, Vulkan submissions, or
+compiled Monad image. Undo/redo validates the current sphere against the
+expected float-quantized snapshot and returns =OBS_AGENT_EDIT_CONFLICT= if
+out-of-band code changed it. Scene epoch reset expires all recorded edits.
+The oldest command is evicted after 64 edits, and a new edit after undo retains
+the inverse history (Cycle 53 Emacs-style semantics). Read-only history counts require no mutation effects; selecting
+and replaying are explicitly effect-admitted on the owner thread.
+
+Existing direct =obs_agent_sphere_set_*= and =sdf-move!/sdf-tint!= remain
+available but are *not automatically journaled*. An out-of-band change to a
+recorded object refuses future undo/redo until state is reconciled or history
+is explicitly cleared. Callers must not mistake this command log for a
+complete event-sourced history of all scene mutations. The strict linked
+acceptance is =make test-sculpture-runtime= on an SDK-equipped machine.
+
+* Cycle 53 — Emacs-style scene undo
+
+The old cursor-based redo-tail model is superseded. Normal =scene_undo=
+continues down the previous historical tail until an intervening editor
+command or explicit =scene_command_boundary= ends that sequence. The next
+ordinary undo can then undo the undo. =scene_undo_only= skips inverse records;
+=scene_redo= consumes the most recent undo-generated group, without appending
+an undo-of-redo record. =scene_begin_group/end_group= combine multiple edits
+into a single atomic conflict-checked command. See
+=docs/EMACS-SCENE-UNDO.org= for source research and verification limits.
+
+* Cycle 54 — speculative scene gesture API
+
+A caller may now call =obs_agent_scene_begin_group=, make any number (up to
+64) of checked =obs_agent_scene_edit_selected= calls across sphere selections,
+then call =obs_agent_scene_end_group= (accept as one undo command) or the new
+=obs_agent_scene_abort_group= (cancel without changing committed history).
+These functions are engine owner-thread and effect gated. A failed abort or
+commit does not close the live gesture and does not clobber external writes;
+it returns a stale/conflict status. =obs_agent_scene_discard_history= also
+refuses to erase an uncommitted gesture. =ObsAgentEditHistory= exposes only
+committed records, not the staged preview count. See =docs/SCENE-GESTURES.org=.

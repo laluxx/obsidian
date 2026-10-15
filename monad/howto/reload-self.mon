@@ -1,0 +1,37 @@
+;;; reload-self.mon --- queue a boot reload and read publication state
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto reload-self
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/reload-self.mon ./obsidian
+Frame 30 re-queues this very module through the owner-thread checkpoint;
+compilation still runs synchronously and can stall a frame. Reload
+releases script key closures, so replacement modules must rebind commands
+(key-command.mon rebinds every load for exactly this reason). Atomic
+rollback and state migration remain open work.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (reload-frame f)
+  (begin
+    (if (= (frame-number f) 30)
+        (begin (reload!) True)
+        True)
+    (list (reload-state) (reload-generation))
+    True))
+
+(on-frame! reload-frame)

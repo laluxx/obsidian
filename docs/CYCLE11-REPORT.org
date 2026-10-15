@@ -1,0 +1,83 @@
+#+TITLE: Obsidian Cycle 11 — Compiler-owned Publication Evidence
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Goal and scope
+
+Cycle 11 retains the incremental archive format. It strengthens the existing
+MonadC client instead of building a competing typechecker, VM, or QTT proof
+system. It makes the last successful native publication inspectable from the
+in-engine REPL and Monad code, and removes one unnecessary compiler pass.
+
+* Implemented
+
+** Owned latest-publication metadata
+
+=src/monad/export_catalog.[ch]= copies only bounded, compiler-issued native
+export descriptors and staged QTT evidence from the *published* source result.
+No =monad_source_result_t=, native-code address, borrowed name, or report
+pointer is retained after =monad_source_result_destroy=.
+
+The snapshot stores the native export count, names and scalar ABI summaries,
+QTT native-export certificate fingerprints, inferred-only evidence count,
+resource-verified evidence count, and the host's publication epoch.
+
+The snapshot means *last source transaction*; it is explicitly NOT a list of
+all retained native generations or all symbols in the engine. Successful
+publications replace it, rejected publications preserve it, and engine
+open/close clears it. The catalog is bounded to 64 copied export descriptors;
+truncation is visible, not silent.
+
+A definition is displayed as resource-verified only when MonadC supplies
+=MONAD_QTT_EVIDENCE_RESOURCE_VERIFIED=, =resource_verified=,
+=destructor_plan_available=, and a nonzero certificate fingerprint. We do
+not deduce resource safety from an inferred quantity or printed type name.
+
+** Single-pass publication
+
+Previously the REPL issued =monad_prepare_source= immediately followed by
+=obs_monad_load_source= / =monad_load_source= for the same input. The latter
+already runs its compiler pipeline and atomically publishes native code.
+
+Normal REPL submission now calls =obs_monad_load_source= once. Explicit
+=:check <source>= still uses semantic preparation without publication and
+states that this is not a QTT-certified native image. This reduces redundant
+compiler work but is not nonblocking hot reload or a measured FPS improvement.
+
+** User-facing language and introspection
+
+- =:exports= — bounded last-publication native export overview, scalar ABI,
+  and presence of a compiler-issued export fingerprint.
+- =:qtt= — separate counts of resource-verified and inferred-only definitions.
+- =(native-export-count)=, =(native-resource-proof-count)=,
+  =(native-inferred-count)=, =(native-catalog-epoch)= as direct object-space
+  procedures, with owner-thread validation.
+- =modules/obsidian/certificates.mon= provides composable publication summary
+  functions; =tests/monad/native-certificates-contract.mon= records an actual
+  embedded-Monad integration contract (not executed in this environment).
+
+* Tests and evidence
+
+- =make test-native=: PASS.
+- =make MONADC_INCLUDE=<actual supplied SDK include path> test=: PASS for all
+  available headless checks; skipped GPU and live Monad tests were reported.
+- =make test-export-catalog=: PASS against the real public Monad SDK headers,
+  with deterministic compiler-result doubles. Validates 64-entry bounds,
+  borrowed-name ownership, rejected transaction preservation, and two QTT
+  evidence classes.
+- =test-repl-abi=: PASS compiler syntax/type checks against uploaded embed SDK.
+- UndefinedBehaviorSanitizer test of catalog copy: PASS.
+- Complete engine build/link: NOT VERIFIED (Vulkan/Jolt/MonadC dependencies).
+- Actual native JIT, live compiler/engine execution, GPU frame performance,
+  and state migration: NOT VERIFIED.
+
+* Important limitations and next cycle
+
+MonadC's atomic =monad_load_source= still synchronously compiles on the
+engine owner thread. A true nonblocking candidate compiler, verified QTT
+callback imports/Frame loans, staged state migration, and bounded owner-thread
+commit depend on API requests in =docs/MONADC-API-REQUESTS.org=.
+
+The new catalog is diagnostic evidence only; it is not an authorization to
+retain arbitrary engine-owned pointers or execute unsafe GPU effects. The
+embedding ABI, not Obsidian's string-based REPL, remains the authority.

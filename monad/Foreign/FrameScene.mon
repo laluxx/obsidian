@@ -1,0 +1,27 @@
+;;; FrameScene.mon --- Foreign methods for the frame-scoped scene view
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign frame scene
+
+;;; Code:
+
+import Foreign.Mesh
+import Foreign.Node
+
+module Foreign.FrameScene
+  [◯ FrameScene mesh-count node-count mesh node]
+
+type ◯ :: {FrameScene}
+
+method mesh-count :: ◯ -> Int
+  live-scene -> frame-scene-mesh-count live-scene
+
+method node-count :: ◯ -> Int
+  live-scene -> frame-scene-node-count live-scene
+
+method mesh :: ◯ -> Int -> Mesh
+  live-scene index -> frame-scene-mesh live-scene index
+
+method node :: ◯ -> Int -> Node
+  live-scene index -> frame-scene-node live-scene index

@@ -1,0 +1,56 @@
+#+TITLE: Obsidian — Texture leases and pending-scene publication
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Resource protocol
+
+The *CPU manifest* owns copied texture paths and mesh-channel references.
+A *retained texture lease* owns one reference for every successful unique
+path acquisition. These have separate lifetimes: disposing the manifest does
+not release the lease, and moving a lease never copies GPU resources.
+
+#+begin_example
+  owned manifest --stage_retained--> manifest.resolved + retained lease
+                                      |                 |
+                                  read IDs        move into Scene
+                                      |                 |
+                                  GPU ready       scene teardown
+                                                        |
+                                                   release refs
+
+  reject halfway ------------------> reverse-release and retryable plan
+  GPU cancellation ----------------> release candidate lease
+  GPU completion uncertain --------> retain lease until quiescence proof
+#+end_example
+
+** Rules
+
+- =acquire(user, path, &id)= must be failure-atomic *for its own call*.
+- A successful =id >= 0= represents exactly one owned reference. Two calls
+  returning the same ID still own two references.
+- =id == -1= is an optional unavailable texture and has no release.
+- =id < -1= is invalid and fails the whole transaction.
+- Every error path releases prior successful IDs in reverse order; it never
+  publishes incomplete =plan->indices=.
+- All callbacks execute on the engine/texture-pool owner thread.
+- =lease_move= transfers ownership without allocations and rejects an
+  already occupied destination; =lease_release= is idempotent.
+- Material IDs alone do not imply GPU residency. A completed geometry fence
+  says nothing about texture uploads; an independent readiness proof is
+  required before activation.
+
+* Why the old loader still uses non-owning resolution
+
+=texture_pool_add= appends globally without per-reference release or safe
+bindless slot reclamation. Faking a release callback would make cancellation
+appear correct in tests but leak GPU resources in production. The retained
+API is therefore tested with an accurately reference-counted mock and is
+available for the next real renderer-pool migration, NOT silently enabled
+against the existing global texture pool.
+
+* Tests
+
+=make test= includes =tests/native/cache_texture_lease.c=, compiled from the
+actual =cache_textures.c= and =pending_load.c=. Its GPU path is a deterministic
+mock, not Vulkan validation. Additional =tests/native/cache_textures.c= checks
+path interning and the legacy descriptor plan.

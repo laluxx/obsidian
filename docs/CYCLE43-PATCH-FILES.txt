@@ -1,0 +1,13 @@
+Makefile
+TODO.org
+docs/CYCLE43-PATCH-FILES.txt
+docs/CYCLE43-REPORT.org
+src/assets/gltf_loader.c
+src/assets/gltf_source_plan.c
+src/assets/gltf_source_plan.h
+src/graphics/render_graph.c
+src/graphics/render_graph.h
+src/graphics/vulkan_setup.c
+tests/fixtures/render_graph_contract.h
+tests/native/gltf_source_plan.c
+tests/native/render_graph_contract.c

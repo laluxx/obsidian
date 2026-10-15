@@ -1,0 +1,147 @@
+#+TITLE: Obsidian performance profiling and benchmark guide
+#+DATE: 2026-10-11
+
+* Current coverage
+
+The engine benchmark is an opt-in, repeatable headless run of the configured
+Monad scene manifest (default =tests/monad/bench-scene.mon=). It records
+process setup, warmed CPU frames, Vulkan timestamps, and teardown. It is not
+the interactive editor workload. It does not benchmark live Monad boot/reload
+publication as a distinct scenario; use =:latency= and publication metrics for
+that path. Live JIT startup remains dependent on the installed MonadC runtime.
+
+Other existing measurements remain narrower; their batch benchmarks are
+registered as =./make bench NAME= workloads:
+
+- =./make bench font=: synthetic CPU UTF-8 scanner; no FreeType, atlas, Vulkan,
+  or draw calls.
+- =OBSIDIAN_FONT_PROFILE=1=: actual font CPU/cache/raster/upload counters.
+- =./make bench keychords-performance=: key-chord component microbenchmark.
+- =make test=: deterministic publication-metric/queue checks, not timings from
+  live Monad compilation or publication.
+- =:latency=: live Monad publication duration and queue wait counters when
+  the embedded runtime works.
+- =OBSIDIAN_MONAD_PROFILE_FFI=1= plus =:dispatch=: optional owner-thread CPU
+  timing for frame callbacks and pinned camera-native policies; reports
+  bucket-bound percentiles, not exact samples or GPU time.
+- =./make bench dispatch=: recorder-only histogram overhead microbenchmark; it
+  does not invoke Monad, the JIT, or Vulkan.
+- =./make bench foreign-slots=: C-only comparison of the former pointer scan
+  with checked dense-slot lookup; not an end-to-end Monad or frame benchmark.
+- =frame-profile!=: opt-in latest-frame CPU phase counters. Not a history or
+  GPU profiler.
+
+* Run the engine benchmark
+
+The unified frontend lists all benchmark targets and their requirements:
+
+#+begin_src sh
+./make bench --list
+#+end_src
+
+Run the complete registered suite with =./make bench=, or choose a family.
+The engine workload requires its Vulkan/MonadC/assets setup:
+
+#+begin_src sh
+./make bench engine
+#+end_src
+
+Defaults: five fresh engine processes, 120 warm-up frames and 600 measured
+frames per process. Override them without editing code:
+
+#+begin_src sh
+./make bench engine --runs 7 --warmup-frames 180 --frames 1200 \
+  --output build/bench/editor-2026-10-11
+#+end_src
+
+The actual graphics surface is required: an X/Wayland display and a working
+Vulkan device. The program exits after the requested number of frames. Each
+run writes raw frame/lifecycle data and a combined =summary.json=; stdout and
+stderr are kept in per-run logs. The runner fails if the executable fails,
+times out, or does not capture every requested CPU frame.
+
+* Measurement semantics
+
+- =process_to_window_ready= spans benchmark setup to the return of
+  =initWindow=; =window_init= is the same function's duration.
+- =app_setup= includes default asset loads and demo-scene setup.
+- =total_ns= measures main-thread wall time from =beginFrame= through
+  =endFrame=; =app_update_ns= is the =beginFrame= interval and =app_draw_ns=
+  is application drawing plus =endFrame=.
+- =begin_fence_wait_ns=, =geometry_upload_ns=, =acquire_image_ns=,
+  =image_fence_wait_ns=, =command_record_ns=, =queue_submit_ns=, and
+  =queue_present_ns= are CPU-side intervals. =queue_present_ns= is time spent
+  in the driver call, not display latency or GPU frame time.
+- =gpu_ns= is a Vulkan timestamp interval from the first top-of-pipe command
+  to the final bottom-of-pipe command in the graphics command buffer. It
+  excludes CPU work and is not shader-active time; queue scheduling and
+  semaphore behavior can affect it. It excludes display scan-out. Unsupported
+  timestamp hardware reports =null= values rather than substituting CPU time.
+- =device_wait_idle= records the explicit pre-cleanup wait. =engine_cleanup=
+  includes the engine cleanup path, which currently performs another device
+  idle wait. =external_process_wall= from the runner includes report writing
+  and process exit; the in-engine lifecycle interval ends at cleanup completion.
+
+The summary reports median, nearest-rank p95/p99, min/max, and sample count.
+Frame percentiles pool all measured frames across runs; lifecycle percentiles
+use one sample per fresh process. Compare like-for-like settings and retain raw
+JSON/logs. Do not use average FPS alone: it hides tail latency and stalls.
+
+* Captured local baseline
+
+One five-process run on 2026-10-11, with 120 warm-up and 600 measured frames
+per process, produced 3,000 frame samples on a Ryzen 7 3800X and RTX 3060
+(driver 610.57.04). Pipeline cache was warm. These figures validate the
+measurement path; they are not a performance target or a before/after claim.
+
+| Measurement | p50 | p95 | p99 | max |
+|-------------+-----+-----+-----+-----|
+| Main-thread frame wall time | 0.205 ms | 0.468 ms | 0.874 ms | 5.082 ms |
+| Vulkan command-buffer timestamp interval | 0.109 ms | 0.115 ms | 0.117 ms | 0.126 ms |
+| Engine window initialization | 604.2 ms | 643.5 ms | 643.5 ms | 643.5 ms |
+| Application setup | 187.7 ms | 212.0 ms | 212.0 ms | 212.0 ms |
+| Engine cleanup | 633.1 ms | 637.5 ms | 637.5 ms | 637.5 ms |
+| Main loop through engine shutdown | 1.706 s | 1.772 s | 1.772 s | 1.772 s |
+
+The renderer reports 0 2D vertices in this default scene. The workload does
+not replay editor input, resize events, or live Monad publication. For
+interactive-resize evidence, use Glemax with compositor-driven size changes;
+do not conflate that profile with a deterministic benchmark until the resize
+sequence is added as a controlled workload.
+
+* Controls and caveats
+
+Use the same executable/build flags, display resolution/refresh, GPU power
+state, driver, asset files, window focus, background load, and pipeline-cache
+state when comparing changes. The default workload has no input replay and is
+not a game-scene stress test. The on-disk Vulkan pipeline cache is reused
+between runs, so startup results are warm-cache measurements on repeat runs;
+asset reads and driver caches are also host-dependent. Results are
+descriptive, not a portable CI threshold.
+
+In-engine timestamp collection allocates one two-query-per-frame-slot query
+pool only in benchmark mode. Normal execution leaves the existing profiling
+and GPU timestamp instrumentation dormant. For CPU attribution, use Linux
+=perf= on the same controlled run:
+
+#+begin_src sh
+mkdir -p build/bench
+OBSIDIAN_BENCHMARK_FRAMES=600 OBSIDIAN_BENCHMARK_WARMUP=120 \
+OBSIDIAN_BENCHMARK_REPORT=build/bench/perf-capture.json \
+  perf record -g --call-graph dwarf -o build/bench/perf.data -- ./obsidian
+perf report -i build/bench/perf.data
+#+end_src
+
+For GPU pass-level attribution, use a Vulkan-capable external GPU profiler
+(e.g. Nsight Graphics) or add pass-scoped timestamp queries. The built-in
+query currently reports the whole graphics command buffer only. Do not infer
+shader bottlenecks or present latency from that aggregate.
+
+* Earlier UTF-8 scanner measurements
+
+=cycle5-font-utf8.tsv= was collected with =make bench-font
+BENCH_ITERATIONS=10000=. It used GCC =-O3= and 15 sequential trials scanning
+synthetic 4096-byte ASCII and 4095-byte mixed-Unicode strings. It did not
+exercise FreeType, shaping, atlas upload, Vulkan, or rendering; host load and
+CPU frequency were not pinned. Those figures are scanner microbenchmarks,
+not evidence of an end-to-end frame-time improvement.

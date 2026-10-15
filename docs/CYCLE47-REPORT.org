@@ -1,0 +1,78 @@
+#+TITLE: Cycle 47 — Bounded production headless agent job
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Source and integration inventory
+
+The input is the user's full =obsidian.tar(3).gz= tree, containing production
+Cycle 45 glTF and partial Cycle 46 headless and orbit functionality. The
+source's Cycle 46 patch artifact is explicitly absent; this overlay uses the
+supplied complete tree as its baseline and does NOT claim to restore it.
+
+Inspected =AGENTS.md=, =docs/ARCHITECTURE.org=, =docs/HEADLESS-RAW.org=,
+=src/{app/main.c,platform/window.c,monad/runtime.[ch],core/frame_state.c}=,
+renderer/headless submission, glTF async cooker/controller, Makefile tests,
+=tools/incremental_overlay.py= and recent cycle reports. The engine still
+uses global Vulkan/scene state and one owner-thread MonadC runtime.
+
+* Vertical slice — real agent input -> compiled Monad -> GPU frames -> artifact
+
+1. Existing =--eval= loads inline source; new =--eval-file= loads an actual
+   regular Monad file via the already implemented checked loader (16 MiB cap,
+   complete/stable read, no embedded NULs). Reject simultaneous sources.
+2. Require a typed =obsidian_camera_step_mm= native entry; the **checked**
+   existing compiler-owned read/lease route now reports failure instead of
+   returning void for unattended work. Keep its void interactive wrapper.
+3. Drive 1..10000 ordered frames via =obs_headless_execute_frames=. The
+   production callback calls the checked Monad camera policy and the same
+   =obs_headless_render_frame=/=obs_headless_render_raw= used previously.
+   No mock or alternate renderer is installed in the application.
+4. The production headless readback now uses =obs_atomic_write_bytes=:
+   private same-directory temp, complete write with EINTR handling, fsync,
+   checked close, rename; failure unlinks temp. Existing output remains intact
+   until successful replacement.
+5. Optionally produce =obsidian.headless.v1= JSON with dimensions, count,
+   byte length, source kind, image path. Only success publishes a receipt;
+   preexisting receipts are removed before a new attempt to avoid stale OKs.
+
+* Evidence and boundaries
+
+| Gate | Result |
+|------+--------|
+| Native C frame driver and error/final-count traces | PASS |
+| Atomic replacement, previous-byte preservation, path failure | PASS |
+| JSON receipt and escaping/argument bounds | PASS |
+| =make -j2 test= | PASS (native + tooling; unavailable integration SKIP) |
+| Real compiler/JIT native camera policy under headless work | NOT VERIFIED |
+| Real Vulkan submission, readback/pixel parity, validation layers | NOT VERIFIED |
+| GPU frame p95/p99, device loss and memory soak | NOT VERIFIED |
+
+Unit test code compiles the exact new production headless driver and writer,
+not a rewritten copy; a fake callback simulates the rendering boundary only.
+No Vulkan/GLFW/CGLM/MonadC dev headers or runtime are installed here, so an
+actual app link or agent-driven image render cannot be claimed.
+
+* Limitations and next vertical slice
+
+This is a reliable **CLI** agent job, not yet the versioned outer engine ABI
+planned by OBS-C46-002. It does not evaluate general Monad expressions,
+expose typed scene creation or step physics at a deterministic delta time.
+The existing headless engine passes delta time zero. Source publication
+occurs before frame stepping on the owner thread, never concurrently.
+File-level image and report commits are separate; a completed image can remain
+if its report write fails. No fsync of directory metadata is promised.
+
+Next: split global renderer initialization from the CLI into an opaque,
+versioned *single-instance* C headless handle using explicit state/lifecycle
+methods, then run a complete external-agent integration harness against
+Vulkan/MonadC. Do not pretend the global Vulkan singleton is multi-instance.
+
+* Reproducible overlay
+
+#+begin_src sh
+# Execute from the parent of obsidian/ on top of obsidian.tar(3).gz
+tar -xzf obsidian-monad-cycle47-incremental-20261012.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE47-MANIFEST.sha256
+make -j2 test
+#+end_src

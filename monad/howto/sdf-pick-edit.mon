@@ -1,0 +1,43 @@
+;;; sdf-pick-edit.mon --- raycast-pick a Monad-built sphere, tint it, undo/redo
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto sdf-pick-edit
+
+;;; Commentary:
+
+Run: OBSIDIAN_MONAD_BOOT=monad/howto/sdf-pick-edit.mon ./obsidian
+Status: DOCUMENTS INTENT. Same MONAD-C0004 publication gate as the other
+Frame-callback guides. Raycast is a CPU primitive test, not a shader-exact
+smooth-union query; ticket 0 means miss, never a valid target.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (pick-left-sphere)
+  (sdf-raycast -1.6 0.0 -3.0 0.0 0.0 1.0 10.0))
+
+(define (recolor-picked ticket)
+  (if (= ticket 0)
+      ()
+      (begin
+        (sdf-inspect-select! ticket)
+        (sdf-inspect-tint! 0.10 0.75 0.95)
+        (sdf-inspect-undo!)
+        (sdf-inspect-redo!))))
+
+(define (pick-frame f)
+  (if (= (frame-number f) 2)
+      (begin (recolor-picked (pick-left-sphere)) True)
+      True))
+
+(on-frame! pick-frame)

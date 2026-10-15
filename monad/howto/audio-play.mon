@@ -1,0 +1,43 @@
+;;; audio-play.mon --- Monad-core synthesis through the audio backend
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto audio synthesis
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/audio-play.mon ./obsidian
+Audio.Synth in Monad core owns oscillator, envelope, pitch mapping, and PCM
+generation. Obsidian's host binding validates and copies signed 16-bit mono
+samples into its stereo output buffer; it contains no waveform generator.
+`make test-native` exercises sample validation/conversion, bounded reusable
+playback and typed-character native dispatch. The default editor typing hook
+is pending the embedded compiler's cross-module QTT certificate path:
+`editor-orbit.mon` calling `Audio.Synth.typewriter-packed-sample` currently
+fails headless boot with `MONAD-C0005`. The intended closed scalar ABI packs
+`codepoint * 2048 + frame_index`, avoiding generic callbacks and per-sample
+list allocation.
+
+;;; Code:
+
+(module Main)
+(import Audio.Synth)
+(import Audio.Render)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (audio-frame f)
+  (if (= (frame-number f) 1)
+      (begin
+        (audio-play-samples! (render-sine-note-ms 440.0 250))
+        True)
+      True))
+
+(on-frame! audio-frame)

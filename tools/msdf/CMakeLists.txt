@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.20)
+project(obsidian_msdf LANGUAGES CXX)
+
+# Both an installed msdfgen and an explicit checkout are supported. The
+# bundled Obsidian C engine remains independent of the optional tool.
+set(MSDFGEN_SOURCE_DIR "" CACHE PATH "Checkout of Chlumsky/msdfgen")
+if(MSDFGEN_SOURCE_DIR)
+    set(MSDFGEN_USE_VCPKG OFF CACHE BOOL "" FORCE)
+    set(MSDFGEN_USE_SKIA OFF CACHE BOOL "" FORCE)
+    set(MSDFGEN_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
+    set(MSDFGEN_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${MSDFGEN_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/upstream-msdfgen" EXCLUDE_FROM_ALL)
+else()
+    find_package(msdfgen CONFIG REQUIRED)
+endif()
+add_executable(obsidian-msdf main.cpp ../../src/graphics/msdf_generator.cpp)
+target_compile_features(obsidian-msdf PRIVATE cxx_std_17)
+target_compile_options(obsidian-msdf PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(obsidian-msdf PRIVATE ../../src/graphics)
+target_link_libraries(obsidian-msdf PRIVATE msdfgen::msdfgen)

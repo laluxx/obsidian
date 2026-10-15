@@ -1,0 +1,46 @@
+;;; sdf-reads.mon --- SDF material reads, atomic set, and selection query
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto sdf-reads
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/sdf-reads.mon ./obsidian
+Frame 2 hardens ticket 0 (metallic 0.9, roughness 0.25) through the atomic
+material setter, then snapshots kind, factors and slot index; the selected
+ticket reads 0 when nothing is selected. Creation and motion live in
+sdf-sculpt.mon; gestures live in sdf-gesture.mon.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (sdf-snapshot ticket)
+  (list (sdf-type ticket)
+        (sdf-metallic ticket)
+        (sdf-roughness ticket)
+        (sdf-x ticket)
+        (sdf-index ticket)))
+
+(define (reads-frame f)
+  (if (> (sdf-count (scene)) 0)
+      (begin
+        (if (= (frame-number f) 2)
+            (begin (sdf-material! (sdf-ticket 0) 0.25 0.9) True)
+            True)
+        (sdf-snapshot (sdf-ticket 0))
+        (sdf-inspect-selected)
+        True)
+      True))
+
+(on-frame! reads-frame)

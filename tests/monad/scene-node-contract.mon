@@ -1,0 +1,34 @@
+;;; scene-node-contract.mon --- dynamic host-object-space tests.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract scene-node-contract
+
+;;; Commentary:
+
+REQUIRES: compiled MonadC <-> dynamic object-space bridge; OBS-C005.
+Load inside an initialized Obsidian engine, then call each test function.
+Failure-path test: borrow a node, remove/reorder any scene node through
+the editor, and verify obs-node-name rejects the stale borrowed value.
+This test does not claim automatic execution until MonadC integration.
+
+;;; Code:
+(define (obsidian-test-node-roundtrip)
+  (let* ([world (obs-current-scene)]
+         [node (obs-scene-node world 0)])
+    (and (= (obs-node-index node) 0)
+         (String? (obs-node-name node))
+         (= (obs-node-parent node) -1)
+         (= (obs-scene-mesh-count world)
+            (obs-scene-mesh-count (obs-current-scene))))))
+
+(define (obsidian-test-node-visibility-roundtrip)
+  (let* ([world (obs-current-scene)]
+         [node (obs-scene-node world 0)]
+         [before (obs-node-visible? node)])
+    (obs-node-set-visible node before)
+    (= (obs-node-visible? node) before)))
+
+(define (obsidian-test-scene-all)
+  (and (obsidian-test-node-roundtrip)
+       (obsidian-test-node-visibility-roundtrip)))

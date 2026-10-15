@@ -1,0 +1,48 @@
+;;; host-smoke.mon --- Experimental host-object module, pending the MonadC compiled-image vs object-space dynamic-binding integration gate O...
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract host-smoke
+
+;;; Commentary:
+
+vs object-space dynamic-binding integration gate OBS-C005.
+host-smoke.mon — Monad-only smoke tests for engine foreign objects.
+Evaluate after engine boot.  Each function returns True on success.
+No C test has been added for the new scripting bridge.
+
+;;; Code:
+(define (test-obsidian-scene-foreign)
+  (let ([world (obs-current-scene)])
+    (and (= (obs-engine-api-version) 1)
+         (>= (obs-scene-node-count world) 1)
+         (String? (obs-scene-node-name world 0))
+         (= (obs-scene-node-parent world 0) -1))))
+
+(define (test-obsidian-camera-roundtrip)
+  (let* ([cam (obs-current-camera)]
+         [x (obs-camera-x cam)]
+         [y (obs-camera-y cam)]
+         [z (obs-camera-z cam)]
+         [speed (obs-camera-speed cam)])
+    (obs-camera-set-position cam x y z)
+    (obs-camera-set-speed cam speed)
+    (and (= (obs-camera-x cam) x)
+         (= (obs-camera-y cam) y)
+         (= (obs-camera-z cam) z)
+         (= (obs-camera-speed cam) speed))))
+
+(define (test-obsidian-camera-move)
+  (let* ([cam (obs-current-camera)]
+         [x (obs-camera-x cam)]
+         [y (obs-camera-y cam)]
+         [z (obs-camera-z cam)])
+    (obs-camera-set-position cam (+ x 1.0) y z)
+    (let ([changed (= (obs-camera-x cam) (+ x 1.0))])
+      (obs-camera-set-position cam x y z)
+      changed)))
+
+(define (test-obsidian-all)
+  (and (test-obsidian-scene-foreign)
+       (test-obsidian-camera-roundtrip)
+       (test-obsidian-camera-move)))

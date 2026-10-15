@@ -1,0 +1,39 @@
+;;; editor-frames.mon --- auxiliary windows, scene buffers and listings
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto editor-frames
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/editor-frames.mon ./obsidian
+Frame 1 opens one auxiliary OS frame; every frame lists scene buffers,
+material presets and engine variables through the shared candidate
+surface. Windows share renderer subsystems; only camera, scene buffer,
+selection and workspace panels are per-frame. Command routing for these
+actions lives in editor.mon; this is the capability surface behind it.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (frames-frame f)
+  (begin
+    (if (= (frame-number f) 1)
+        (begin (editor-frame-create) True)
+        True)
+    (list (editor-scene-buffer-list)
+          (editor-material-list)
+          (editor-variable-list))
+    True))
+
+(on-frame! frames-frame)

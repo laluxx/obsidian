@@ -1,0 +1,18 @@
+;;; animated-node-contract.mon --- Integration fixture: must execute inside a real Obsidian Monad runtime.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract animated-node-contract
+
+;;; Commentary:
+
+Host :check alone is NOT sufficient for an integration PASS.
+
+;;; Code:
+(define (cycle25-edit-node)
+  (with-gltf-node n (gltf 0) 0
+    (gltf-node-offset! n 1.0 2.0 -1.0)
+    (gltf-node-offset-x n)))
+;;; Integration assertions: evaluate during a real animation, compare node
+;;; position over two animation ticks, then clear; ensure reject on expired
+;;; instance and on writes while Monad source is loading.

@@ -1,0 +1,62 @@
+#+TITLE: Obsidian / Monad — Cycle 13: Bounded Live Publication Scheduling
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Incremental implementation over Cycle 12. This cycle improves real engine
+checkpoint behavior and publication request admission, NOT independent QTT
+candidate compilation, which the reviewed MonadC SDK does not yet provide.
+
+* Source changes
+
+- New =src/monad/publication_queue.[ch]=: two owner-thread request lanes with
+  deterministic fair dispatch, last-writer-wins BOOT coalescing, idempotent REPL
+  submissions, token-checked completion, and cancellation-before-start.
+- =runtime.c= routes watched/F5 reloads and REPL submissions through one
+  checkpoint; active Monad leases defer both without dropping submitted work.
+  Only one potential source compilation is admitted per frame checkpoint.
+- Runtime reset/close also reset the queue, so reopening the engine does not
+  retain old request tickets or telemetry.
+- The GPU REPL exposes =:queue= and =:cancel-boot=. Monad gains
+  =publish-queued=, =publish-completed=, =publish-coalesced=,
+  =publish-failed=, and =publish-cancelled= foreign calls; native helper
+  =(publication-queue)= in =modules/obsidian/live-reload.mon=.
+- Startup's explicit =obs_monad_engine_boot_from_environment= remains a
+  separate initialization path; scheduling governs runtime requests only.
+
+* Verification evidence
+
+- The new deterministic queue test exercises 100,000 seeded operations,
+  replay/stale tickets, invalid kinds, monotonic ID exhaustion, cancellation,
+  supersession, boundedness and alternation under contention: PASS.
+- The native queue/REPL model integration test covers source retention,
+  rejected compilation, watcher changes during active execution, repeated
+  publication, and one-lane failure without loss of the other: PASS.
+- =make test= with headers extracted from supplied =embed.tar(8).gz=: PASS
+  for all runnable headless native and SDK API declaration tests.
+- Both new tests with UndefinedBehaviorSanitizer: PASS.
+- Runtime C23 syntax-only check against actual Monad SDK headers with an
+  explicitly fixture-based camera header: PASS (not real graphics build).
+- Full Vulkan/Jolt engine build, live Monad source evaluation, real QTT
+  candidate publication, actual frame latency: NOT VERIFIED.
+
+* Architectural limits
+
+This is not a nonblocking compiler. Each accepted request still invokes the
+existing synchronous compiler path on the engine thread. The scheduler
+reduces redundant work and defines fair admission, but cannot guarantee
+smooth frame timing without detached MonadC candidate images. The engine
+cannot independently prove that arbitrary host side effects or persistent
+runtime state survive a failed script. QTT quantity evidence and code
+publication remain compiler-owned.
+
+See =docs/PUBLICATION-SCHEDULER.org= and
+=docs/MONADC-API-REQUESTS.org= for precise next-cycle handoff.
+
+* Next work
+
+Integrate real candidate prepare/verify/commit API once implemented by
+MonadC, then test stale-base rejection, QTT loan/state migration, cancellation
+of superseded candidates, eventual retirement, and frame-time p95/p99 under
+active gameplay. Avoid deeper renderer/API expansion until this proof exists.

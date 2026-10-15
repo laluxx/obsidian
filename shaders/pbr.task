@@ -1,0 +1,247 @@
+#version 450
+/// Shader declarations
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform UBO {
+    mat4  vp;
+    mat4  view;
+    mat4  proj;
+    vec4  cameraPos;
+    float time;
+} ubo;
+
+struct DirLight { vec4 direction; vec4 color; };
+struct PointLight { vec4 position; vec4 color; };
+layout(set = 3, binding = 0) uniform LightingUBO {
+    DirLight   sun;
+    PointLight pointLights[8];
+    int        pointLightCount;
+    float      ambientIntensity;
+    int        iblEnabled;
+    int        shadowsEnabled;
+    vec4       cameraPos;
+    mat4       cascadeSpace[4];
+    vec4       cascadeSplits;
+    mat4       cullSpace;
+    vec4       cullCameraPos;
+    mat4       prev_vp;
+    int        freezeCulling;
+    int        hzbValid;
+    int        _pad2[2];
+} lighting;
+
+layout(set = 3, binding = 7) uniform sampler2D hzbMap;
+
+struct MeshData {
+    mat4  model;
+    int   albedoIndex;
+    int   normalMapIndex;
+    int   metallicRoughIndex;
+    int   aoIndex;
+    int   emissiveIndex;
+    int   isUnlit;
+    int   alphaMode;
+    float alphaCutoff;
+    vec4  baseColorFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    float emissiveStrength;
+    int   displacementIndex;
+    vec3  emissiveFactor;
+    float displacementScale;
+    vec4  aabbMin;
+    vec4  aabbMax;
+    int   jointOffset;
+    int   morphDeltaOffset;
+    int   morphWeightOffset;
+    int   morphCount;
+    int   meshletOffset;
+    int   meshletCount;
+    int   meshletVertexOffset;
+    int   meshletTriangleOffset;
+    float transmissionFactor;
+    float ior;
+    float thicknessFactor;
+    int   transmissionIndex;
+    int   thicknessIndex;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistance;
+    float dispersion;
+    int   isVisible;
+    int   isWireframe;
+    int   vertexOffset;
+    int   matcapMode;
+    float aoStrength;
+    int   _pad3;
+};
+
+struct MeshletBounds {
+    float center[3];
+    float radius;
+    float cone_apex[3];
+    float cone_axis[3];
+    float cone_cutoff;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer { MeshData meshes[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer BoundsBuffer { MeshletBounds bounds[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DummyBuffer { uint dummy[]; };
+
+layout(push_constant) uniform PC {
+    int          ambientOcclusionEnabled;
+    int          iblEnabled;
+    int          meshIndex;
+    int          cascadeIndex;
+    MeshBuffer   meshData;
+    DummyBuffer  vertexBufferAddr;
+    DummyBuffer  jointBufferAddr;
+    DummyBuffer  morphBufferAddr;
+    DummyBuffer  morphWeightAddr;
+    DummyBuffer  meshletData;
+    BoundsBuffer staticBounds;
+    DummyBuffer  meshletSkinData;
+    BoundsBuffer dynamicBounds;
+    DummyBuffer  meshletVertexAddr;
+    DummyBuffer  meshletTriangleAddr;
+    DummyBuffer  sdfBufferAddr;
+    int          sdfCount;
+    int          _pad1;
+} pc;
+
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+taskPayloadSharedEXT TaskPayload payload;
+
+void extractPlanes(mat4 m, out vec4 planes[6]) {
+    // Gribb-Hartmann plane extraction from a column-major VP matrix.
+    // m[col][row] in GLSL. We need rows, so we transpose the access.
+    // Row i = (m[0][i], m[1][i], m[2][i], m[3][i])
+    planes[0] = vec4(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]); // Left
+    planes[1] = vec4(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]); // Right
+    planes[2] = vec4(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]); // Top
+    planes[3] = vec4(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]); // Bottom
+    planes[4] = vec4(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]); // Near
+    planes[5] = vec4(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]); // Far
+
+    // CRITICAL MATH FIX: Normalize planes so dot products give true Euclidean distance!
+    for (int i = 0; i < 6; i++) {
+        float len = length(planes[i].xyz);
+        planes[i] /= len;
+    }
+}
+
+/// Shader entry
+void main() {
+    uint ti = gl_LocalInvocationID.x;
+    uint meshletIdx = gl_WorkGroupID.x * 32 + ti;
+    MeshData m = pc.meshData.meshes[pc.meshIndex];
+
+    bool accept = false;
+    if (meshletIdx < m.meshletCount) {
+        uint globalMeshletIdx = m.meshletOffset + meshletIdx;
+
+        //  Phase 3: Zero-Cost Hardware Branching!
+        // Read from dynamic buffer if skinned, otherwise static!
+        MeshletBounds b = (m.jointOffset >= 0)
+                        ? pc.dynamicBounds.bounds[globalMeshletIdx]
+                        : pc.staticBounds.bounds[globalMeshletIdx];
+
+        vec3 center = vec3(b.center[0], b.center[1], b.center[2]);
+        vec3 worldCenter = (m.model * vec4(center, 1.0)).xyz;
+
+        float scale = max(length(m.model[0].xyz), max(length(m.model[1].xyz), length(m.model[2].xyz)));
+        float worldRadius = b.radius * scale;
+
+        mat4 cullMatrix = pc.cascadeIndex >= 0
+                        ? lighting.cascadeSpace[pc.cascadeIndex]
+                        : lighting.cullSpace;
+        vec4 planes[6];
+        extractPlanes(cullMatrix, planes);
+
+        accept = true;
+        for (int i = 0; i < 6; i++) {
+            if (dot(planes[i].xyz, worldCenter) + planes[i].w < -worldRadius) {
+                accept = false; break;
+            }
+        }
+
+        // Cone Culling (Meshlet Backface Culling)
+        if (accept && pc.cascadeIndex < 0) {
+            vec3 apex = vec3(b.cone_apex[0], b.cone_apex[1], b.cone_apex[2]);
+            vec3 axis = vec3(b.cone_axis[0], b.cone_axis[1], b.cone_axis[2]);
+            vec3 worldApex = (m.model * vec4(apex, 1.0)).xyz;
+            vec3 worldAxis = normalize(mat3(m.model) * axis);
+            vec3 viewDir = normalize(worldApex - lighting.cullCameraPos.xyz);
+            if (dot(viewDir, worldAxis) >= b.cone_cutoff) accept = false;
+        }
+
+        // Hierarchical Z-Buffer (HZB) Occlusion Culling
+        if (accept && pc.cascadeIndex < 0 && lighting.freezeCulling == 0 && lighting.hzbValid != 0) {
+            vec4 prevCenter = lighting.prev_vp * vec4(worldCenter, 1.0);
+
+            // Only cull if the sphere is strictly in front of the camera
+            if (prevCenter.w > 0.0) {
+                vec3 ndc = prevCenter.xyz / prevCenter.w;
+
+                //  Math Fix: Account for BOTH X and Y projection matrix aspect ratios!
+                vec2 ndcRadius = vec2(worldRadius * ubo.proj[0][0], worldRadius * abs(ubo.proj[1][1])) / prevCenter.w;
+
+                vec2 minUV = clamp((ndc.xy - ndcRadius) * 0.5 + 0.5, 0.0, 1.0);
+                vec2 maxUV = clamp((ndc.xy + ndcRadius) * 0.5 + 0.5, 0.0, 1.0);
+
+                // Ensure proper min/max ordering in case of inverted Y coordinate systems
+                vec2 uv0 = min(minUV, maxUV);
+                vec2 uv1 = max(minUV, maxUV);
+
+                // Calculate the exact Mip Level where our bounding box is roughly 2x2 texels
+                vec2 size = (uv1 - uv0) * vec2(textureSize(hzbMap, 0));
+                //  Math Fix: Use floor() to guarantee the AABB is between 1 and 2 texels wide.
+                float lod = clamp(floor(log2(max(max(size.x, size.y), 1.0))), 0.0, 12.0);
+
+                // 4-Tap Max Depth using Vulkan's hardware MAX reduction sampler.
+                // Because we used floor(), sampling the 4 corners guarantees a footprint that massively overcovers the AABB!
+                float d0 = textureLod(hzbMap, vec2(uv0.x, uv0.y), lod).r;
+                float d1 = textureLod(hzbMap, vec2(uv1.x, uv0.y), lod).r;
+                float d2 = textureLod(hzbMap, vec2(uv0.x, uv1.y), lod).r;
+                float d3 = textureLod(hzbMap, vec2(uv1.x, uv1.y), lod).r;
+                float maxDepth = max(max(d0, d1), max(d2, d3));
+
+                //  Math Fix: Calculate the absolute nearest point on the sphere securely.
+                // We use cullCameraPos (the previous camera) to match prev_vp precisely.
+                vec3 dirToCam = lighting.cullCameraPos.xyz - worldCenter;
+                float distToCam = length(dirToCam);
+
+                // Clamp the push distance to 99% of the distance to the camera to PREVENT the point from passing behind the near plane!
+                vec3 nearestWorld = worldCenter + (dirToCam / distToCam) * min(worldRadius, distToCam * 0.99);
+                vec4 nearestClip = lighting.prev_vp * vec4(nearestWorld, 1.0);
+
+                // Only evaluate depth if the projected point is strictly in front of the camera lens (w > 0)
+                if (nearestClip.w > 0.0) {
+                    float nearestZ = nearestClip.z / nearestClip.w;
+
+                    // In standard Vulkan Depth, 1.0 is FAR, 0.0 is NEAR.
+                    // If our NEAREST point is FURTHER than the FARTHEST background depth... KILL IT.
+                    if (nearestZ > maxDepth) {
+                        accept = false;
+                    }
+                }
+            }
+        }
+    }
+
+    uvec4 ballot = subgroupBallot(accept);
+    uint index = subgroupBallotExclusiveBitCount(ballot);
+
+    if (accept) payload.meshletIndices[index] = meshletIdx;
+
+    uint count = subgroupBallotBitCount(ballot);
+    if (ti == 0) EmitMeshTasksEXT(count, 1, 1);
+}

@@ -1,0 +1,23 @@
+/// obsidian — obsidian.h subsystem
+#pragma once
+
+#include "vulkan_setup.h"
+#include "vertico.h"
+#include "theme.h"
+#include "window.h"
+#include "renderer.h"
+#include "camera.h"
+#include "input.h"
+#include "font.h"
+#include "common.h"
+#include "context.h"
+#include "scene.h"
+#include "gltf_loader.h"
+#include "obj.h"
+#include "keychords.h"
+#include "audio.h"
+
+/* Public engine Monad hosting API (optional during migration). */
+#include "runtime.h"
+
+/// Public interface

@@ -1,0 +1,116 @@
+#+TITLE: Obsidian — Cycle 23: Stable Scene and Mesh Foreign Identities
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Implement logical object identity for =Mesh= and =SceneNode= independently of
+array position, preserving the existing owner-thread and Monad nominal
+foreign-reference boundary. This is an incremental overlay on Cycle 22.
+
+* DONE Source implementation
+
+- =src/scene/object_identity.[ch]= introduces per-scene, paged, nonmoving
+  identity slots with monotonically increasing, nonwrapping generations.
+  Active identity slots map to dense indices. Newly borrowed objects allocate
+  an identity slot once; ordinary borrows/resolves do not allocate.
+- Structural revision changes trigger a lazy registry reconciliation. Objects
+  still present (including those moved by =realloc= or swap-last compaction)
+  retain their tokens. Removed objects retire; reuse increments the token
+  generation, preventing an old host reference from aliasing a new object.
+- =Mesh.foreign_identity= and =SceneNode.foreign_identity= follow their owning
+  object through moves. =meshes_add= and =scene_tree_add_node= clear identity on
+  brand-new objects so source structs cannot import stale IDs. Existing
+  compaction uses struct copy and therefore carries identity correctly.
+- =src/monad/foreign.[ch]= exposes shared, checked borrow/resolve helpers;
+  =mesh_api.c= and =scene_api.c= now pass stable registry slot addresses to
+  Monad's =monad_value_intern_host_ref=. Both nominal type and runtime-incarnation
+  epoch continue to be enforced. No untrusted pointer is dereferenced.
+- On full Vulkan application shutdown, the engine closes Monad first and
+  releases identity pages afterwards. Registry pages deliberately persist
+  across scene reset while Monad references might still exist.
+- The public language is unchanged: =(mesh n)=, =(node n)=,
+  =(mesh-index m)=, =(node-index n)=, =(mesh-visible? m)= and others now resolve
+  the correct live logical object after unrelated structural modifications.
+  =modules/obsidian/identity.mon= illustrates retaining references naturally.
+
+* DONE Native tests
+
+=make test= runs =tests/native/object_identity.c=, checking:
+
+- Reallocation with unchanged object identity.
+- Append and swap-last deletion of a different object.
+- Deletion of the referenced object, generation reuse and stale-handle rejection.
+- Scene-tree node movement and cross-kind (mesh/node) rejection.
+- Forged, misaligned and incorrect-generation token rejection.
+- Full scene reset with prior handles still referenced.
+- 50,000 deterministic revisions with repeated identity resolution.
+
+The new suite passes under AddressSanitizer and UndefinedBehaviorSanitizer with
+leak detection, plus the available existing =make test= suite. The modified
+foreign C files pass strict =-Werror -pedantic -fsyntax-only= against the
+*actual supplied public Monad SDK declarations*, using isolated test scene
+headers for missing graphics dependencies. This is not full engine linking.
+
+* DONE Measured native performance (CPU-only)
+
+=make bench-object-identity= compiles the identity registry with =gcc -std=c23
+-O3 -DNDEBUG -Wall -Wextra -Werror -pedantic=. Benchmarks use a fixed,
+well-defined object set, =clock_gettime(CLOCK_MONOTONIC)=, and 1,000,000
+pseudo-randomized successful resolutions per size.
+
+| Slots | Stable identity resolve (ns/call) | Cold structural remap (us) |
+|-------+-----------------------------------+----------------------------|
+|    16 |                              7.83 |                       0.21 |
+|  1024 |                             10.86 |                       3.90 |
+|  8192 |                             31.63 |                      30.94 |
+
+Numbers are one local run per workload, not cross-hardware performance claims.
+Cycle 22's direct array membership check is faster (~2–3 ns in its fixture),
+but that strategy cannot preserve identities across moving storage. The new
+resolver scans allocated registry *pages* to safely check untrusted token
+addresses; therefore it is O(pages), not a theoretical constant-time lookup.
+Reconciliation is O(live entities + issued slots) once per structural revision.
+No per-frame allocations or compilers/GPU timings are inferred.
+
+* Boundary and limitations
+
+- Host identities are only valid for the active owner-thread/runtime and while
+  the referenced object remains alive; they are NOT serializable stable asset
+  IDs or durable identities across process launches.
+- Mutable engine objects are still C-owned. Monad's GC/QTT manages script
+  values, not automatic destruction of GPU resources or engine entities.
+- The caller must bump the appropriate structural revision for any manual
+  mutation of the backing array. Missing such a bump remains a correctness
+  bug. All existing recognized mesh/node mutation paths were reviewed.
+- Storage for identity pages stays live until the engine's runtime is shut
+  down. This intentionally prevents a dangling host token from comparing
+  equal to memory reused for an unrelated pool while old references exist.
+- This C-side implementation is exercised in isolation. Real MonadC/JIT
+  execution, Vulkan runtime, Jolt, and frame-time measurements are NOT verified.
+  Monad script fixtures in =tests/monad/= need the real compiler/engine runner.
+- Large registries can incur page-membership and structural remap overhead;
+  profile actual workloads before replacing the registry with a more complex
+  hash/radix structure. SDF and glTF still use structural epochs.
+
+* Next
+
+1. Exercise persistent Mesh/SceneNode handles in the running engine and script
+   REPL under repeated mutations/hot reload; measure p95/p99 foreign dispatch.
+2. Consider a direct token-index map if page scans appear in real profiles.
+3. Add first-class Material/Transform capabilities and QTT borrow/effect
+   contracts without exposing raw Vulkan/C pointers.
+4. Continue MonadC candidate compilation and atomic host+native publication.
+
+* Application into the cumulative worktree
+
+The Cycle 23 archive contains historical changes to =Makefile= and
+=src/graphics/vulkan_setup.c= that would remove the existing Vulkan resize
+maintenance/recreation and profiling behavior. Those unrelated hunks were
+excluded; only the identity-registry shutdown call was merged into the current
+cleanup path, after =obs_monad_engine_stop=.
+
+Local verification after applying the identity changes: =make -j= completed
+the full engine link, and =make test-native= passed, including the
+50,000-revision identity stress test. This local run did not execute the
+Monad/JIT fixture or repeat the archive's ASan/UBSan run.

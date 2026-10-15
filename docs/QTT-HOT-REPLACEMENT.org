@@ -1,0 +1,201 @@
+# Note (Cycle 9, embed.tar(8).gz audit): monad_load_source ALREADY atomically
+# publishes native registry generations and preserves prior image on rejected
+# source. Earlier claims below about a failed source necessarily mutating the
+# published native image are superseded. See REPL-EMBED-RESEARCH.org and
+# MONADC-API-REQUESTS.org. Host-side effects and separate off-thread candidate
+# commit still need implementation.
+
+#+TITLE: QTT-Aware Native Hot Replacement — Research and Implementation Contract
+#+DATE: 2026-10-11
+#+STARTUP: overview
+#+OPTIONS: toc:3
+
+* Objective and scope
+
+Obsidian must be an embedded Monad application, NOT a game-specific virtual
+machine, and NOT a second garbage collector. A script author should write
+=scene=, =mesh=, =frame=, and =on-frame!= without managing allocations or
+calling C destroy functions. This requires two complementary authorities:
+
+1. MonadC owns *language-level* types, effects, quantities, generated code,
+   code/publication epochs, and its own heap/object-space references.
+2. Obsidian owns engine-side scene storage, Vulkan resources and GPU fences,
+   physics/audio threads, and the lifecycle of native host capabilities.
+
+QTT constrains uses of values; it is not by itself a reference-tracing garbage
+collector, transaction log, graphics queue barrier, or safe code-unloader.
+The proper type discipline must be enforced by MonadC; strings/annotations in
+this repository cannot substitute for compiler-produced evidence.
+
+* Research: verified ideas to reuse
+
+** Quantitative Type Theory (QTT)
+
+Edwin Brady, /Idris 2: Quantitative Type Theory in Practice/, ECOOP 2021:
+https://drops.dagstuhl.de/storage/00lipics/lipics-vol194-ecoop2021/LIPIcs.ECOOP.2021.9/LIPIcs.ECOOP.2021.9.pdf
+
+Bindings can carry 0 (erased), 1 (exactly-once use), or unrestricted
+multiplicity. A compiler can use this to reject duplication of unique
+resource tokens, ensure that a frame borrow does not escape a scoped owner,
+and erase type-only evidence at runtime. HOWEVER, exactly-once occurrence
+is not the same as exclusive ownership when borrowed/shared capabilities have
+already escaped. For engine resources, additionally encode effect, lifetime
+and borrowing rules; never infer them from a raw C address.
+
+** Dynamic software updating and state migration
+
+Hayden et al., /Kitsune: Efficient, General-Purpose Dynamic Software Updating
+for C/, ACM TOPLAS 2014: https://doi.org/10.1145/2629460
+
+Kitsune separates update points and state migration. Obsidian needs a similar
+cooperative checkpoint, but with compiler-owned Monad images, not C globals
+silently reinterpreted as different typed layouts. Migrating a changed state
+type must be an explicit, separately verified function, with a failure path
+that leaves the old image and state intact.
+
+** JIT ownership and physical retirement
+
+LLVM ORCv2 design: https://llvm.org/docs/ORCv2.html
+LLVM ResourceTracker: https://llvm.org/doxygen/classllvm_1_1orc_1_1ResourceTracker.html
+
+Track each compiled image as a separate resource domain. Do not remove a code
+allocation until every callback/stack continuation and dependency referring to
+it has quiesced. Tracking an active C-side callback lease is necessary but NOT
+sufficient: MonadC itself must track closure roots and compiled-code ownership.
+An old code address may remain valid in CPU caches/threads after a symbol is
+rebound. Never treat symbol lookup or a C pointer swap as reclamation.
+
+** Versioned execution (BEAM comparison)
+
+Erlang's documented two-version hot-code model illustrates why a running frame
+may complete on old code while new invocations use new code. Its two-version
+limit is an implementation policy, not a universal law for game engines.
+Obsidian should use compiler-owned generations and bounded retired images.
+https://www.erlang.org/doc/system/code_loading.html
+
+* Current, concrete source implementation (Cycle 8)
+
+=src/monad/publication.[ch]= is an SDK-independent and executable host
+*policy*, not an alternative language runtime.
+
+- =ObsPublication= tracks {EMPTY, READY, LOADING, POISONED}, successful image
+  epochs, outstanding call leases, attempt/failure counts.
+- =obs_publication_begin_call/end_call= account for invocations of compiled
+  camera policies, Monad key closures, and =on-frame!= procedures.
+- =obs_publication_begin_legacy_load= refuses an in-place load while a
+  callback is active; =finish_legacy_load= poisons dispatch after failure.
+  No old code may be called until a later successful load.
+- =ObsImageContract= and =obs_publication_validate= validate compiler-authored
+  export type identities, quantity, lifetime, effect requirements, and
+  persistent-state layout. More permissive effects are rejected; incompatible
+  state requires a verified migration. Mismatches fail closed. These
+  descriptors are NOT YET PROVIDED by the real compiler embedding API.
+- New native Monad functions expose publication state as
+  =(reload-generation)=, =(reload-phase)=, =(reload-active-calls)=,
+  =(reload-load-count)=. =modules/obsidian/live-reload.mon= layers a small
+  pure Monad programming interface on those host capabilities.
+- =make test-native= includes deterministic seam tests + 50k transition fuzz.
+  =tests/monad/publication-boundary.mon= is a real embed-only integration
+  contract and remains gated on a working MonadC host test runner.
+
+These host policies do NOT create independent candidate images, undo foreign
+side effects, prove type schemes, or safely unload compiler code. As verified
+in Cycle 9 against =embed.tar(8).gz=, =monad_load_source= *does* atomically
+publish certified native registry generations and preserves the previously
+published native image on compilation rejection. This protects compiler-owned
+code publication, not engine-side mutation, state migration, or GPU resources.
+
+Cycle 10 composes the host call gate with =monad_read_begin= and
+=monad_read_begin_signature=. The returned compiler-owned generation is pinned
+across symbol lookup and invocation, then released on every exit path. See
+=src/monad/native_read.[ch]= and =docs/CYCLE10-REPORT.org=.
+
+* Required MonadC embedding ABI: end-state design
+
+** Compile candidate without publishing
+
+Compiler operation =prepare(source, imports, immutable-base-image)= returns a
+candidate with modules, code allocations, dependency hashes, type/QTT and
+effect identities, state migration hooks and diagnostics. Preparation must
+not mutate the running object space or invoke engine-side foreign setters.
+
+No shadow VM: the candidate is a compiler-owned image and resource tracker.
+
+** Compiler-derived interface and capability checks
+
+Each export and imported host capability needs a canonical compiler-origin
+identity (NOT syntax text): symbol, normalized type, effect row, multiplicity,
+lifetime, arity/ABI, calling convention, and code dependencies. Validate
+against prior published exports that can remain reachable. QTT and effects
+must be checked at the *compiler*, not only in the engine C gate.
+
+A script's =(frame)= is an ephemeral borrowed capability valid only inside
+one frame; its handle may not be persisted as an unrestricted global or
+reused next frame. =mesh= and =scene= are engine-owned references with
+stable IDs/generations, not raw pointers that scripts free. GPU resources
+have unique owner tokens, possibly multiple constrained read borrows, and
+fence-delayed destruction. Compiler-owned code and foreign-object lifetimes
+are separate: publishing a module does not invalidate the scene itself.
+
+** Transactional state migration
+
+The candidate sees a *private* copy/snapshot of migratable Monad game state.
+A migration =OldState -> Result NewState MigrationError= must be validated
+before commit, with no external C/GPU side effects during preview. Host calls
+inside migration are either pure reads or append to a deferred command buffer
+which can be discarded on abort. Engine-owned scenes are not deep-copied by
+default, but any mutations during prepare must be prohibited/deferred.
+
+** Commit at a game-loop safe point
+
+At a single owner-thread publication barrier: reject new entrances to old
+closures; wait for CPU leases/quiescence; commit the staged state; atomically
+switch stable name trampolines to the new code generation; rebind callbacks;
+transfer reachable/linear resources; restore dispatch. Old images are
+retired, NOT immediately unloaded. Commands may request reload but must
+never invoke compilation recursively inside event/frame/audio callbacks.
+
+For *off-thread compilation*, MonadC needs thread-safe snapshot/staging
+support. Do NOT use the current =monad_load_string= in another thread.
+
+** Retire with actual guarantees
+
+Retire native code only when MonadC proves no stack, closure, continuation,
+worker or compiler-internal dependency still references it. Release Vulkan
+textures/buffers only after their last queue submission completes (timeline
+semaphore/fence); audio state only after mixer work quiesces. GC/linear
+resource finalization must occur on the permitted owner/driver thread.
+
+* Compiler-interface discovery/implementation queue
+
+- [ ] Inspect the *actual currently installed* MonadC SDK for candidate
+      generation, canonical type identity, multiplicities, effect schemes,
+      image lifetime handles and error/rollback semantics.
+- [ ] Add or extend MonadC's public embedding ABI with staged image handles,
+      explicit validation, publication, rollback, and tracked retired images.
+- [ ] Reuse these same ABI semantics in Glemax and Obsidian. Do not maintain
+      independent hot-reload semantics for the two hosts.
+- [ ] Make MonadC publish QTT-authored typed host signatures and expose
+      positive/negative compiler tests for the frame/mesh/scene capabilities.
+- [ ] Stage state migration in a side-effect-free transactional domain.
+- [ ] Make a complete end-to-end test harness: good update, syntax/type/effect
+      failure, lifetime violation, rollback, in-flight callback, long running
+      task, GPU fence, repeated 1,000 updates, memory stability, and deterministic
+      state migration on incompatible layouts.
+- [ ] Profile prepare/publish/reclaim independently: p50/p95/p99 latency,
+      peak retained code bytes, frame-time spikes, CPU stalls, GPU queue idle.
+- [ ] Only after real SDK integration, add off-thread compilation of immutable
+      snapshots and dependency-aware imported-module watching.
+
+* Implementation guidance / non-goals
+
+- Do NOT make a fake compile-time QTT validator in C. Cycle 8's contract
+  checker only checks *already verified* compiler descriptors, and currently
+  has no SDK hook claiming they exist.
+- Do NOT manufacture type identities by hashing a pretty-printed signature
+  from untrusted scripts. Equality is a compiler-origin normalization problem.
+- Do NOT let engine hot reload free Scene/Mesh resources. Host capability
+  invalidation and device destruction are independent lifecycle mechanisms.
+- Do NOT call the current in-place source loader on a worker thread.
+- Do NOT claim that compiling every frame, reference counting every glyph, or
+  releasing old code immediately improves latency or safety.

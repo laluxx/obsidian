@@ -1,0 +1,48 @@
+#+TITLE: Obsidian Embedded Monad — Cycle 3 report
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Basis
+
+Cycle 2 full tree (Cycle 1 + verified incremental overlay). This delivery
+is an overlay, not a full Obsidian engine snapshot. Source changes preserve
+the C engine as the behavioral baseline.
+
+* Implemented
+
+- Shared =src/monad/foreign.[ch]= registration, identity and generation checks.
+- Borrowed mesh, SDF, glTF asset and renderer policy APIs under =src/monad/=.
+- Mesh/SDF/glTF structural epochs with bump sites on append/compact/remove/
+  scene reset. A runtime generation also participates in the host reference.
+- Limited writes through the existing mesh dirty and SDF upload facilities.
+- New Monad façade modules and one new Monad-only test module.
+- Root TODO remains the single active implementation queue.
+
+* Validation truth
+
+- Source-tree comparison and patch reapplication checks: performed at package time.
+- =make -n internal_build=: inspected; it is not a build or link test.
+- Strict C syntax tests with mock API declarations: only valid for parsing;
+  mocks cannot prove MonadC binary compatibility, Vulkan integration or
+  actual gameplay behavior.
+- Native Monad compiler tests and live foreign-object execution: NOT RUN.
+- Vulkan/Jolt/GLFW engine integration: NOT RUN (dependencies absent).
+- SDL/audio concurrency, glTF loader correctness, physics and renderer
+  performance are outside this incremental bridge verification.
+
+* Known limitations / next targets
+
+1. Prove the dynamic procedure API against the *real* sibling MonadC tree.
+2. Run =tests/monad/foreign-resources-contract.mon= inside an initialized
+   engine with stale-reference negative cases and safe cleanup fixtures.
+3. Introduce stable logical entity IDs and a host capability registry,
+   before changing these conservative, array-generation foreign handles.
+4. Move the remaining scattered registration tables under =foreign.c= after
+   integration verification, then add gameplay clock/frame and editor-command
+   capabilities before broad GPU mutation.
+5. Production hot reload remains synchronous and non-transactional.
+
+* Migration discipline
+
+No old handwritten engine modules removed. No C tests added this cycle.
+Only source implemented tasks are marked DONE; execution still gated in TODO.

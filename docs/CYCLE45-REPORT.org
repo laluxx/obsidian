@@ -1,0 +1,140 @@
+#+TITLE: Obsidian — Cycle 45: hierarchical, multi-primitive worker-owned cold glTF
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Provenance / scope
+
+Input: =obsidian.tar(2).gz= followed by the supplied Cycle 41 and the
+previously produced Cycles 42, 43, and 44 file-only overlays.
+Cycle 45 is another additive file-only delta. It modifies the real
+=src/assets/gltf_cook_static.c= production worker, its native contract
+fixture and controller test, the test Makefile, TODO and this report.
+
+The production async worker already invokes =obs_gltf_cook_static_cpu= on
+an OMDL cache miss. This cycle extends that same path; it does NOT reenter
+the legacy global =load_gltf= cooker, mutate a Scene from a worker, issue
+Vulkan calls off-thread, or replace owner-thread GPU fence polling.
+
+* Implemented
+
+** Hierarchy and scene membership
+
+- Accept multiple reachable scene roots, nested transform-only nodes,
+  independently instanced/reused source meshes, multiple meshes and multiple
+  triangle primitives per mesh. Multiple scene meshes preserve local/world
+  transformations and material factors independently.
+- Use =obs_node_topological_order= (the actual production linear-time node
+  topology routine) to validate ancestry, cycles, and parent-first order.
+- Validate selected-scene membership: reject disconnected/unreachable
+  source nodes rather than silently drawing them as extra roots.
+- Validate explicit parent/child consistency; avoid ordering/subtracting
+  unverified pointers when mapping node/mesh references to source indices.
+- Evaluate column-major affine local/world transforms in topological order,
+  including parent rotation and scale of child translations. The existing
+  cgltf helper's world routine does not provide the complete required affine
+  transform behavior. Reject nonfinite transform results.
+
+** Primitive ownership without altering OmdlNode ABI
+
+- =OmdlNode.mesh_idx= holds one mesh index; duplicating it for a multi-
+  primitive glTF source node loses all but the last primitive in the render
+  animation path. Preserve one primary primitive on its source node and
+  represent further primitives as independently owned, identity-local
+  synthetic children. Their world model matches the owning source node,
+  including animated-parent transform propagation once graph evaluation runs.
+- Instance expansion (two nodes reusing one source cgltf_mesh) produces
+  independent Mesh/metadata/geometry and a stable per-instance graph token.
+- Each mesh has private local indexed data, global eight-pool upload spans,
+  and per-mesh metadata offsets. Meshlet.vertex_offset / triangle_offset
+  remain *relative* to their mesh's offset; the shader applies the absolute
+  pool base exactly once. This corrects an offset hazard if the old single-
+  primitive packer were simply repeated for subsequent meshes.
+- Limits are explicit and checked across the WHOLE candidate: <=256 GPU
+  meshes, <=1024 source nodes, <=262144 vertices and <=262144 triangles,
+  <=16 MiB source and <=128 MiB declared decoded buffer bytes. On a failed
+  primitive, the entire privately owned candidate is destroyed.
+
+** Material parity and fail-closed extension admission
+
+- Default COLOR_0 is white; fragment shading multiplies the material base
+  factor, so copying baseColorFactor into every vertex would square the
+  material color. glTF's default metallic/roughness are both 1.0.
+- Continue rejecting skins, morphs, animations, textures/images, unsupported
+  attributes, sparse accessors, invalid indices, and unsupported materials.
+- Explicitly reject GPU-instanced nodes, material variants, Draco/meshopt
+  compressed geometry, unknown required extensions, and node camera/light
+  payloads. Do not pretend those paths are rendered when they aren't.
+
+* Verification (headless / native)
+
+| Gate | Cycle 45 result |
+|------+-----------------|
+| Real cgltf static cooker, indexed/unindexed triangles | PASS |
+| Reused meshes, two roots, nested/rotated parents | PASS |
+| Two primitives per mesh, synthetic graph children | PASS |
+| Six meshes with correct eight-stream offsets | PASS |
+| Material color default and factor separation | PASS |
+| Disconnected, cyclic, textured/instanced/variant/meshopt/required-ext rejection | PASS |
+| Four concurrent real producer threads | PASS |
+| Production async controller, three-mesh fake GPU completion + lease | PASS |
+| No publication before GPU ready, offset patching and transferred ownership | PASS |
+| Native producer ASan / UBSan / LeakSanitizer | PASS |
+| Controller ASan / UBSan / LeakSanitizer | PASS |
+| =make -j2 test= (all available headless targets) | PASS |
+| SHA-256 incremental pack verifier and clean multi-cycle replay | PASS |
+| Full real Vulkan/GLFW/MonadC/Jolt SDK binary | NOT RUN — dependencies unavailable |
+| Actual Vulkan validation layers/device/frame presentation | NOT RUN — no GPU environment |
+
+The real static producer is compiled with the real cgltf parser and actual
+=obs_node_topological_order=, but substitutes a structural renderer ABI test
+header. The async-controller test compiles the real production controller
+against a deterministic fake GPU. It verifies CPU correctness and state
+machine obligations, NOT actual driver execution or visual output.
+
+* Explicit limitations / risks
+
+- No texture-manifest or decoded-image support in the cold cooker. A textured
+  scene remains =NEEDS_COOK=, never a partial material publication.
+- The synthetic primitive-child mapping expands OmdlNode count vs source
+  glTF nodes. This path does not write an OMDL artifact, so cache format
+  compatibility is unaffected; full runtime/editor semantic parity and
+  foreign-node identity still require live integration tests.
+- No skins/morph deltas/animations/variant switching; physics/collider
+  attachment remains out of scope. Animating a hierarchy's initial static
+  transforms is possible through engine graph evaluation, but this is not
+  proof of glTF animation support.
+- Geometry is duplicated for source meshes instanced by several nodes,
+  trading CPU/GPU memory for correct ownership until shared geometry views
+  and per-instance GPU transforms have an explicit lifetime contract.
+- Sequential meshlet builder disables backface-cone rejection conservatively;
+  no optimizer-based spatial ordering or GPU mesh-shader visual profiling yet.
+- Separate external buffer files are not atomically snapshotted; mutation
+  during asynchronous decode remains a source integrity race.
+- Unused nodes in non-selected scenes currently force rejection, rather
+  than being silently rendered as extra roots. Other valid glTF features
+  also remain =NEEDS_COOK= by design.
+
+* Cycle 46 recommendation
+
+1. Add correctly owned, validated texture references and asynchronous
+   texture prepare/acquire/retire with retained leases for *cold* candidates.
+   Cover URI decoding, embedded images (bufferView/data), samplers, color
+   space/channel policy, per-mesh materials, cancellation and rollback.
+2. Replace repeated cold-cook/source-inventory parsing with a single
+   per-request immutable source snapshot. Enforce request CPU/time budgets.
+3. Refactor CPU meshlet building behind a quality-measured, independent
+   per-request geometry builder; compare output with meshoptimizer reference.
+4. Extend skinning/morph/animation graphs without process globals. Keep
+   strict NEEDS_COOK while any missing feature would change rendering.
+5. Run Vulkan validation-layer CI and real GPU cold/warm/cancellation tests,
+   visual comparisons, and frame latency p50/p95/p99 before certification.
+
+* Applying this incremental tar
+
+#+begin_src sh
+# From the parent directory of the existing Cycle 44 obsidian/ tree:
+tar -xzf obsidian-monad-cycle45-incremental-20261012.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE45-MANIFEST.sha256
+make -j2 test
+#+end_src

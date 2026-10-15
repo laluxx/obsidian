@@ -1,0 +1,14 @@
+Makefile
+TODO.org
+docs/CYCLE39-REPORT.org
+src/app/main.c
+src/assets/gltf_loader.c
+src/graphics/renderer.c
+src/graphics/renderer.h
+src/graphics/texture_refs.c
+src/graphics/texture_refs.h
+src/graphics/vulkan_setup.c
+src/scene/scene.c
+src/scene/scene.h
+tests/native/texture_refs.c
+tools/bench/texture_refs.c

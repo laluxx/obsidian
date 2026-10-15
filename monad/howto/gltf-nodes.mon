@@ -1,0 +1,50 @@
+;;; gltf-nodes.mon --- per-node offsets and instance metadata reads
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto gltf-nodes
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/gltf-nodes.mon ./obsidian
+Frame 1 lifts node 0 of instance 0 by one meter through the persistent
+script-owned offset overlay (survives animation, never touches the cached
+OMDL layout); frame 2 clears it. Metadata reads need no writes.
+Skeleton joint totals live in inspect-gltf-skeleton.mon.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (instance-snapshot inst)
+  (list (gltf-mesh-count inst)
+        (gltf-mesh-start inst)
+        (gltf-animation-count inst)
+        (gltf-joint-count inst)))
+
+(define (nodes-frame f)
+  (if (> (gltf-count (scene)) 0)
+      (begin
+        (instance-snapshot (gltf 0))
+        (if (= (frame-number f) 1)
+            (begin (gltf-node-offset! (gltf-node (gltf 0) 0) 0.0 1.0 0.0) True)
+            True)
+        (if (= (frame-number f) 2)
+            (begin (gltf-node-offset-clear! (gltf-node (gltf 0) 0)) True)
+            True)
+        (list (gltf-node-index (gltf-node (gltf 0) 0))
+              (gltf-node-name (gltf-node (gltf 0) 0))
+              (gltf-node-offset-x (gltf-node (gltf 0) 0)))
+        True)
+      True))
+
+(on-frame! nodes-frame)

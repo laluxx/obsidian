@@ -1,0 +1,23 @@
+;;; msdf-median-contract.mon --- Pure arithmetic contract, no host foreigns.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract msdf-median-contract
+
+;;; Commentary:
+
+msdf-median-contract.mon — Pure arithmetic contract, no host foreigns.
+The shader implements median(R,G,B)-0.5 in linear, normalized channels.
+These integer tests work with 0..255 encoded samples before normalization.
+
+;;; Code:
+(module Main)
+
+(define (obsidian-msdf-median [r : Int] [g : Int] [b : Int] -> Int)
+  (max (min r g) (min (max r g) b)))
+
+(define (obsidian-msdf-corner-contract [ignored : Int] -> Int)
+  (- (obsidian-msdf-median 230 20 225) 225))
+
+(define (obsidian-msdf-flat-contract [ignored : Int] -> Int)
+  (- (obsidian-msdf-median 42 42 42) 42))

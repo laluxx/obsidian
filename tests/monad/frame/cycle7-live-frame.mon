@@ -1,0 +1,31 @@
+;;; cycle7-live-frame.mon --- Cycle 7: this must run IN the engine frame harness, not merely be parsed.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests frame cycle7-live-frame
+
+;;; Commentary:
+
+Required host harness: load this source before beginFrame; run two complete
+frames, assert (frame-callback-calls) >= 2, and verify (frame) fails after endFrame.
+A failure inside callback must return nonzero from the harness.
+
+;;; Code:
+(define (with-frame [binding] . [body] -> Syntax)
+  (syntax-list (syntax-symbol "let")
+    (syntax-list (syntax-list binding (syntax-list (syntax-symbol "frame"))))
+    (syntax-list-tail (quote (begin . body)))))
+(define (verify-frame f)
+  (and (= (frame-number f) (frame-number (frame)))
+       (> (frame-number f) 0)
+       (>= (frame-width f) 0)
+       (>= (frame-height f) 0)
+       (>= (frame-delta f) 0)
+       (>= (frame-slot f) 0)
+       (with-frame current
+         (= (frame-number current) (frame-number f)))))
+(define (cycle7-live-tick f)
+  (if (verify-frame f)
+      True
+      (error "Cycle 7 live frame foreign-object contract failed")))
+(on-frame! cycle7-live-tick)

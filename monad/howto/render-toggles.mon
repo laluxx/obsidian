@@ -1,0 +1,37 @@
+;;; render-toggles.mon --- ambient occlusion, IBL and culling freeze switches
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto render-toggles
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/render-toggles.mon ./obsidian
+Frame 1 requests AO + IBL and freezes culling; the readers confirm the
+committed mode. Sample counts live in render-quality.mon.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (toggles-frame f)
+  (if (= (frame-number f) 1)
+      (begin
+        (render-ao! (render) True)
+        (render-ibl! (render) True)
+        (render-culling-frozen! (render) True)
+        (list (render-ao? (render))
+              (render-ibl? (render))
+              (render-culling-frozen? (render)))
+        True)
+      True))
+
+(on-frame! toggles-frame)

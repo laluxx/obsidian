@@ -1,0 +1,73 @@
+#+TITLE: Obsidian — Cycle 30: prepared geometry upload batches
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+This is a changed-files-only overlay on top of Cycle 29. The intended
+improvement is to avoid submitting early OMDL cache geometry streams while a
+later stream can still fail to read, stage, or meet capacity/alignment checks.
+
+* Implementation
+
+- =src/graphics/geometry_upload_batch.[ch]= provides a pure, checked eight-
+  stream copy plan, an owned CPU staging snapshot and explicit
+  =EMPTY -> PREPARED -> SUBMITTED -> RETIRED= state transitions.
+- Stream data is read completely before initiating any new Vulkan commands.
+  Failed input, failed allocation, illegal alignment or insufficient output
+  capacity do not advance scene offsets or publish a scene.
+- Meshlet triangle bytes acquire explicit four-byte padding and, when
+  necessary, an aligned destination base. Its GPU allocation end accounts for
+  the padding; the source layout is unchanged.
+- Cache-hit glTF upload uses =megaGeometryUploadCacheBatch= instead of six
+  independent upload helpers. The new implementation creates one dedicated
+  coherent staging buffer and issues up to eight =vkCmdCopyBuffer= regions in
+  one command buffer. It validates creation/allocation/binding/mapping,
+  submits with an explicit fence, waits for completion and only then publishes
+  global offsets and returned geometry bases.
+- A failed fence wait falls back to queue-idle verification. If completion
+  cannot be established, further geometry allocations are poisoned, and
+  staging/command/fence objects are quarantined rather than prematurely freed.
+  Cleanup attempts retirement following verified device idle. These objects
+  remain unretired on unrecoverable device loss.
+- All ordinary mega-geometry allocator entry points also honor the poison
+  state; it clears only after a successful device-idle shutdown.
+- Fresh glTF cooking still uses the Cycle 29 per-stream upload path. It is
+  capacity-preflighted but not yet covered by this prepared batch.
+
+* Verification
+
+- =make test-native=: PASS, including the 50,000-case batch planner/state test.
+- =make test=: PASS; embedded Monad and live-frame runner integration are
+  explicitly skipped because =OBSIDIAN_MONAD_TEST_RUNNER= and
+  =OBSIDIAN_MONAD_FRAME_RUNNER= are unset.
+- =make -j$(nproc)=: PASS, full engine compile/link against local Vulkan,
+  GLFW, Jolt and Monad SDK installations.
+- Actual editor startup on an NVIDIA GeForce RTX 3060 initialized Vulkan and
+  the editor. Interactive captures showed the M-x top-level palette and the
+  REPL window rendering help/input. This did not invoke the OMDL cache-hit
+  geometry path.
+- =tests/native/geometry_upload_batch.c=: full/short reads, exact payload
+  copying, zero padding, alignment, allocation/reservation failure atomicity,
+  submit/discard/fence state transitions, 50,000 deterministic randomized
+  layouts.
+- Reconstructed changed-file overlay and verified all packaged SHA-256 hashes.
+  Kept the newer current Makefile/TODO ledger and Cycle 29 loader cleanup
+  instead of restoring stale archive snapshots.
+
+* Limits and remaining work
+
+- Cache-hit GPU transfers remain synchronous: fence waiting can stall loading.
+  Asynchronous GPU publication needs render-graph synchronization, an
+  in-flight ownership table, and a scene publication checkpoint.
+- The new cached-transfer Vulkan path has not been exercised with a real
+  cached glTF asset or Vulkan validation/fault injection, so driver behavior
+  and end-to-end transaction correctness remain unproven.
+- Two copies of geometry exist transiently (CPU snapshot and mapped Vulkan
+  staging memory). Measure memory and throughput on real models before
+  optimizing or adding streaming chunks.
+- The failure-poison/quarantine path deliberately favors avoiding use-after-
+  submit over automatic device-loss recovery. Validate it with Vulkan fault
+  injection and validation layers.
+- Continue toward prepared transactions for fresh-cooked glTF as well as
+  OMDL, plus typed Monad asset-load status and true fence-aware async unload.

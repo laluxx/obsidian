@@ -1,0 +1,115 @@
+#+TITLE: Cycle 49 — Typed SDF scene-control vertical slice
+#+SUBTITLE: Real agent edits, stable session tickets, bounded scene/SSBO publication
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Source authority and scope
+
+Apply AFTER the user's full =obsidian.tar(3).gz= followed by Cycle 47 and
+Cycle 48 incremental overlays. This is a changed-files-only overlay, not
+an engine replacement. Inspected the C48 agent adapter, real scene lifecycle,
+scene-tree insertion, SDF renderer/SSBO, GPU frame submission, Monad host effect
+policy, existing foreign identities and Makefile, before introducing APIs.
+
+Cycle 49 is deliberately a *small complete slice*, not a fabricated general
+scene graph: an external native client creates an SDF sphere in the real scene,
+changes its position/material, queries the state, steps production frames and
+captures the rendered image using the Cycle 48 external C API. Engine and
+rendering ownership remain global. Actual Monad source publication occurs
+through the existing compiler implementation, not a new evaluator.
+
+* Production work
+
+** DONE C49-001 — Checked SDF creation and tree publication
+
+- =src/graphics/sdf.c= introduces =obs_sdf_add_checked=. It validates arguments,
+  available scene-tree slots, maximum GPU SSBO SDF count (1024), storage
+  consistency and allocation before publishing an SDF into the real
+  =scene.sdfs=, scene tree and existing GPU-visible renderer buffers.
+- Existing editor-facing =sdfs_add= remains source compatible as a wrapper.
+  It cannot write past the fixed SDF SSBO or dereference a failed scene-tree
+  insertion. The old silent void error result remains for compatibility.
+- =flushSdfSSBO= refuses impossible size/capacity combinations. The GPU buffer
+  remains the renderer's existing mapped per-flight-buffer SDF array; there is
+  no shadow rasterizer or fake scene.
+
+** DONE C49-002 — Typed, checked external scene mutation
+
+- =obsidian_agent.h= adds =ObsAgentSphere=, opaque =ObsAgentSdfRef= (monotone
+  nonreused 64-bit ticket), and create/query/set-position/set-material calls.
+  Inputs use finite bounded position/radius and finite [0,1] RGBA/PBR values.
+- The production =agent_engine.c= connects directly to the checked SDF append,
+  scene state, Monad runtime effect admission and real SSBO flush.
+- References resolve within the live agent instance. A scene init/cleanup bumps
+  =sdf_lifetime_epoch= and invalidates all tickets, including when indices get
+  reused. SDF additions can reallocate the array without invalidating older
+  tickets; ticket resolution does not retain dangling SDF pointers.
+- No partial changes on invalid input, expired handles, full scene tree, full
+  GPU SDF capacity, denied effect, or failed GPU quiescence. Same-thread and
+  reentrancy rules are inherited from Cycle 48.
+- Agent GPU mutations synchronously wait for =vkDeviceWaitIdle= BEFORE
+  changing mapped SDF SSBO data. This is intentionally conservative because
+  the legacy flush copies to all per-frame mapped GPU buffers and is not yet
+  fence-slot-driven. It is correct to reject a failed wait and preserve the
+  old state. It is *not* an optimized real-time scene update path.
+
+** DONE C49-003 — External consumer and native source-bound acceptance
+
+- =tests/integration/agent_client.c= includes only the public C header: starts
+  a real session, loads Monad, adds a sphere, updates/query-checks its state,
+  rejects a fabricated ticket, steps three frames, captures a fourth and checks
+  size and JSON success receipt. It is an actual external client test, gated
+  until a full Vulkan/MonadC SDK and working GPU driver are available.
+- =tests/native/agent_engine.c= compiles the ACTUAL production agent adapter,
+  ACTUAL =src/graphics/sdf.c= and actual atomic file writer with deterministic
+  external service seams. Covers capacity at 1024, tree exhaustion, bad
+  numeric arguments, effect rejection, GPU-idle failure before mutation,
+  state round trip, SSBO byte propagation, stale epoch, reentrant query,
+  second-instance, wrong-thread, module errors and output errors.
+- C23 strict warnings + C ABI syntax gate, ASan/UBSan/LSan and entire available
+  =make test= ran in the build container. This does NOT establish linked
+  Vulkan runtime success; a seam cannot prove shader pixels or QTT behavior.
+
+* Evidence ledger
+
+| Gate | Outcome |
+|------+---------|
+| Native agent + production SDF source, strict C23 | PASS |
+| Typed queries/mutations, limits, invalidation and failure injection | PASS |
+| Production SDF -> mapped mock per-flight buffer parity | PASS (native seam) |
+| ASan/UBSan/LSan agent + SDF sources | PASS |
+| =make test-agent-api-compile= | PASS |
+| Full available =make -j2 test= | PASS (unavailable integrations SKIP) |
+| Reproducible overlay archive SHA-256 validation | PASS |
+| Linked full Vulkan/MonadC/Jolt external client | NOT VERIFIED (SDK absent) |
+| GPU validation, image parity, p95/p99, device loss and soak | NOT VERIFIED |
+
+* Architecture limits and next slice
+
+- This is **typed outer C** scene control, not compiler-certified QTT imports
+  for arbitrary Monad programs. Monad already offers limited scene and SDF
+  foreign procedures, but sphere creation is not yet exposed through them.
+- The sphere representation is a translation-only inverse world transform.
+  Editing the inverse matrix via some other undocumented C path is outside
+  this value ABI. Tickets track agent-created SDFs, not arbitrary preexisting
+  editor SDFs. A legacy direct write that silently overwrites an SDF slot
+  without scene reset cannot be detected by ticket semantics.
+- No headless physics stepping: existing headless render still provides
+  delta time zero. Repeated frames are rendering, NOT guaranteed deterministic
+  simulation. Do not claim any real GPU rendering or timing until measured.
+- Next: per-frame fence-owned SDF buffer dirtiness instead of device-wide
+  idle waits; expose the checked construction capability to Monad with true
+  borrow/effect semantics; run actual native-agent->Monad->Vulkan scene
+  creation/capture with validation layers and structural pixel checks.
+
+* Apply
+
+#+begin_src sh
+# From the parent of obsidian/ on top of Cycles 47 then 48
+ tar -xzf obsidian-monad-cycle49-incremental-20261012.tar.gz
+ cd obsidian
+ sha256sum -c docs/CYCLE49-MANIFEST.sha256
+ make -j2 test
+ # On the machine with a complete graphics/compiler toolchain only:
+ make test-agent-runtime
+#+end_src

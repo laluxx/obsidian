@@ -1,0 +1,103 @@
+#+TITLE: Cycle 51 — Shared scene identities and CPU ray-selection across Monad and the agent
+#+SUBTITLE: Pick a compiled-Monad sphere in an external client, edit it, then render it
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Architectural problem addressed
+
+Cycle 50 created two distinct ticket registries for the same =Scene.sdfs=
+allocation: =sdf_sculpt.c= produced Monad Int64 IDs, while =agent_engine.c=
+owned a separate outer =ObsAgentSdfRef= array. The external client could
+observe spheres constructed by Monad but could not *address/mutate* them with
+a stable capability. Conversely, Monad could not directly refer to
+agent-created spheres. Neither system knew that both pointed into the same
+live scene. That identity duplication is removed rather than papered over by
+an index-to-pointer cast or another side registry.
+
+* Completed vertical slice
+
+** DONE OBS-C51-001 — One real scene-epoch sphere identity namespace
+- =obs_sculpt_ticket_at(index)= lazily assigns one nonreused positive Int64
+  ticket to a live sphere in the production =scene.sdfs=, regardless of which
+  API created it. =obs_sculpt_index(ticket)= validates the current scene epoch,
+  primitive type and storage bounds before a pointer can be used.
+- The outer agent creates and resolves tickets using this *same* registry.
+  Its former per-agent ticket array and independent counter are removed.
+- Capacity/ticket exhaustion is preflighted before fallible SDF appends.
+  Ordinary scene reallocation preserves IDs; scene init/cleanup expires them.
+- Host effect policy, owner thread and recursive-call admission are retained.
+  No raw GPU, Vulkan or C struct pointers escape to Monad or callers.
+
+** DONE OBS-C51-002 — Read-only primitive-sphere ray picking
+- The bounded CPU ray query works over the *real* production sphere array,
+  returns the closest nonnegative hit in caller-selected world units, accepts
+  non-unit directions, finds exit points for rays beginning within a sphere,
+  and returns a world position, outward normal and shared capability ticket.
+- Invalid direction/range, NaN/Inf, malformed scene storage, and unsupported
+  transforms fail closed. An explicit miss does not mutate the caller's
+  output. Ties choose the earliest stable SDF slot. The engine reports
+  =OBS_AGENT_NO_HIT= distinctly from =OBS_AGENT_INVALID_ARGUMENT=.
+- Only translation-only primitive spheres are supported. This is *not* the
+  exact smooth-union GPU SDF surface nor screen-space camera picking. Meshes,
+  glTF and arbitrary affine transforms are not falsely reported as hits.
+
+** DONE OBS-C51-003 — Both language and external client exercise picking
+- =(sdf-raycast ox oy oz dx dy dz max-distance)= is a dynamically registered
+  *read-only* Monad host operation; result is a live positive ticket, or zero
+  for a miss. No GPU write effect is requested for a query.
+- =modules/obsidian/sculpture.mon= constructs its five SDF spheres, uses a
+  spatial query during the running Monad frame callback to tint the selected
+  left sphere, and continues animating the central sphere.
+- The strict external client runs that actual module, ray-picks the Monad-
+  generated sphere through =obs_agent_scene_pick_ray=, validates a common
+  scene identity and prior Monad tint, sets PBR material using the returned
+  ticket, submits another Vulkan frame, checks retained state and produces
+  the normal PNG/RGBA/JSON artifacts. It rejects a uniform capture; this
+  heuristic is not a golden-image comparison.
+
+* Evidence ledger
+
+| Gate | Evidence |
+|------+----------|
+| Production SDF + shared ticket native tests | PASS |
+| Actual registered Monad host callback C source invoked by test | PASS |
+| Actual external C agent + scene source tests | PASS |
+| Invalid rays, inside ray, tangent, no hit, stale epoch, wrong phase | PASS |
+| Shared C-to-Monad and Monad-to-C capability interchange | PASS (native) |
+| Source-only standalone consumer compile C23 | PASS |
+| Full available =make -j2 test= | PASS; SDK/GPU runner SKIP |
+| ASan/UBSan/leak-detector for all three modified native test binaries | PASS |
+| Linked actual MonadC compilation + Vulkan shader/image verification | NOT VERIFIED |
+
+* Constraints, unresolved work
+
+This cycle adds zero new GPU data ownership paths: existing per-flight-slot
+fence-waited SDF uploads remain authoritative. The raycaster is O(N) bounded
+by 1,024 primitives, appropriate for inspection/prototyping, not a full
+BVH/hardware ray query. Tokens are **dynamic checked Int64 capabilities**,
+not compiler-authored QTT loans. Direct undocumented mutation of an occupied
+SDF slot without changing scene lifetime can violate the token identity
+contract and must be phased out. External call ownership remains single-
+instance, single-thread, non-reentrant.
+
+Run the unverified *strict* real GPU/compiler acceptance locally:
+
+#+begin_src sh
+make -j2 test
+make test-sculpture-runtime
+# inspect build/tests/sculpture.png and the JSON receipt
+#+end_src
+
+The headless driver and compiler toolchains were not available in this
+container, so no Vulkan pixel correctness, frame p95/p99, native-ABI or QTT
+certification is claimed. Future cycles should run this acceptance, add
+camera-coordinate picking or a spatial acceleration structure only when
+measured/needed, and replace dynamic integer loans with compiler-verified
+scene capabilities when MonadC exposes the necessary APIs.
+
+* Incremental handoff
+
+Apply Cycle 51 only after Cycles 47, 48, 49, and 50. The tar contains only
+changed/new files, its SHA-256 manifest and patch file list. Verify with
+=python3 tools/incremental_overlay.py verify ARCHIVE= and
+=sha256sum -c docs/CYCLE51-MANIFEST.sha256= from =obsidian/=.

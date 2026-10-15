@@ -1,0 +1,8 @@
+Makefile
+TODO.org
+docs/CYCLE67-PATCH-FILES.txt
+docs/CYCLE67-REPORT.org
+src/scene/sdf_inspector.c
+src/scene/sdf_inspector.h
+tests/native/sdf_undo_deep.c
+tests/native/sdf_undo_dependencies.c

@@ -1,0 +1,59 @@
+#+TITLE: Obsidian Cycle 66 — Recover undoability after history eviction
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Failure
+
+The SDF journal is bounded to 64 records, including undo-generated inverses.
+Undoing a 64-object atomic group appends 64 inverses and evicts the complete
+original group. Before Cycle 66, explicit redo restored every primitive but
+consumed the only remaining inverse group. The scene looked correct, while
+the next undo returned =OBS_SDF_EDIT_EMPTY=.
+
+* Recovery policy
+
+=obs_sdf_inspector_redo= still validates the entire inverse group before
+publishing any scene change. It now scans for the original root serials:
+
+- All roots retained: preserve existing behavior; reactivate the originals and
+  consume the inverse group.
+- No roots retained: restore from the complete inverse snapshots, consume
+  those inverses, then append a fresh original group in its original
+  per-object order, with new serials. The restored edit remains undoable.
+- Partial roots retained: return =OBS_SDF_EDIT_CONFLICT= before mutation.
+  Complete-group eviction makes this an invariant failure, not a valid
+  partial-recovery state.
+
+The recovered records use the existing 64-slot journal. No second history,
+old serial reuse, retained scene pointers, or new GPU synchronization path is
+introduced. This is an Obsidian bounded-scene-history policy, not a claim
+about GNU Emacs text undo internals.
+
+* Verification
+
+- Reproduced on unmodified Cycle 65: =make test-sdf-undo-adversarial= failed
+  after redo of the 64-object group because =undo_count= was zero.
+- Cycle 66 =make test-sdf-undo-adversarial= — PASS: 12 large-group undo/redo
+  pairs, selected-object recovery after eviction with 24 unrelated edits,
+  mapped frame-slot checks, and 144,000 deterministic mixed history
+  transitions.
+- Clang C23 AddressSanitizer/UndefinedBehaviorSanitizer with leak detection:
+  adversarial fixture PASS.
+- =make -j2 test= — PASS for the available suite. Monad integration and live
+  frame runners were skipped because their runner variables are unset.
+- =make src/scene/sdf_inspector.o= — PASS.
+- Real GLFW/Vulkan/MonadC integration remains gated.
+
+* Limits
+
+The history remains 64 records. A large undo can still evict unrelated older
+commands; this change guarantees only that an explicit redo does not discard
+the just-restored edit's undoability when its whole original group expired.
+The stress test is deterministic, not a formal proof of every possible
+history interleaving. No physical GPU or interactive editor acceptance is
+claimed.
+
+On a provisioned workstation, run =make test-sdf-undo-adversarial=,
+=make -j2 test=, =make test-sdf-viewport-runtime= and =make run=; verify
+repeated undo/redo of a full-capacity multi-object group and visible SDF
+output under Vulkan validation.

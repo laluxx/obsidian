@@ -1,0 +1,103 @@
+#+TITLE: Obsidian live reload — safety, implementation and final gates
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Implemented this cycle
+
+- File-watcher is opt-in with =OBSIDIAN_MONAD_WATCH=1= and a source path in
+  =OBSIDIAN_MONAD_BOOT=. It polls from the owner-thread event-loop safe point
+  (not a callback or background thread), at most once every 250ms.
+- A new disk revision must remain stable for >=350ms before recompilation;
+  changes during compilation trigger another reload on the next observation.
+- Explicit F5 reload remains available, including retrying failed modules.
+- Failed loads are acknowledged to avoid recompiling the same broken source
+  every frame; a further edit or F5 triggers another attempt.
+- Source-loader reads use =fstat= before/after plus exact read count and
+  reject any changed/partial file (not a proof against malicious same-size
+  writes or rapid editor-specific timestamp spoofing).
+- Compiled native function pointers are re-resolved after publication and
+  again immediately before use. A compiled function address is never
+  assumed to remain valid across a published module change.
+- Report maintains attempted and published counters and most recent
+  diagnostic; engine state remains separate from compiler state.
+
+* Unmet requirements for state-of-the-art reload
+
+- [ ] A compiler-generated *candidate native image* in a separate staging
+      arena and an explicit validated publish/commit/rollback API in MonadC.
+      In-place =monad_load_string= may mutate the current live image on
+      failure; Obsidian MUST NOT claim atomic transaction/rollback today.
+- [ ] ABI/type/effect compatibility validation, stable symbol trampolines,
+      dependency graph and live state migration across type-layout changes.
+- [ ] Quiescent-point reclamation for old code; no old stack/callback/GPU
+      command buffer may refer to a retired image.
+- [ ] VM/GC or QTT-resource preservation, foreign-handle registries and
+      state snapshots; scripts must never free engine-owned storage.
+- [ ] Deterministic rebind/rollback for Monad-held key functions, audio/game
+      callbacks and asynchronous work; no callbacks may enter retired code.
+- [ ] File-watcher integration for imported Monad modules (not just the root
+      boot file) and reproducible versioned compilation caches.
+- [ ] Concurrency-fault testing and benchmarks (compile latency, dropped
+      frames, p50/p95/p99, memory churn), 1k+ edit/reload cycles.
+
+* Run
+
+#+begin_src sh
+OBSIDIAN_MONAD_BOOT=monad/obsidian/live-demo.mon OBSIDIAN_MONAD_WATCH=1 ./obsidian
+#+end_src
+
+The engine currently recompiles synchronously at a safe point, so a long
+compile may pause a frame. A background compile is only safe once MonadC
+provides staging images and a publish protocol, NOT by calling its current
+runtime from an arbitrary thread.
+
+* Cycle 5 — embedded-image lifetime model
+
+- Use one persistent Monad runtime/object space created by =monad_open= and
+  =monad_object_space_create=. Obsidian does not create a second interpreter.
+- Compiler publication is invoked only at an engine owner-thread safe point.
+- Script-owned key closures are released *before* attempting a live-image
+  replacement. Native C actions survive. A replacement module must explicitly
+  rebind its commands. A failed reload leaves previous script bindings
+  disabled instead of calling closures that might point into retired code.
+- The optional native =Int -> Int= camera callback is disabled on load failure
+  and its symbol is resolved by name on each permitted key invocation.
+- Engine-owned scene/camera foreign references are not implicitly freed or
+  reconstructed when code is published. Their lifetimes remain tied to the
+  engine runtime generation, NOT to the compile-attempt count.
+- =obs-reload-{attempts,published,failed,last-us,p95-us,p99-us}= expose
+  bounded CPU-side publication telemetry to the existing Monad object space.
+  The rolling statistics are limited to 128 attempts and queried on demand.
+
+** Proposed QTT-aware publication contract (NOT implemented)
+
+Design requirements for MonadC's actual embedding API:
+
+1. =compile_candidate(source, imports, base_image) : Result Candidate Error=
+   without changing the currently published image.
+2. Candidate contains compiler-produced symbols, ABI/type identity, effects,
+   QTT multiplicity constraints, host capability requirements, and any
+   state-migration function's signature.
+3. =validate(candidate, LiveSchema)= checks continuity of required exports,
+   layout compatibility, capabilities/effects, and a *linear* owner token for
+   resources that must not be duplicated across generations.
+4. =commit(candidate, WorldLease)= is atomic at a cooperative engine safe
+   point; the old image is retired, not immediately freed.
+5. Code/closure retirement follows execution quiescence (and GPU fences for
+   assets referenced by submitted command buffers), not just a C pointer swap.
+6. State migrations run against versioned persistent game data, with failure
+   leaving the previous published image active. QTT constrains resource
+   ownership but cannot itself replace a transaction protocol or GPU fences.
+
+Signatures are architectural pseudocode, NOT the current Monad SDK, nor
+claimed legal Monad syntax. Do not implement a parallel hot-reload VM inside
+Obsidian. The corresponding compiler APIs must originate in MonadC, with
+Glemax and Obsidian exercising the same underlying semantics.
+
+** Still blocked
+
+- Stage/commit/rollback is not exposed by the verified embedding headers in
+  this provided archive. In-place =monad_load_string= cannot promise rollback.
+- Imported-module dependency tracking and versioned state migration are absent.
+- Key binding purge changes behavior intentionally; run real engine tests to
+  ensure scripts rebind and shutdown releases retained callbacks correctly.

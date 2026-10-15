@@ -1,0 +1,77 @@
+#+TITLE: Obsidian — Cycle 9: Compiler-owned REPL and QTT research
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Objective and source review
+
+Unlike previous inferred embedding boundaries, this cycle explicitly examined
+=embed.tar(8).gz= (public =monad.h=, =embed.h=, =compiler.h=, =qtt.h=,
+implementation README and TODO) and =qtt.tar(5).gz= (QTT research README).
+It corrected the important Cycle 8 assumption that a rejected source load
+necessarily corrupts an older native image. The uploaded SDK now documents
+atomically published native registry generations and coherent readers.
+
+* Implemented in Obsidian
+
+- Fixed-size Unicode-aware interactive model in =src/monad/repl_model.[ch]=.
+  Editor key/character callbacks only edit input or enqueue work.
+- =src/monad/repl_service.[ch]= acts as a client of the real embedding
+  facade, first =monad_prepare_source= then =obs_monad_load_source=. It owns
+  no shadow lexer/compiler/VM; it publishes definitions, displays diagnostic
+  codes/messages and counts resource-verified QTT evidence accurately.
+- =src/editor/repl_panel.[ch]= submits text through existing Vulkan 2D
+  renderer/glyph cache and uses a layered keymap with Unicode GLFW callback.
+  =C-c r= toggles; =RET= submits; =C-j= inserts newline;
+  =C-p/n= history; =C-g=/Escape closes.
+- =src/monad/runtime.c= pumps pending REPL work at a controlled engine
+  safe point rather than compiling in GLFW dispatch.
+- Native publication keeps previous callable generation/callbacks on a
+  rejected compiler source and disposes obsolete host script bindings only
+  after a verified successful replacement.
+- =modules/obsidian/interactive.mon= and
+  =tests/monad/repl-language-contract.mon= record the intended Monad side.
+- =Makefile= now compiles the headless REPL model test as part of =make test=;
+  =make test-repl-abi= verifies new client source against actual MonadC SDK
+  declarations when the SDK is present.
+
+* Measured and verified
+
+- Headless =make test-native=: PASS, including new Unicode/ring/history/input
+  bounds checks and atomic-generation failure recovery regression.
+- =make test-repl-abi MONADC_INCLUDE=/.../embed/include=: PASS against the
+  exact public headers from the uploaded embed archive.
+- Full engine compile/link, GPU rendering of REPL overlay, native Monad
+  source execution, Monaco-like GUI completion, QTT leak rejection: NOT RUN;
+  Vulkan/GLFW/FreeType SDK and full monadc tree are absent here.
+- Headless tests are CPU-only, not proof of GPU font latency or REPL FPS.
+
+* Scope boundaries
+
+- General expression read-eval-print does *not* yet exist. The REPL accepts
+  valid Monad source definitions, plus =:check <source>= for parse/HM
+  preflight. It never invents a result value. The uploaded compiler currently
+  certifies a scalar native ABI subset of the language.
+- Compilation is owner-thread synchronous at the checkpoint. There is no
+  frame-time guarantee during native compilation. Do not advertise a fully
+  smooth editor until worker candidate-compile + bounded commit are available.
+- MonadC atomic native publication is not a transaction for game-scene
+  writes, OS resources, input hooks or GPU state, which need engine rules.
+- Inferred QTT usage != resource-verified ownership; complete QTT coverage
+  is an explicit compiler research goal.
+
+* Hand-off for compiler implementation
+
+See =docs/MONADC-API-REQUESTS.org=; eleven requests arranged as P0/P1,
+with conceptual signatures, proof/semantics, and regression criteria. No
+requested symbol is called by C code until it exists in MonadC's public ABI.
+
+* Next cycle (proposed)
+
+1. Install/test with the real build and SDK; make the REPL overlay render and
+   compile a native Monad definition; record p50/p95/p99 CPU/GPU latency.
+2. Add compiler-owned independent candidate compile/commit (ABI-001—003).
+3. Create QTT-typed host imports and region-safe =Frame= borrows (ABI-004—006).
+4. Support expression evaluation, typed result formatting, completion and
+   dependency-aware incremental recompile (ABI-007—009).
+5. Persist editable REPL source/history through restart with an explicit,
+   bounded, versioned file contract (not done this cycle).

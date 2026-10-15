@@ -1,0 +1,67 @@
+#+TITLE: Obsidian — Runtime effect admission versus QTT proofs
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Two distinct authorities
+
+** MonadC/QTT (language authority)
+- Verifies multiplicity (erased / linear / unrestricted) and type identity.
+- Verifies imported effect capabilities and region-bound borrows when the
+  compiler supports those certified foreign-import contracts.
+- Owns compiled native images, their identities, generation-pinned function
+  calls, and resource reclamation semantics.
+
+** Obsidian (physical engine authority)
+- Defines actual scene, frame, renderer and keymap resource boundaries.
+- Ensures foreign calls run on the engine owner thread at allowed phases.
+- Refuses mutations while a new Monad source image is being loaded.
+- Stages callback registrations until the compiler reports native publication.
+- Never lets a borrowed Frame escape its live CPU frame interval by simply
+  treating C pointers as transferable Monad values.
+
+* Runtime policy table
+
+| Phase     | Read host state | Scene write | GPU/IO/audio |
+|-----------+-----------------+-------------+--------------|
+| EMPTY     | reject          | reject      | reject       |
+| LOADING   | admit           | reject      | reject       |
+| READY     | admit           | admit       | admit        |
+| POISONED  | reject          | reject      | reject       |
+
+All rows additionally require a live engine and correct owner thread.
+FRAME-scoped operations additionally require an active CPU frame. The
+=READY= row describes the *host checkpoint*, not general sandbox privilege;
+compiled code still needs actual QTT certification for a proof-based API.
+
+* Language surface
+
+- =(engine-mutable?)= — can the current owner-thread checkpoint accept a
+  write to engine-owned state?
+- =(engine-gpu-mutable?)= — can the current checkpoint accept a GPU-visible
+  host mutation? This is not a Vulkan command buffer and not proof of fence
+  completion.
+- =(mesh 0)= / =(node 0)= / =(frame)= — existing typed foreign references
+  retain their engine-owned lifetime checks.
+
+* Compiler API requirements to close the gap
+
+1. Compiler-authoritative signature descriptors for dynamic host procedures:
+   argument/return type IDs, effects, quantity, loan region and calling ABI.
+2. A verified candidate manifest with exact imported host capabilities so
+   Obsidian can reserve corresponding physical engine resources BEFORE a
+   publication commit.
+3. A candidate abort/commit protocol guaranteeing either old native image +
+   old host registrations OR new native image + fully installed registrations.
+4. A scoped borrow protocol for Frame, Scene and GPU resources that tracks
+   both QTT usage and real CPU/GPU completion; compile-time checking cannot
+   substitute for checking a Vulkan fence.
+
+These are requested semantics, NOT existing callable functions. See
+=docs/MONADC-API-REQUESTS.org= for the compiler-side handoff.
+
+The checked-in SDK headers confirm this boundary: =embed.h= dynamic procedure
+descriptors contain only names, arity, callback and context;
+=compiler.h= imports nominal foreign *types*, not callable host signatures;
+=qtt.h= reports analysis evidence but does not certify arbitrary host-import
+effects/loans; and =monad_load_source= still combines native compilation and
+publication. No engine-side name table is treated as a compiler proof.

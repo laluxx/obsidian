@@ -1,0 +1,116 @@
+;;; editor-keymaps-contract.mon --- Obsidian Monad module.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract editor-keymaps-contract
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+:TEST-ID tests.obsidian.editor-keymaps
+:TEST-CONTEXT obsidian editor command and keymap vocabulary
+:TEST-PURPOSE Monad source keeps global, transform, and modal editor routes stable.
+:TEST-EXPECT compile, run, all editor keymap policy assertions pass
+:TEST-TIER regression
+
+module Tests.Obsidian.EditorKeymaps
+  []
+
+;; These declarations are the compatibility contract for editor.mon.
+;; The headless engine fixture checks that the live keymap image matches them.
+define global-command-for-key :: String -> String
+  "g" -> "editor-start-grab-command"
+  "r" -> "editor-start-rotate-command"
+  "q" -> "gizmo-mode-rotate-command"
+  "f" -> "editor-frame-selected-command"
+  "C-h v" -> "editor-show-variables-command"
+  "C-h C-f" -> "editor-show-materials-command"
+  "C-x b" -> "editor-show-scene-buffers-command"
+  "C-x 5 2" -> "editor-frame-create-command"
+  "C-x 5 0" -> "editor-frame-close-command"
+  "C-x 5 b" -> "editor-open-frame-scene-buffers-command"
+  _   -> "unbound"
+
+define transform-command-for-key :: String -> String
+  "r" -> "editor-grab-rotate-command"
+  "g" -> "editor-grab-translate-command"
+  "x" -> "editor-grab-lock-x-command"
+  "0" -> "editor-grab-origin-command"
+  "1" -> "editor-grab-snap-1-command"
+  "2" -> "editor-grab-snap-2-command"
+  "C-g" -> "editor-grab-cancel-command"
+  "RET" -> "editor-grab-confirm-command"
+  _   -> "unbound"
+
+define modal-command-for-key :: String -> String
+  "repl:C-g" -> "repl-close-command"
+  "text:C-n" -> "text-next-line-command"
+  "vertico:C-n" -> "vertico-next-command"
+  "add-menu:C-n" -> "add-menu-next-command"
+  "animation:C-g" -> "animation-close-command"
+  _ -> "unbound"
+
+define panel-next-open-state :: Bool -> Bool
+  True -> False
+  False -> True
+
+define gizmo-mode-for-key :: String -> String
+  "q" -> "rotate"
+  "w" -> "translate"
+  "e" -> "scale"
+  _   -> "unchanged"
+
+define render-setting-next-state :: Bool -> Bool
+  True -> False
+  False -> True
+
+define add-menu-next-index :: Int -> Int -> Int
+  count selected -> (if (and (> count 0) (< selected (- count 1)))
+                         (+ selected 1)
+                         selected)
+
+define add-menu-previous-index :: Int -> Int
+  selected -> (if (> selected 0)
+                   (- selected 1)
+                   selected)
+
+tests
+  assert-eq (global-command-for-key "g") "editor-start-grab-command" "Top-level g begins a Monad-owned transform"
+  assert-eq (global-command-for-key "r") "editor-start-rotate-command" "Top-level r starts the rotate transform"
+  assert-eq (global-command-for-key "q") "gizmo-mode-rotate-command" "q selects the rotation gizmo"
+  assert-eq (global-command-for-key "f") "editor-frame-selected-command" "Top-level f frames the active scene selection"
+  assert-eq (global-command-for-key "C-h v") "editor-show-variables-command" "C-h v opens typed Monad variable help"
+  assert-eq (global-command-for-key "C-h C-f") "editor-show-materials-command" "C-h C-f opens the material browser"
+  assert-eq (global-command-for-key "C-x b") "editor-show-scene-buffers-command" "C-x b switches scene buffers"
+  assert-eq (global-command-for-key "C-x 5 2") "editor-frame-create-command" "C-x 5 2 creates an animated editor frame"
+  assert-eq (global-command-for-key "C-x 5 0") "editor-frame-close-command" "C-x 5 0 closes a non-primary frame"
+  assert-eq (global-command-for-key "C-x 5 b") "editor-open-frame-scene-buffers-command" "C-x 5 b selects a scene for a new frame"
+  assert-eq (transform-command-for-key "r") "editor-grab-rotate-command" "Transform-map r switches to rotation"
+  assert-eq (transform-command-for-key "g") "editor-grab-translate-command" "Transform-map g switches to translation"
+  assert-eq (transform-command-for-key "x") "editor-grab-lock-x-command" "Transform-map x constrains the current transform"
+  assert-eq (transform-command-for-key "0") "editor-grab-origin-command" "Transform-map zero commits the world-origin reset"
+  assert-eq (transform-command-for-key "1") "editor-grab-snap-1-command" "Transform-map one selects a one-meter translation grid"
+  assert-eq (transform-command-for-key "2") "editor-grab-snap-2-command" "Transform-map two selects a two-meter translation grid"
+  assert-eq (transform-command-for-key "C-g") "editor-grab-cancel-command" "Transform cancellation remains bound"
+  assert-eq (transform-command-for-key "RET") "editor-grab-confirm-command" "Transform confirmation remains bound"
+  assert-eq (modal-command-for-key "repl:C-g") "repl-close-command" "REPL modal map owns cancellation"
+  assert-eq (modal-command-for-key "text:C-n") "text-next-line-command" "Text map owns navigation"
+  assert-eq (modal-command-for-key "vertico:C-n") "vertico-next-command" "Vertico map owns candidate navigation"
+  assert-eq (modal-command-for-key "add-menu:C-n") "add-menu-next-command" "Add Menu map owns candidate navigation"
+  assert-eq (modal-command-for-key "animation:C-g") "animation-close-command" "Animation map owns close behavior"
+  assert-eq (global-command-for-key "x") "unbound" "Unknown global keys remain unbound in the contract"
+  assert-eq (panel-next-open-state True) False "Open panel selects closed state"
+  assert-eq (panel-next-open-state False) True "Closed panel selects open state"
+  assert-eq (gizmo-mode-for-key "q") "rotate" "q selects rotation gizmo mode"
+  assert-eq (gizmo-mode-for-key "w") "translate" "w selects translation gizmo mode"
+  assert-eq (gizmo-mode-for-key "e") "scale" "e selects scale gizmo mode"
+  assert-eq (gizmo-mode-for-key "x") "unchanged" "Other keys do not change gizmo mode"
+  assert-eq (render-setting-next-state True) False "Enabled render setting toggles off"
+  assert-eq (render-setting-next-state False) True "Disabled render setting toggles on"
+  assert-eq (add-menu-next-index 0 0) 0 "Empty Add Menu has no next selection"
+  assert-eq (add-menu-next-index 4 1) 2 "Add Menu next advances one candidate"
+  assert-eq (add-menu-next-index 4 3) 3 "Add Menu next stops at the last candidate"
+  assert-eq (add-menu-previous-index 0) 0 "Add Menu previous stops at the first candidate"
+  assert-eq (add-menu-previous-index 2) 1 "Add Menu previous moves one candidate"

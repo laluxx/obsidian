@@ -1,0 +1,40 @@
+;;; frame-telemetry.mon --- read frame clock/geometry, report dispatch health
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto frame-telemetry
+
+;;; Commentary:
+
+Run: OBSIDIAN_MONAD_BOOT=monad/howto/frame-telemetry.mon ./obsidian
+Status: DOCUMENTS INTENT. Frame callback hits the MONAD-C0004 gate; the
+read forms below are the exact health-reporting surface from live-reload.
+With OBSIDIAN_MONAD_PROFILE_FFI=1 the p95 buckets fill from real frames.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (describe-frame f)
+  (list (frame-number f)
+        (frame-delta f)
+        (frame-width f)
+        (frame-height f)))
+
+(define (frame-dispatch-health)
+  (list (dispatch-frame-calls)
+        (dispatch-frame-failures)
+        (dispatch-frame-guest-p95-ns)))
+
+(define (telemetry-frame f)
+  (begin (describe-frame f) True))
+
+(on-frame! telemetry-frame)

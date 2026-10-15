@@ -1,0 +1,18 @@
+Cycle 63 incremental patch files
+
+Makefile
+README.md
+TODO.org
+docs/CYCLE63-PATCH-FILES.txt
+docs/CYCLE63-REPORT.org
+docs/SDF-OBJECT-UNDO.org
+obsidian_agent.h
+src/app/agent_engine.c
+src/monad/sculpt_api.c
+src/platform/input.c
+src/scene/sdf_inspector.c
+src/scene/sdf_inspector.h
+tests/native/agent_engine.c
+tests/native/sculpt_api.c
+tests/native/sdf_sculpt.c
+tests/native/sdf_selective_undo.c

@@ -1,0 +1,106 @@
+#+TITLE: Obsidian Cycle 67 — Selective Undo Dependencies Across Nonmonotone Edits
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Scope and user-facing behavior
+
+This cycle hardens the EXISTING SDF scene inspector's selected-object undo.
+The editor shortcut, Monad binding, and external C entry point continue to call
+=obs_sdf_inspector_undo_selected=; the fix lives in the shared production
+journal, not in a duplicate model or new API.
+
+Selecting B and undoing an older atomic group A+B is safe only if that undo
+preserves the replay preconditions of newer active commands on A and B.
+Previously, selected undo checked only that CURRENT primitive states matched
+the older group's postimages. That check is necessary but insufficient for
+nonmonotone edit history.
+
+* Reproducible source bug
+
+1. A starts at x=0 and B at x=20.
+2. One atomic command moves A->1 and B->21.
+3. Two later committed commands move A->2 and then A->1.
+4. A third independent committed command moves C->41.
+5. Select B and request selected-object undo.
+
+The scene matches the earlier group postimages, but both newer A commands
+remain active. Undoing the latest A command afterward expects A=1 and instead
+encounters A=0. Numeric value equality does not certify temporal independence.
+
+* Production correction and invariants
+
+Before value preflight or publication, =invert_at= scans the retained bounded
+journal for newer ACTIVE ORIGINAL commands touching any ticket in the chosen
+group. If one exists, selected-object undo returns
+=OBS_SDF_EDIT_CONFLICT= without changing scene primitives, history, pending
+undo traversal, or GPU dirty state.
+
+- Dependencies include every member of the atomic group, not just the selected
+  ticket.
+- A numerical round trip in a newer command does not hide the dependency.
+- Newer commands on unrelated objects remain independent.
+- Newer originals already undone are inactive and do not block selected undo.
+- The guard applies only to selected-object out-of-order undo. Chronological
+  undo remains unchanged and retains its existing value preflight.
+- The scan is bounded O(64*64), with no allocation, new memory owner, or
+  renderer/network interaction. This is an interactive edit operation, not a
+  per-frame hot path.
+
+This does not implement Emacs selective text-region undo. Obsidian retains its
+scene-specific whole-command policy, bounded 64-record history, and inverse
+record behavior.
+
+* Verification
+
+- Regression reproduction: temporarily removing the dependency guard made
+  =make test-sdf-undo-dependencies= fail at the exact expected assertion:
+  selected undo accepted the returned-value collision. Restoring the guard
+  made the test pass.
+- =make test-sdf-undo-dependencies=: exact historical-value collision;
+  refusal leaves scene and undo count unchanged; chronological undo remains
+  traversable; undoing later dependencies makes the older group safe again;
+  unrelated edits survive; actual mapped SDF frame-slot data is checked.
+- The dependency fixture also runs 4,000 fresh scene epochs containing 2–30
+  primitive atomic groups, nonmonotone later edits, conflict rejection,
+  dependency removal through ordinary undo, selected undo, redo, and periodic
+  frame-slot copies.
+- =make test-sdf-undo-deep=: 72,000 deterministic mixed edits, groups,
+  command boundaries, selected undo, chronological undo, undo-only, redo, and
+  history clears over 1-, 4-, and 64-object scenes. Independent scene snapshots
+  verify failure atomicity and inverse/redo round trips.
+- Both targets are dependencies of =test-native=.
+- =make -j2 test= — PASS for the available suite. Monad integration and live
+  frame runners were skipped because their runner variables are unset.
+- =python3 tests/build-contract.py= — PASS.
+- Clang C23 AddressSanitizer/UndefinedBehaviorSanitizer with leak detection —
+  PASS for both focused fixtures.
+- The supplied Cycle 67 incremental archive passed its eight-member hash
+  verification. The locally updated overlay is separately repacked and
+  verified against the final changed-file list.
+- Independent replay onto a separate Cycle 66 checkout was not performed;
+  no separate baseline tree was available. Hash verification is not replay
+  evidence.
+
+* Limits
+
+The guard reasons about RETAINED command dependencies. It cannot infer an
+out-of-journal write that leaves no retained record and later restores the same
+exact primitive value. Existing live-state comparisons and owner/effect
+admission remain the defenses for direct writes. Deterministic 4,000/72,000
+case tests supplement, not replace, the Cycle 66 144,000-operation stress.
+
+This environment does not provide a linked Vulkan/GLFW/MonadC editor build,
+physical GPU validation, or a complete editor-input session. These are NOT
+VERIFIED. Source-only tests do not prove end-to-end physical rendering.
+
+* Commands
+
+#+begin_src sh
+make test-sdf-undo-dependencies
+make test-sdf-undo-deep
+make -j2 test
+python3 tests/build-contract.py
+# Workstation-only integration:
+make test-sdf-viewport-runtime
+make run
+#+end_src

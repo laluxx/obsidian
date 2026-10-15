@@ -1,0 +1,69 @@
+#+TITLE: Obsidian — Cycle 27: Untrusted OMDL cache boundary
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope and prerequisite
+
+Cycle 27 hardens the native glTF OMDL cache before GPU upload. Its loader
+expects Cycle 26's runtime-only node topology order, so Cycle 26 was merged first
+because this tree did not contain it. Both archive manifests were verified.
+Stale archived =Makefile= and =TODO.org= files were not overlaid on the live
+project.
+
+* Implemented
+
+- =src/assets/omdl_cache.[ch]= computes fixed section offsets with checked
+  64-bit arithmetic and verifies magic, required section strides, count
+  relationships, exact file size, and bounded reads/writes.
+- =gltf_loader.c= preflights mesh metadata and the complete serialized graph
+  before geometry upload: node hierarchy/references, skin and joint spans,
+  animation/channel spans, finite animation duration, and morph sample ranges.
+  Invalid cache layouts fall back to source glTF cooking.
+- Cache geometry uploads now check short reads and staging/buffer capacity
+  before copying. Failed uploads reject scene registration. Earlier GPU
+  reservations remain append-only and are not rolled back.
+- Cache writes go to an exclusive sibling temp file. Every section write,
+  flush, file fsync, close, and rename is checked; failure removes only the
+  temp file and keeps an existing published cache.
+- Kept current resize, Monad and renderer changes in =vulkan_setup.c=; only the
+  six OMDL =*AllocateFromFile= paths received Cycle 27 changes.
+- Kept the existing unconditional =cgltf_free(data)= at function exit. The
+  archive's cache-hit conditional would have leaked the parsed source document
+  on every successful cache hit; cached graph ownership does not retain it.
+
+* Verification performed here
+
+- =make test-native=: PASS, including the new =omdl_cache= suite (20,000
+  deterministic layouts, truncation/trailer/bad-header rejection, half-open
+  range boundaries and checked writes), Cycle 26 topology tests and existing
+  native tests.
+- =make test=: PASS, including available Monad SDK ABI checks. Live Monad and
+  frame/renderer integration suites explicitly SKIPPED because their runners
+  were not configured; test doubles do not count as live JIT execution.
+- =make -j$(nproc)=: PASS; the full =obsidian= executable linked with the new
+  cache module. Compiler emitted existing warnings; this was not a warning-free
+  build.
+- =timeout 10s env HOME=/tmp/obsidian-cycle27-smoke ./obsidian=: initialized
+  the NVIDIA RTX 3060 Vulkan renderer, buffers, pipelines, editor and Jolt,
+  then was stopped by the timeout. The run did not exercise glTF cache loading.
+- The codec test does not execute the OMDL loader or atomic replacement path.
+  A live glTF cache hit/miss scene and Vulkan validation run remain separate
+  integration gates.
+
+* Limits and risks
+
+1. OMDL remains raw native C struct layout. It is not portable across ABI,
+   endianness or compiler changes, and has no checksum or source-content/build
+   identity. Source files changed while retaining the same mesh/node/skin/
+   animation counts can still reuse stale cached geometry.
+2. The cache inode can be modified externally after preflight. This loader does
+   not take an immutable snapshot or lock the file.
+3. GPU mega-buffer offsets and already-submitted copies are append-only; failure
+   prevents scene registration but cannot reclaim consumed GPU space.
+4. File contents are streamed after the layout/metadata/graph checks. This
+   cycle does not independently scan every vertex/index/meshlet payload value
+   for semantic validity.
+5. The writer fsyncs the temp file but not its parent directory; atomic rename
+   is used, but crash durability of the directory entry is not guaranteed.
+6. Real Vulkan/Jolt glTF scene load, cache-hit/miss equivalence, skin/morph
+   playback, fault injection, and device validation were not exercised here.

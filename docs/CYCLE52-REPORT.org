@@ -1,0 +1,85 @@
+#+TITLE: Obsidian Cycle 52 — Shared live SDF inspector, undo and redo
+#+SUBTITLE: One Monad-created sphere, two editing interfaces, one scene-history transaction boundary
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Vertical slice delivered
+
+Cycle 51 already proved at the C-source seam that Monad and the external
+agent share stable scene-epoch sphere tickets. Cycle 52 makes that shared
+identity useful: a Monad frame raycasts a live sphere, selects it, tints it,
+undoes and redoes the tint. After five steps, the external agent inspects the
+same selected sphere and history, edits RGBA/PBR, undoes, verifies original
+color, redoes and captures the production Vulkan frame. No new GPU buffers,
+interpreter, duplicated scene or shadow model were introduced.
+
+* Ownership and correctness
+
+** DONE Shared fixed-storage editor core
+- =src/scene/sdf_inspector.[ch]= keeps 64 pre/post commands and one selection,
+  all keyed by the same nonreused scene ticket namespace as Cycle 51.
+- Values are float-quantized *before* publication, so repeated replay does
+  not accumulate double/float conversion drift. History reserves storage
+  statically: selection, edit, undo and redo do not allocate.
+- No-op edits do not consume history. Editing after undo truncates the redo
+  tail; when full the oldest command is evicted. Undo or redo verifies the
+  current object's entire supported PBR/position/radius snapshot and refuses
+  with a distinct conflict result if legacy/Monad code has changed it.
+- A scene lifetime-epoch transition invalidates selection and journal. A
+  stale or geometrically incompatible ticket fails closed. Direct legacy
+  writes bypass the journal by design and may cause a safe conflict.
+- Real edits use the existing CPU =scene.sdfs= and =flushSdfSSBO= with Cycle
+  50's deferred Vulkan flight-slot publication. No device-wide stall added.
+
+** DONE One checked language and outer agent editing surface
+- Outer =obsidian_agent.h= adds select, edit (field mask), selected, undo,
+  redo, history counts and explicit discard-history; no Vulkan/MonadC types
+  enter the public C ABI. Wrong-thread, recursive-call and mutating-effect
+  policy remain enforced.
+- =src/monad/sculpt_api.c= registers eight actual host callbacks; all mutating
+  operations check engine-thread and GPU effect admission. Read-only status
+  queries do not request GPU mutation privileges.
+- Only translation-only primitive spheres are supported. Radius changes,
+  mesh editing, physics rollback, serialized history and camera screen-pick
+  remain out of scope; this is not presented as an entire GUI inspector.
+
+* Verification ledger
+
+| Test | Evidence |
+|------+----------|
+| Real production SDF, ticket, journal code | C23 native PASS |
+| Real registered Monad host callback source | C23 native PASS |
+| Real outer agent façade C source | C23 native PASS |
+| Bounded history, redo branch, no-op, divergence and scene reset | native PASS |
+| Admission failures / stale tickets | native PASS |
+| Full available =make -j2 test= | PASS, SDK/driver gates SKIP |
+| Three changed native test bins with ASan/UBSan + leak detection | PASS |
+| Standalone C public consumer compile | PASS |
+| Actual compiled Monad + Vulkan screenshot/pixel match | NOT VERIFIED |
+
+* Strict runtime acceptance, not claimed as passed
+
+#+begin_src sh
+make -j2 test
+make test-sculpture-runtime
+# outputs: build/tests/sculpture.{rgba,json,png}
+#+end_src
+
+The strict test verifies that scene construction happens in the compiled
+Monad frame callback, the selection/history persists into the external C
+client, undo/redo preserves the correct material, and a nonuniform RGBA
+capture is returned by the real Vulkan frame. The latter is a heuristic, NOT
+a pixel-level golden image or a QTT proof. The SDK needed to build and run
+that linked test is not installed in the test container.
+
+* Next architecture ratchet
+
+Cycle 53 should validate the full linked GPU/MonadC runtime first. Then
+add projected screen-coordinate selection from the actual camera and a
+visible editor inspector panel driven by these same commands. A fixed-delta
+headless replay/scene serialization is a separate large vertical slice.
+
+* Incremental handoff
+
+Apply ONLY after Cycles 47 through 51; Cycle 52 is a changed-files-only
+overlay, packaged with =tools/incremental_overlay.py= and SHA-256 manifest.

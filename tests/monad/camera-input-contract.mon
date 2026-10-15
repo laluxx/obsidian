@@ -1,0 +1,34 @@
+;;; camera-input-contract.mon --- behavior contract for dynamic bridge.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract camera-input-contract
+
+;;; Commentary:
+
+REQUIRES: OBS-C005 validated dynamic interpreter/native-image link.
+Run on the owner thread, after the camera and input systems initialize.
+
+;;; Code:
+(define (obsidian-test-camera-translate-roundtrip)
+  (let* ([c (obs-current-camera)]
+         [x (obs-camera-x c)]
+         [y (obs-camera-y c)]
+         [z (obs-camera-z c)])
+    (obs-camera-translate c 0.5 0.0 0.0)
+    (let ([ok (= (obs-camera-x c) (+ x 0.5))])
+      (obs-camera-set-position c x y z)
+      ok)))
+
+(define (obsidian-test-camera-angles-roundtrip)
+  (let* ([c (obs-current-camera)]
+         [yaw (obs-camera-yaw c)]
+         [pitch (obs-camera-pitch c)])
+    (obs-camera-set-angles c yaw pitch)
+    (and (= yaw (obs-camera-yaw c))
+         (= pitch (obs-camera-pitch c)))))
+
+(define (obsidian-test-input-readable)
+  (and (>= (obs-frame-delta-ms) 0)
+       (>= (obs-cursor-x) -10000000.0)
+       (>= (obs-cursor-y) -10000000.0)))

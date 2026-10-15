@@ -1,0 +1,153 @@
+#+TITLE: Obsidian Cycle 50 — Monad procedural SDF sculpture
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* What executes
+
+The demo is NOT an interpreter, not a fake render path, and not an external C
+program building shapes. The outer C client initializes a headless Vulkan
+session, compiles/publishes =modules/obsidian/sculpture.mon= through the real
+engine-owned MonadC source-unit facade and advances six production headless
+frames. Its Monad =on-frame!= callback creates five spheres through the actual
+SDF scene tree and the fixed, mapped renderer SSBO, then animates one sphere.
+The C client uses only the public header to independently query real scene
+state and capture a raw RGBA image and JSON receipt.
+
+Run from the =obsidian/= root on a machine with the full native toolchain:
+
+#+begin_src sh
+make test-sculpture-runtime
+ls -lh build/tests/sculpture.rgba build/tests/sculpture.json build/tests/sculpture.png
+#+end_src
+
+* Real language boundary
+
+New dynamically registered procedures:
+
+| Monad form | Arity | Result | Physical effect |
+|------------+-------+--------+-----------------|
+| =(sdf-sphere! x y z radius r g b)= | 7 | positive Int64 ticket | write + GPU |
+| =(sdf-ticket index)= | 1 | positive Int64 ticket | read |
+| =(sdf-move! ticket x y z)= | 4 | nil | write + GPU |
+| =(sdf-tint! ticket r g b)= | 4 | nil | write + GPU |
+| =(sdf-x ticket)= | 1 | Float64 position | read |
+
+Finite float-range coordinates, positive finite radius, unit RGB, 1024
+primitives, two tree nodes per sphere and bounded allocations are validated
+before creation. Ticket assignments are process-monotone positive Int64 (no
+reuse) and revalidate the current scene lifetime on every lookup. A scene
+reset invalidates prior tickets. The sole scene is still a process-global
+singleton, there is no compiler-certified QTT import, and direct undocumented
+legacy mutation of occupied SDF slots is outside this token identity contract.
+
+Host admission checks on the owner thread reject scene writes while a
+compiler source image is being published. The =on-frame!= procedure is
+registered through the existing binding journal and executes after publication.
+Callbacks do not receive raw Vulkan handles, renderer pointers or ownership of
+SSBO memory. The new ticket is a checked host-level integer, not a static loan.
+
+* Production slot ownership
+
+=flushSdfSSBO= no longer memcpy-writes ALL flight buffers. It marks dirty
+flags; =obs_sdf_sync_frame(slot)= copies latest CPU scene SDFs ONLY into the
+mapped Vulkan SSBO for =slot=, and ONLY when the caller has successfully waited
+that slot's in-flight fence. =obs_begin_frame= + =obs_end_frame=, the legacy
+=drawFrame= entry and =obs_headless_render_frame= share this rule. The renderer
+already uses HOST_VISIBLE | HOST_COHERENT memory and indexes the SSBO by the
+same current-frame slot; no new GPU buffers or made-up driver abstractions.
+
+Mutations do not wait for =vkDeviceWaitIdle=. They are deferred until that
+flight slot is safe; another in-flight slot retains its previous data until
+its own completion. This removes the normal edit-path device-wide stall but
+is NOT an async transfer queue, timeline semaphore, or proven FPS optimization.
+The owner-thread + safe-point discipline remains necessary. GPU device loss,
+error recovery and actual driver testing remain open acceptance requirements.
+
+* Evidence
+
+- =build/tests/sdf-sculpt=: actual =sdf.c=, scene additions, token registry and
+  sculpt data operations; invalid values, append preservation, expired tickets,
+  deferred per-slot GPU-buffer parity and cross-slot isolation.
+- =build/tests/sculpt-api=: actual =sculpt_api.c= callbacks with a small SDK-
+  declaration seam; register and invoke effect-denied, create, move, query,
+  invalid coordinate and stale ticket cases. No real Monad runtime is mocked
+  into existence by these tests; they do not parse or compile a =.mon= file.
+- =build/tests/agent-engine=: actual Cycle 49 outer API, scene and SDF C source
+  with deterministic mocked engine/Vulkan owners; no device-wide idle on edits.
+- =tests/tooling/test_rgba_png.py=: independent PNG chunk, CRC, round-trip,
+  invalid dimension and atomic output preservation.
+- =make -j2 test=: full available native/tooling tests, but external compiler
+  and Vulkan acceptance are still SKIP.
+- =make test-sculpture-runtime=: strict unexecuted linked GPU/MonadC test in
+  this sandbox, not an assertion that it passed.
+
+* Next verification target
+
+On the actual development machine run =make test-sculpture-runtime= with
+Vulkan validation layers. Inspect the 640x360 =sculpture.png= visually and
+check for scene coverage beyond mere raw image length. Record CPU/GPU p95/p99
+and repeated scene reset/teardown behavior. If MonadC rejects the module or
+symbol contracts, fix that against its actual diagnostics rather than
+pretending the SDK-shaped C seam established source compatibility.
+
+* Cycle 51 — Spatial selection with cross-boundary identities
+
+The sculpture module now uses =sdf-raycast= to select the *left* sphere by a
+world-space ray on its second frame, tinting it through the ticket returned
+by the real host-side ray query. The outer example client independently casts
+at the same sphere, receives a stable =ObsAgentSdfRef= from the SAME ticket
+namespace, updates PBR fields and captures the subsequent Vulkan frame.
+The integration runner additionally rejects a completely uniform raw image.
+A nonuniform capture is only a smoke check; actual pixel/scene correctness
+still requires real driver validation and a known image workload.
+
+A native C source seam exercises both cross-boundary directions, stale
+references, denied writes, wrong-thread/reentrant attempts, finite bounds,
+inside/tangent/missed rays, and unchanged results on no-hit. Actual compiled
+MonadC execution and GPU pixel acceptance remain strict unrun gates. See
+=docs/CYCLE51-REPORT.org=.
+
+* Cycle 52 — Live selected-object inspector, reversible scene edits
+
+New dynamically registered Monad procedures on the *existing* object space:
+
+| Operation | Arity | Operation |
+|-----------+-------+-----------|
+| =(sdf-inspect-select! ticket)= | 1 | Select common checked sphere ticket; zero clears |
+| =(sdf-inspect-selected)= | 0 | Read selected ticket, or zero |
+| =(sdf-inspect-move! x y z)= | 3 | Change selected position and record undo |
+| =(sdf-inspect-tint! r g b)= | 3 | RGB change, retaining alpha and PBR |
+| =(sdf-inspect-undo!)= | 0 | Verify/reverse last applied edit |
+| =(sdf-inspect-redo!)= | 0 | Verify/reapply next undone edit |
+| =(sdf-inspect-undo-count)= | 0 | Read bounded undo depth |
+| =(sdf-inspect-redo-count)= | 0 | Read bounded redo depth |
+
+Unlike the legacy unjournaled setters, these operations write to the one
+engine-owned selection/history maintained by =src/scene/sdf_inspector.c=.
+There is no new interpreter and no separate renderer or SDF model. The
+sculpture demo now selects a sphere by =sdf-raycast= *from compiled Monad*,
+uses the inspector tint/undo/redo operations, and the strict C client checks
+and continues that exact history before capturing. History is process-local,
+scene-epoch checked, bounded to 64 commands, and conflict-safe; it does not
+constitute general typed editor/UI widgets or compiler-issued QTT resource
+proofs. Every GPU-visible edit retains Cycle 50's per-flight-slot SDF flush.
+
+* Cycle 53 — GNU Emacs-style history for scene properties
+
+The Cycle 52 redo-tail-truncating journal is superseded by self-inverting
+undo records, command boundaries, =undo-only= and =undo-redo=. Inspector
+edit groups are atomic across multiple spheres. The Monad additions are
+=sdf-inspect-undo-only!=, =sdf-inspect-undo-boundary!=,
+=sdf-inspect-begin-group!= and =sdf-inspect-end-group!=. Selection and ordinary
+inspector edits break a consecutive undo sequence. See
+=docs/EMACS-SCENE-UNDO.org= for semantics, runtime limits and testing.
+
+* Cycle 54 — Live scene preview in compiled Monad
+
+The frame-2 branch in =modules/obsidian/sculpture.mon= now begins a speculative
+inspector group, temporarily tints the left sphere, aborts the group, then
+performs its normal committed tint/undo/redo sequence. The external C client
+subsequently previews a second edit, cancels it, commits another edit, undoes
+that edit and captures the scene. Both paths share the same SDF journal and
+GPU-slot publisher. This remains a strict *unexecuted* GPU integration gate
+in this container: =make test-sculpture-runtime= requires MonadC/Vulkan.

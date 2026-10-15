@@ -1,0 +1,51 @@
+#+TITLE: Obsidian — Cycle 37: Owned OMDL texture manifest
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Intent
+
+Strengthen the private cache-hit scene preparation boundary before
+introducing asynchronous parser-owned =SceneLoad= transactions. Avoid creating
+another custom runtime or bypassing MonadC's QTT/foreign-lifetime rules.
+
+* Implementation
+
+** DONE Interned texture manifest with bounded path ownership
+
+New =src/scene/cache_textures.[ch]= owns bounded OMDL texture path strings,
+mesh/channel references, and resolved pool IDs. Open-address deduplication
+reduces repeated texture registration and avoids repeated allocation in the
+post-upload per-mesh material mapping.
+
+** DONE Wire to the existing synchronous OMDL cache-hit path
+
+The real cache-hit preparation stages all texture paths before geometry
+upload. Candidate rejection discards both staged meshes and their descriptor
+manifest. After checked geometry completion, registration is performed once
+per unique path and cached references are assigned to the prepared mesh batch.
+The native material-channel mapping remains unchanged. Cache misses continue
+to use the legacy cooked glTF path.
+
+** DONE Native regression coverage
+
+=make test= includes =tests/native/cache_textures.c=: 50,000 deterministic
+plans, deduplication, path bounds, copied-source lifetime, negative texture
+fallback, no pre-resolution side effects, reset and invalid-index cases.
+Selected tests run under AddressSanitizer and UndefinedBehaviorSanitizer.
+
+* Evidence and remaining work
+
+- Full available =make test=, including Monad SDK-backed native checks: PASS.
+- Focused cache manifest test: PASS; selected ASan/UBSan: PASS.
+- Clean Cycle 36 -> 37 overlay and manifest: PASS.
+- Full Vulkan/Jolt build and real Monad JIT execution: NOT VERIFIED.
+- This patch does NOT provide fully private texture/descriptors/physics
+  publication or asynchronous scene loading; see =docs/CACHE-TEXTURE-OWNERSHIP.org=.
+
+* Cycle 38 suggestion
+
+Introduce an explicitly owned texture/descriptor publication ticket that
+prepares residency without touching the live scene; coordinate scene-tree,
+texture, and physics activation with =ObsPendingSceneLoad= at one verified
+engine safe point. Benchmark the complete live loader on Vulkan before enabling
+concurrent loads by default.

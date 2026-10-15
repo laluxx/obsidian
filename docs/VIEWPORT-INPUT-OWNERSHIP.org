@@ -1,0 +1,78 @@
+#+TITLE: Obsidian viewport input ownership and pixel-space contract
+#+SUBTITLE: Cycle 56 — logical cursor coordinates, real render pixels and transaction recovery
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Production path
+
+The real GLFW editor receives pointer positions in logical *window* units.
+=glfwGetWindowSize= is the matching extent. The Vulkan render target uses
+=context.drawExtent= in drawable pixels; it may differ by a factor of 1.0,
+1.5, 2.0 or even nonuniform dimensions while resizing.
+
+=src/editor/viewport_coordinates.[ch]= is a dependency-free, checked mapper.
+=gizmo_cursor_ray= calls it before the existing =screen_to_ray=, which inverts
+the *actual* camera view-projection matrix. For SDF picks, only pixels inside
+the logical GLFW window are accepted. For a captured SDF drag, positions may
+fall outside the viewport: no clamping, hence no snapping when the pointer
+crosses the window boundary. The gesture plane is still fixed at press time.
+
+This specifically repairs the SDF viewport tool. Some older mesh gizmo UI
+calculations continue to use their historical coordinate conventions. Do not
+claim all legacy editor hit testing is now HiDPI-correct.
+
+The real swapchain-recreation path now preserves the near/far clip plane and
+applies the same projection Y correction as =camera_update=. Otherwise a resize
+could change the camera projection convention while a drag is live.
+
+* Captured pointer / undo ownership
+
+Once the SDF tool opens a gesture, it owns pointer movement and left-button
+release: UI hover/drag handlers do not also receive these events. On a release
+callback, the gesture commits exactly one coalesced command, as in Cycle 55.
+
+If GLFW loses the release callback, =update_input= now samples the real left
+button and reconciles the pending transaction. Focus loss *never commits*:
+it latches cancellation. If another writer modifies the same sphere while the
+preview is active, the cancellation fails closed and remains pending until the
+user restores a compatible state or invalidates the scene. A late mouse-up
+cannot turn a failed cancellation into a commit.
+
+No new scene graph, button-state mirror, C interpretation of Monad programs,
+or independent editor journal was introduced. The existing Cycle 53/54
+inspector undo and Cycle 50 per-frame SDF upload paths remain the owners.
+
+* Executed evidence
+
+- =make test-viewport-coordinates=: 1x, 1.5x, 2x, nonuniform scale, edges,
+  out-of-bounds capture, invalid dimensions and inputs, 4,000 resize cases.
+- =make test-sdf-viewport=: production SDF scene + inspector + mapper's owning
+  transaction core; event-loss recovery, focus cancellation, conflict retry,
+  as well as prior 4,000-sample coalescing and other gesture cases.
+- =make -j2 test=: BLOCKED by existing =tests/native/keymap_image.c=
+  initializers missing =KeyImageOperation.command_name= under =-Werror=; this
+  prevents the aggregate suite from completing.
+- Clang ASan/UBSan and leak detection: the two tests above pass.
+
+The new coordinate test executes the production mapper, not a rewritten
+formula. The gesture test executes the production inspector and SDF scene.
+The changed production translation units compile. The GLFW event adapter,
+cglm unprojection, swapchain projection and actual physical high-DPI
+Vulkan/MonadC display have not been behaviorally exercised.
+
+* Strict real desktop acceptance (still necessary)
+
+- On a 2x / fractional-content-scale display, launch =make run= with F8 SDF
+  tool; pick the same sphere at exactly its visual center before/after resize.
+- During drag, move the pointer outside the window and back. The object must
+  continue tracking the frozen drag plane without snapping at window edges.
+- Alt-tab during an edit: original transform is restored with no undo record.
+  Force an external writer conflict and verify focus loss never commits it.
+- Force a missed release callback, then poll input: exactly one commit and one
+  undo unit, with no stuck active gesture.
+- Check mesh gizmo OFF, editor panels, REPL focus, camera orientation and
+  Vulkan validation layers; profile p95/p99 under continuous dragging.
+- Run =make test-sdf-viewport-runtime= with a linked MonadC/Vulkan stack.
+
+Until those gates pass, this is a native-tested production integration change,
+NOT a certified graphical/GPU acceptance result.

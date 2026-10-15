@@ -1,0 +1,37 @@
+;;; cycle6-language-contract.mon --- Cycle 6: compact host-language object surface integration test.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract cycle6-language-contract
+
+;;; Commentary:
+
+MUST execute on owner thread with real embedded Monad object space.
+Every alias must preserve old obs-* pointer identity, arity, and errors.
+This file ends with an executable assertion, not only definitions.
+
+;;; Code:
+(define (cycle6-language-contract)
+  (let* ([world (scene)]
+         [view (camera)]
+         [policy (render)])
+    (and (= (node-count world) (obs-scene-node-count world))
+         (= (mesh-count world) (obs-scene-mesh-count world))
+         (= (sdf-count world) (obs-scene-sdf-count world))
+         (= (gltf-count world) (obs-scene-gltf-count world))
+         (= (camera-yaw view) (obs-camera-yaw view))
+         (Bool? (render-ao? policy))
+         (if (> (mesh-count world) 0)
+             (let* ([m (mesh 0)]
+                    [visible (mesh-visible? m)])
+               (mesh-visible! m visible)
+               (and (= (mesh-index m) (obs-mesh-index m))
+                    (= (mesh-name m) (obs-mesh-name m))
+                    (= visible (mesh-visible? m))))
+             True)
+         (if (> (sdf-count world) 0)
+             (= (sdf-type (sdf 0)) (obs-sdf-type (sdf 0)))
+             True))))
+(if (cycle6-language-contract)
+    True
+    (error "Cycle 6 language surface failed"))

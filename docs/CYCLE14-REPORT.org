@@ -1,0 +1,44 @@
+#+TITLE: Obsidian — Cycle 14 incremental delivery
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Implemented
+
+- =src/monad/source_stage.[ch]=: bounded pthread source staging, source
+  ownership transfer, strict file revision validation and ticket supersession.
+- =src/monad/publication_queue.[ch]=: readiness-masked fair dequeue; existing
+  callers retain the original =begin= API with all lanes enabled.
+- =src/monad/runtime.c=: watcher acknowledgement fixes, stage admission and
+  owner-thread source publication, stale source rejection, worker teardown,
+  synchronous fallback if no worker can start. Startup boot semantics remain.
+- =src/monad/hotreload_api.c= and =modules/obsidian/live-reload.mon=: short
+  read-only staging diagnostics, not compiler candidates.
+- =tests/native/source_stage.c=: executable real pthread/disk edge-case suite.
+- =tests/monad/source-staging-contract.mon=: live-integration-gated fixture.
+- Central =TODO.org= and the compiler API request handoff updated.
+
+* Validation
+
+- =make test-native=: PASS with headless native suite.
+- =make test MONADC_INCLUDE=...=: PASS against the uploaded public SDK headers,
+  with explicit SKIP for Vulkan and real embedded Monad runner.
+- =gcc -std=c23 -Wall -Wextra -Werror -pedantic -fsyntax-only= on the modified
+  Monad runtime/API using actual public MonadC headers and camera fixture: PASS.
+- ASan+UBSan stage test with leak detection: PASS.
+- Incremental overlay over the pristine Cycle 13 source and SHA-256 manifest:
+  verified at packaging time (results must be recorded, not assumed).
+- Full Vulkan engine build, live JIT, QTT-verified native candidate commits and
+  GPU frame p95/p99: NOT VERIFIED.
+
+* Important limitation
+
+Cycle 14 offloads source-file acquisition ONLY. Source compilation remains a
+blocking =monad_load_source= transaction at the engine safe point. It is
+incorrect to call this a fully asynchronous or QTT-transactional hot-reload
+implementation. A separate MonadC native-candidate API is still required.
+
+* Apply
+
+Extract the archive over the already patched Cycle 13 =obsidian/= directory.
+Verify =docs/CYCLE14-MANIFEST.sha256= and run =make test=. Nothing needs to be
+manually deleted.

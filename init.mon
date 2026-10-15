@@ -1,0 +1,9 @@
+;; =init.mon= — project-local live editor configuration.
+
+;; Loaded after the built-in editor commands and keymaps.
+;; Edit these values or add define-key forms to customize this project.
+
+(vertico-width    <- 640)
+(vertico-count    <- 10)
+(vertico-position <- 0)
+(vertico-cycle    <- 0)

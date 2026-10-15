@@ -1,0 +1,88 @@
+#+TITLE: Obsidian — Reversible live scene gestures
+#+SUBTITLE: Cycle 54 Emacs-inspired atomic property change groups
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Goal and upstream semantic reference
+
+A drag, color-picker scrub or multi-object inspector operation must be
+visible while the gesture is active, but =Escape= must restore the complete
+previous scene without consuming undo history. Accepting the gesture must
+produce exactly one ordinary Emacs-like undo command.
+
+Emacs documents =atomic-change-group=, =prepare-change-group=,
+=activate-change-group=, =accept-change-group=, =cancel-change-group= and
+=undo-amalgamate-change-group=: see
+https://www.gnu.org/software/emacs/manual/html_node/elisp/Atomic-Changes.html.
+The key behavioral inspiration is explicit *accept versus cancel* with rollback
+on failure. The C scene implementation is not a port of GNU Emacs undo-list
+cons cells, does not implement nested group handles, and does not claim
+Emacs-equivalent text-buffer semantics.
+
+* Vertical slice and production wiring
+
+1. An external client or a compiled Monad callback calls =begin-group!=.
+2. The same =sdf_inspector= edits update =scene.sdfs= and mark the existing
+   renderer SDF frame-slot SSBO dirty. This is a REAL live preview.
+3. Preview =SdfCommand= records are kept in a separate bounded static staging
+   array, *not* the committed 64-record inverse history.
+4. =end-group!= checks every final object still has the expected preview
+   state, then commits all staged records with one shared group identity.
+5. =abort-group!= checks all staged final states first, then publishes the
+   original values in reverse edit order. No undo records were added; there
+   is no historical branch to repair after a successful cancellation.
+6. Invalid/stale/unexpected live data blocks either operation, without
+   overwriting an external change. The group remains open for recovery.
+7. Commit and abort are single-owner operations; they cannot interleave with
+   renderer or other host edits on the owning thread.
+
+The production sources are =src/scene/sdf_inspector.[ch]=,
+=src/monad/sculpt_api.c=, =src/app/agent_engine.c= and the preexisting
+=src/graphics/sdf.c= flight-slot GPU publisher. There is no second scene,
+C interpreter, global GPU idle operation, or renderer-side undo buffer.
+
+* Public surface
+
+| Operation | External C | Compiled Monad |
+|-----------+------------+----------------|
+| Open preview | =obs_agent_scene_begin_group= | =(sdf-inspect-begin-group!)= |
+| Apply preview | =obs_agent_scene_edit_selected= | =(sdf-inspect-move! ...)= / =(sdf-inspect-tint! ...)= |
+| Accept (1 undo) | =obs_agent_scene_end_group= | =(sdf-inspect-end-group!)= |
+| Cancel (no undo) | =obs_agent_scene_abort_group= | =(sdf-inspect-abort-group!)= |
+
+* Invariants, limitations and failure policy
+
+- Max 64 *actual* preview changes, including repeated edits of the same
+  sphere. A no-op consumes no slot. The 65th real change returns a resource
+  limit before modifying the SDF CPU state or GPU dirty flags.
+- Group nesting is rejected. A group does not cover entity creation/removal,
+  animation state, physics, arbitrary mesh geometry, or compiler state.
+- A conflicting direct/legacy write during preview makes commit and cancel
+  fail closed. This is deliberately *not* a silent force-rollback. Restore the
+  expected preview values or reset the scene to resolve the conflict.
+- =discard_history= refuses while a group is active, preventing orphaned
+  uncommitted changes. Scene epoch reset invalidates the entire group.
+- The bounded committed journal now evicts *whole oldest groups* when full,
+  never a fragment of an earlier multi-object command. Inverse records count
+  against the same 64-record capacity; long undo sequences can truncate
+  older history, as before. No unbounded allocations are introduced.
+- All state lives in the engine's current single global scene and owner
+  thread; no concurrent multi-world sessions are supported.
+- Publication uses the existing deferred, per-fence SDF slot synchronization.
+  No claim is made about Vulkan validation or measured real-GPU performance.
+
+* Acceptance tests
+
+- =make test-scene-gesture=: production SDF source: multi-object preview,
+  cancellation, committed group undo, undo/redo, no-op slot behavior,
+  overflow refusal, conflicting external mutation, scene epoch reset,
+  whole-group eviction, and *both* pre-commit preview and post-abort SSBO-slot
+  source synchronization.
+- =make test=: the native test is part of the main test graph; real embedded
+  Monad callback source and public external agent facade are also tested.
+- Build native tests with =-fsanitize=address,undefined= + leak detection;
+  see =docs/CYCLE54-REPORT.org= for the observed results.
+- =make test-sculpture-runtime=: a strict, currently UNRUN full integration
+  test: compile =sculpture.mon= using the installed MonadC library, exercise
+  the public agent's live preview, submit one Vulkan frame *before abort*,
+  cancel, commit another edit, undo it, and render/verify Vulkan pixels.

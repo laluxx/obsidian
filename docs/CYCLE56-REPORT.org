@@ -1,0 +1,85 @@
+#+TITLE: Obsidian Cycle 56 — HiDPI viewport and captured input transaction
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Vertical slice
+
+=real GLFW mouse -> checked window-to-render coordinate conversion -> actual
+camera ray -> existing scene SDF picking -> coalesced inspector drag ->
+missing-release/focus-loss recovery -> Emacs-like undo/redo=.
+
+Cycle 55's complete interaction failed to account for GLFW logical window
+coordinates versus Vulkan drawable pixels. Cycle 56 repairs that boundary in
+the actual gizmo, plus a resize projection inconsistency and lost-event
+transaction lifetime. Edits still use the real SDF scene and post-fence
+SSBO publication, with no alternate editor representation.
+
+* Implemented
+
+- Checked =src/editor/viewport_coordinates.[ch]=: exact non-integer scale,
+  dynamic sizes, invalid-coordinate rejection and unbounded pointer capture.
+- =gizmo_screen_ray=: uses drawable-pixel coordinates for picks; active
+  =gizmo_mouse_move= uses the same projection with captured offscreen rays.
+- SDF pointer capture bypasses duplicate UI mouse-motion and button-release
+  handling while a transaction is active.
+- GLFW button polling commits a preview if the release callback is missed;
+  focus loss requests an irreversible cancellation intent (conflicts fail closed).
+- Swapchain recreation uses the same Vulkan Y correction and camera near/far
+  values as =camera_update=, instead of silently rebuilding a mismatched view.
+- Executable coordinate mapper tests and pointer-loss/focus tests integrated
+  into the default =make test-native= and =make test=.
+
+* Verification, limits and reproducibility
+
+| Gate | Result |
+|------+--------|
+| =make test-viewport-coordinates= | PASS (4,000 dynamic resize/scaling cases) |
+| =make test-sdf-viewport= | PASS (real inspector/scene source and recovery) |
+| =make -j2 test= | FAIL: keymap test initializers omit =KeyImageOperation.command_name= under =-Werror= |
+| Clang ASan/UBSan/leak | PASS (both focused sources) |
+| =make test-sdf-viewport-runtime= | NOT RUN (Vulkan/MonadC SDK absent) |
+| Production viewport, gizmo, input and swapchain objects | PASS compile; display events remain unverified |
+| Real GLFW mouse behavior and physical display | NOT VERIFIED |
+
+The mapper's native tests establish its contract; they do not establish the
+full cglm camera math, actual OS event delivery, or physical framebuffer
+pixels. The camera resize patch is a source-audited integration change,
+not a substitute for live Vulkan validation. See
+=docs/VIEWPORT-INPUT-OWNERSHIP.org= for limitations and manual acceptance.
+
+* Post-application audit
+
+- The Cycle 56 viewport transaction API now reconciles a missing left-button
+  release and latches cancellation after focus loss, so a late release cannot
+  turn a failed cancel into a commit.
+- The Cycle 55 malformed-ray regression and fail-closed behavior were carried
+  forward. Native test reproduces malformed input after a valid preview and
+  confirms release stays open until cancellation.
+- The current Makefile contains local Monad-link and editor-keymap targets
+  absent from the archive. It was preserved; Cycle 56 coordinate tests were
+  merged into its native suite rather than replacing it.
+- The current gizmo and Vulkan setup contain local live-editor and geometry
+  buffer changes absent from the archive. Those were preserved while merging
+  the Cycle 56 HiDPI ray path and corrected swapchain projection.
+- The available workspace still lacks Cycle 48, so the documented Cycle
+  47–55 base sequence cannot be independently confirmed.
+- The archive verifier passed all 15 members. Selective file merging and the
+  viewport regression/history corrections mean the archive manifest no longer
+  describes the corrected workspace.
+
+In the current workspace (Cycle 48 archive unavailable):
+
+#+begin_src sh
+python3 tools/incremental_overlay.py verify ../obsidian-monad-cycle56-incremental-20261012.tar.gz
+make test-viewport-coordinates test-sdf-viewport
+# Currently blocked by the keymap-image initializer errors above:
+make -j2 test
+# Requires a live Vulkan/MonadC host:
+make test-sdf-viewport-runtime
+make run
+#+end_src
+
+The repository's =tools/incremental_overlay.py= creates a reproducible
+changed-files-only tar, patch list and SHA-256 manifest. The delivered archive
+was verified before application; its manifest is not an integrity check for
+the manually merged and corrected workspace described above.

@@ -1,0 +1,28 @@
+;;; cycle6-macro-contract.mon --- Cycle 6 Syntax -> Syntax test based on Glemax's native subr.mon idiom.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract cycle6-macro-contract
+
+;;; Commentary:
+
+Host runner must provide scene/mesh dynamic procedures in the object space.
+
+;;; Code:
+(define (with-mesh [binding] [index] . [body] -> Syntax)
+  (syntax-list
+    (syntax-symbol "let")
+    (syntax-list
+      (syntax-list binding (syntax-list (syntax-symbol "mesh") index)))
+    (syntax-list-tail (quote (begin . body)))))
+
+(define (cycle6-macro-contract)
+  (let ([world (scene)])
+    (if (> (mesh-count world) 0)
+        (with-mesh m 0
+          (and (= (mesh-index m) 0)
+               (String? (mesh-name m))))
+        True)))
+(if (cycle6-macro-contract)
+    True
+    (error "Cycle 6 with-mesh macro failed"))

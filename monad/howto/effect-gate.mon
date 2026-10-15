@@ -1,0 +1,33 @@
+;;; effect-gate.mon --- branch on host mutation readiness before touching state
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto effect-gate
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/effect-gate.mon ./obsidian
+engine-mutable? is False during image publication and True inside an
+active callback. This is host admission policy, not a QTT certificate:
+reads are always safe, writes must wait for True.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (gated-frame f)
+  (if (engine-mutable?)
+      (begin
+        (camera-move! (camera) (* 0.1 (frame-delta f)) 0.0 0.0)
+        True)
+      (list (engine-mutable?) (engine-gpu-mutable?))))
+
+(on-frame! gated-frame)

@@ -1,0 +1,77 @@
+#+TITLE: Obsidian Cycle 55 — Real viewport transactional SDF drag
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Production source path
+
+=GLFW input -> editor UI ownership -> production gizmo camera unprojection ->
+shared SDF raycast/ticket -> Cycle 54 preview transaction -> coalesced one-record
+motion -> real scene.sdfs -> deferred post-fence SDF SSBO -> commit/cancel ->
+Cycle 53 Emacs-like inverse journal=.
+
+Files are =src/editor/sdf_viewport.[ch]=, =src/editor/gizmo.[ch]=,
+=src/platform/input.c=, =src/scene/sdf_inspector.[ch]=, and
+=src/scene/sdf_sculpt.[ch]=. No parallel scene, new engine loop or C script
+interpreter was created. F8 opt-in deliberately preserves ordinary editor
+behavior and compiled Monad remains the original scene-construction owner.
+
+* Observed tests
+
+| Gate | Result |
+|------+--------|
+| =make test-sdf-viewport= | PASS: real SDF modules and 4,000 coalesced drag samples |
+| =make -j2 test= | FAIL: keymap test positional initializers omit =KeyImageOperation.command_name= under =-Werror= |
+| ASan/UBSan/leak test, viewport/native scene stack | PASS |
+| Strict external runtime fixture =-fsyntax-only= | PASS C23 |
+| Production viewport, gizmo and input objects | PASS compile; mouse-event behavior remains unverified |
+| Real =make test-sdf-viewport-runtime= | NOT VERIFIED: live MonadC/Vulkan runtime not exercised |
+| Actual Emacs ERT cross-check | PASS: 4/4 tests |
+
+The native fixture additionally covers gesture cancellation, reversible
+commit, external modification refusal, reset, alternate object tickets,
+invalid input and repeated sessions; two GPU flight-slot copies run through
+actual =src/graphics/sdf.c= on test-owned mapped memory. These checks do not
+prove GPU presentation or shader pixels.
+
+* Post-application audit
+
+- A malformed non-finite ray after a successful preview originally left the
+  gesture status unchanged, allowing release to commit the preceding preview.
+  A regression now proves release stays open/refuses commit and cancellation
+  restores the initial scene; the viewport core marks malformed rays invalid.
+- The Cycle 55 SDF journal overlay did not retain the audited Cycle 53
+  undo-of-inverse pending-index fix. That fix was reapplied; the Emacs-style
+  scene undo regression passes.
+- Cycle 55's archived =Makefile= would have removed the current local Monad
+  link/include configuration and editor-keymap acceptance targets. It was
+  excluded from extraction; Cycle 55's viewport target, native prerequisite,
+  and runtime-fixture syntax check were merged into the existing Makefile.
+- The current =src/editor/gizmo.c= contains additional =live_editor.h= and
+  registered-action changes absent from the archive; these were preserved.
+  The Cycle 55 gizmo object still compiles.
+- =src/editor/editor.h= now declares =editor_wants_mouse= for the new input
+  route; this resolved the production input-object compile error.
+- The available workspace still lacks the Cycle 48 archive, so the
+  documented Cycle 47–54 base sequence cannot be independently confirmed.
+- The archive verifier passed all 17 members before extraction. The merged
+  Makefile and subsequent viewport/undo audit fixes mean the original
+  manifest does not describe the corrected current workspace.
+
+* Apply and acceptance commands
+
+Apply Cycle 55 over Cycle 54 at the =obsidian/= parent directory. The archive
+contains only files modified or added in this cycle, with a deterministic
+SHA-256 manifest and explicit file list. From inside the resulting tree:
+
+#+begin_src sh
+sha256sum -c docs/CYCLE55-MANIFEST.sha256
+make test-sdf-viewport
+make -j2 test
+# Requires the complete SDK, compiler, driver and executable environment:
+make test-sdf-viewport-runtime
+make run
+#+end_src
+
+See =docs/SDF-VIEWPORT.org= for exact input behavior, failure policy, and
+manual desktop acceptance requirements. Do not report real Vulkan or MonadC
+acceptance from the standalone headless C tests.

@@ -1,0 +1,77 @@
+#+TITLE: Obsidian Cycle 54 — Live transactional scene gestures
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Architectural result
+
+A production-connected, cancellable multi-object SDF inspector gesture:
+- real renderer-backed preview, separated from committed Emacs-like undo;
+- explicit =begin= / =end= / =abort= exposed to external C and compiled Monad;
+- cancellation and commit preflight entire final live state before mutation;
+- accepted group becomes one Emacs-like undo unit, even across scene objects;
+- abort preserves previous committed history, including prior redo inverses;
+- 64-preview cap refuses overflow *before* publication and never truncates an
+  active speculative edit; no-op previews are free;
+- full-group oldest-history eviction (no partial multi-edit command);
+- retained scene epoch, stale tickets and owner/effect admission constraints.
+
+See =docs/SCENE-GESTURES.org= and the GNU Emacs Lisp manual Atomic Changes.
+The real =modules/obsidian/sculpture.mon= demonstrates a language-created,
+cancelled live tint before its committed on-frame tint/undo/redo flow.
+The external C integration fixture independently submits a production Vulkan
+frame *during the preview*, then demonstrates cancel, accept and undo
+against the same scene. The final capture is another distinct frame.
+
+* Executed validation (headless native tests)
+
+| Gate | Outcome |
+|------+---------|
+| =make test-scene-gesture= | PASS: production C SDF journal, scene and GPU slot source |
+| =make -j2 test= | FAIL: existing keymap test has missing =KeyImageOperation.command_name= initializers under =-Werror= |
+| =tests/native/sculpt_api.c= | PASS: actual host callback C source and effect rejection |
+| =tests/native/agent_engine.c= | PASS after correcting stale active-slot assertions to check after frame synchronization |
+| ASan/UBSan/leak check: scene gesture, sculpt callback, agent facade | PASS |
+| Changed production C objects | PASS after making the project runtime include unambiguous |
+| Public C API header from C++17 | PASS |
+| Emacs =atomic-change-group= semantic source | Official GNU manual reviewed, not a run of Emacs binary |
+| =make test-sculpture-runtime= (MonadC/Vulkan) | NOT VERIFIED: no live runner; full app runtime not exercised |
+
+No claim is made that full compiled Monad source has been evaluated against
+real MonadC or Vulkan presentation/validation layers in this container.
+The performance and physical GPU integration gates remain outstanding.
+
+* Post-overlay audit
+
+- The Cycle 54 gesture regression was freshly built and passed. Sanitized
+  gesture, sculpt-callback and agent-facade tests also passed.
+- Cycle 54's agent test initially asserted an active SDF count before GPU-slot
+  synchronization, including at maximum capacity. Both assertions now follow
+  =obs_sdf_sync_frame=; the fresh agent-facade run passes.
+- The active Makefile's =-iquote ../monadc/src= shadows the project
+  =runtime.h= when included by the app facade. =agent_engine.c= now names
+  =src/monad/runtime.h= explicitly; its production object compiles with the
+  current flags.
+- The full suite currently fails compiling =tests/native/keymap_image.c=:
+  positional =KeyImageOperation= initializers omit =command_name= and
+  =-Wextra -Werror= rejects them. This failure is outside Cycle 54's patch list.
+- The available workspace does not contain the Cycle 48 archive; the documented
+  Cycle 47–53 base chain cannot be confirmed from these files.
+- The Cycle 54 manifest passed immediately after extraction. Subsequent agent
+  source/test corrections and a later Makefile difference mean its listed
+  hashes no longer describe the current workspace.
+
+* Incremental delivery
+
+The canonical build tree remains based on original =obsidian.tar(3).gz= plus
+Cycles 47–53. Cycle 54 is changed-files-only and reproducibly packaged with
+the existing =tools/incremental_overlay.py=; its manifest excludes itself,
+but covers every other archive file, including the patch list. Apply over
+Cycle 53 in the parent directory and run:
+
+#+begin_src sh
+sha256sum -c docs/CYCLE54-MANIFEST.sha256
+make test-scene-gesture
+make -j2 test
+# On a complete SDK/GPU workstation:
+make test-sculpture-runtime
+#+end_src

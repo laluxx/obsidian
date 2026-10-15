@@ -1,0 +1,59 @@
+#+TITLE: Obsidian Cycle 60 — Typed sphere/box viewport selection
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Result
+
+Cycle 60 extends the opt-in SDF editor viewport from sphere-only to analytic
+sphere and axis-aligned box selection. The user-visible editor gizmo resolves
+the selected primitive through the common epoch-ticket registry. The previous
+sphere-only APIs remain sphere-only.
+
+The supplied Cycle 60 patch assumed earlier box-inspector journal support
+that is not present in this tree, and referred to Cycle 59 even though Cycle
+59 was never produced. The minimum typed box extent/position journal support
+needed by Cycle 60 is included here; this is not a separate Cycle 59 patch.
+The existing sidebar already exposed box extents, but wrote them directly.
+Those position and extent controls now use the inspector journal and support
+undo/redo.
+
+* Picking contract
+
+- Sphere and axis-aligned box boundary hits use normalized ray directions,
+  nearest-distance selection, stable scene-order ties and checked outputs.
+- Boxes use the three per-axis half-extents consumed by the SDF box shader.
+  Inside rays hit the exit face; parallel axes, face normals and malformed
+  geometry are handled explicitly.
+- Only translation-only transforms are accepted. Rotated/scaled transforms
+  and composed CSG/subtraction surfaces are not supported by this analytic
+  query.
+- The Cycle 60 baseline had a terrain type value of 2 in editor/shader code but
+  no named C constant. Cycle 61 names it; neither cycle adds terrain raymarch
+  picking, so terrain is still not selectable through this analytic query.
+- Box extent and position edits use the shared undo journal. Renderer
+  publication remains deferred through the existing fenced-slot sync path.
+
+* Verification
+
+#+begin_src sh
+make test-sdf-typed-viewport
+#+end_src
+
+The native test links production viewport, property bridge, inspector,
+sculpt-ticket and SDF synchronization code. It exercises box geometry,
+position/extents edits, undo/redo, drag coalescing, cancellation, conflicts,
+stale tickets, and both fenced CPU-to-GPU slots.
+
+Interactive Vulkan rendering, GLFW input, visible widgets, HiDPI/resize,
+validation layers and full MonadC integration remain unverified. Run
+=make test-sdf-viewport-runtime= and =make run= on a workstation with the
+complete Vulkan/GLFW/MonadC toolchain.
+
+* Remaining holes
+
+- Analytic picking selects primitive boundaries, not the final CSG-composed
+  shader surface.
+- Terrain raymarching, general affine transforms and GPU readback tests are
+  outside this cycle.
+- Box material/CSG inspector edits retain their existing direct-edit path;
+  only box position and extents are journaled by this slice.

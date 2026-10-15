@@ -1,0 +1,93 @@
+#+TITLE: Cycle 50 — Compiled Monad procedural scene + fence-owned Vulkan SDF uploads
+#+SUBTITLE: One vertical slice from Monad source to rendered scene and PNG
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Source and review
+
+Applied over user's full =obsidian.tar(3).gz= and consecutive Cycle 47, 48,
+49 incremental archives. Read the existing =AGENTS.md=, C47-49 reports,
+agent ABI/headless docs, production scene init/cleanup, SDF CPU/GPU SSBO,
+window frame fences, legacy drawFrame, Monad runtime/binding/foreign/effect
+registration, frame callback semantics, external client and tests. We did not
+build a standalone pretend renderer or isolated scene model.
+
+* Completed vertical slice
+
+** DONE C50-001 — Validated per-flight-slot SDF publication
+
+Old =flushSdfSSBO= overwrote all mapped SSBOs, regardless of in-flight
+submissions. New calls set per-slot dirty flags. Each production renderer
+frame path waits its own in-flight fence before =obs_sdf_sync_frame(slot)=
+updates that slot's existing mapped buffer. No mapped writes when fence wait
+failed. Scene init/cleanup reset active SDF counts. The global C agent
+mutation path no longer calls device-wide idle for every SDF write.
+
+** DONE C50-002 — Actual compiled Monad foreign procedure catalog
+
+Registered five new =sdf-*= commands in the existing runtime. Each owner-/
+effect-checked operation uses real scene SDF creation/state mutation, host
+lifetime-checked Int64 tickets, validated finite numeric arguments and queued
+per-flight buffer dirtiness. The app remains a single engine/scene owner.
+
+** DONE C50-003 — Executable scene and external validation program
+
+=modules/obsidian/sculpture.mon= registers a compiled live frame hook. The
+first frame creates five SDF spheres; following frames animate/recolor the
+center. =tests/integration/agent_sculpture.c= loads the source, checks no
+premature side effects at compilation, steps five frames, queries the resulting
+production scene through the public external API, captures a sixth frame,
+checks scene advancement and RGBA8 extent. =tools/rgba_to_png.py= converts the
+raw capture to a fully valid, lossless PNG via standard-library code and
+atomic replacement. This strict full-runtime target is NOT run in sandbox.
+
+** DONE C50-004 — Permanent tests and incremental packaging
+
+Tests compile the *actual C source* of the SDF renderer synchronizer, sculpt
+scene operations, Monad dynamic host callbacks, and external agent adapter.
+The minimal fixture substitutes only external Vulkan/MonadC service headers,
+not the production algorithms. Includes invalid args, stale tickets, denied
+effects, scene reset, per-buffer dirty publication, copy suppression and
+raw-to-PNG validation, plus full existing native suite.
+
+* Evidence ledger
+
+| Gate | Status |
+|------+--------|
+| Strict C23 production SDF/sculpt C source + native tests | PASS |
+| Real dynamically registered Monad callback C source seam | PASS |
+| Actual external agent adapter regression test | PASS |
+| Pure Python RGBA8->PNG encode/CRC/failure preservation | PASS |
+| Full available =make -j2 test= | PASS with SDK/driver SKIPs |
+| AddressSanitizer + UndefinedBehaviorSanitizer + leak detection | PASS |
+| Standalone external public C consumer source compilation | PASS |
+| Cross-slot GPU mapped-memory safety at native fixture level | PASS |
+| Full =libobsidian.so= + actual MonadC compiled module | NOT VERIFIED |
+| Vulkan shader pixels, validation, CPU/GPU p95/p99 and device-loss | NOT VERIFIED |
+
+* Limits and next steps
+
+This is a real source-connected vertical implementation, not yet fully
+certified to run end-to-end on the unavailable toolchain. No independent
+Monad compiler candidate API, QTT loan certificate, deterministic fixed-delta
+physics stepping or general transactional scene batch exists. A failed
+Monad callback currently disables itself through the existing frame bridge;
+the external integration test detects it by requiring five real scene SDFs
+and expected mutations before accepting a capture. Only production GPU
+runtime testing can prove shader/pipeline output.
+
+The old Cycle 49 all-slot GPU-idle rationale is historically accurate for
+that snapshot but superseded by this overlay. Keep the original cycle
+records rather than rewriting their historical PASS scope.
+
+* Apply
+
+#+begin_src sh
+# From the parent directory of obsidian/, after Cycles 47-49:
+tar -xzf obsidian-monad-cycle50-incremental-20261012.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE50-MANIFEST.sha256
+make -j2 test
+# Only with actual MonadC/Vulkan/Jolt/GLFW and GPU runtime:
+make test-sculpture-runtime
+#+end_src

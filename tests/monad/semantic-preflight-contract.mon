@@ -1,0 +1,26 @@
+;;; semantic-preflight-contract.mon --- requires live Obsidian object space An isolated compiler session does not certify the currently published JIT.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract semantic-preflight-contract
+
+;;; Commentary:
+
+semantic-preflight-contract.mon — requires live Obsidian object space
+The real Monad runner must INVOKE these forms, not only load their source.
+
+;;; Code:
+(define (semantic-preflight-contract)
+  (and (>= (preflight-status) 0)
+       (<= (preflight-status) 3)
+       (>= (preflight-us) 0)
+       (>= (preflight-diagnostics) 0)
+       (or (= (preflight-status) 2)
+           (>= (preflight-diagnostics) 0))))
+
+(define (semantic-preflight-observation)
+  (list (preflight-status)
+        (preflight-diagnostics)
+        (preflight-us)
+        (publish-queued)
+        (publish-boot-p95-us)))

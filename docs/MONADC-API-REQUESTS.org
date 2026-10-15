@@ -1,0 +1,328 @@
+#+TITLE: MonadC embedding API requests for Obsidian (Cycle 9)
+#+DATE: 2026-10-11
+#+STARTUP: overview
+#+PROPERTY: header-args :results output
+
+* Contract: proposed, not implemented
+
+This is the requested handoff for the MonadC author. Signatures are API design
+sketches, NOT declarations present in the uploaded embed.tar(8).gz. None is
+called by compiled Obsidian code. Existing entry points are indexed separately
+below to avoid asking MonadC to reimplement working capabilities.
+
+The central goal is *a native, game-specific REPL as an embedding client*, not
+a second interpreter in the engine. Compiler-owned semantics, native code,
+object-space/QTT proofs, and input/output belong to their proper owners.
+
+* Cycle 14 host-side readiness (not a fulfilled candidate API)
+
+Obsidian now stages immutable boot-module *source bytes* on a bounded worker
+and transfers them with version tickets at owner-thread checkpoints. The
+source I/O stage supplies no LLVM image, QTT certificate, compiler AST or
+reusable =monad_prepare_source= result. It cannot replace ABI-001, ABI-002
+or ABI-003, and =monad_load_source= still blocks frame processing. API work
+should accept an owned snapshot plus source/revision identity, and reject
+obsolete candidates without modifying the live object space.
+
+* Priority P0 — Nonblocking candidate compilation and atomically committed images
+
+** MISSING ABI-001 — Build a full native candidate without publishing it
+
+Conceptual C interface:
+
+#+begin_src c
+monad_status_t monad_candidate_compile(
+    monad_compile_worker_t *, const monad_source_unit_t *,
+    monad_candidate_t **out, monad_error_t *);
+monad_status_t monad_candidate_verify(
+    monad_candidate_t *, const monad_publication_policy_t *,
+    monad_verified_contract_t **out, monad_error_t *);
+void monad_candidate_discard(monad_candidate_t *);
+#+end_src
+
+- Candidate must include parse, HM, QTT Core/resource checks, LLVM codegen,
+  verification, and ORC materialization, but MUST NOT mutate a live image.
+- A failed candidate is discardable without changing any live native function,
+  dynamic cell, managed resource, live callback or source provenance.
+- Distinguish compilation success from verified resource/effect authority.
+- Artifact must be immutable after compilation and portable across the worker
+  -> owner-thread handoff or explicitly reject such a handoff.
+- All diagnostics, locations, inferred schemes, QTT evidence and definition
+  metadata must remain queryable while candidate is retained.
+
+Why missing: =monad_prepare_source= currently stops at parsing/HM preparation;
+=monad_load_source= already performs atomic native publication but combines
+compilation and commit in one synchronous API.
+
+** MISSING ABI-002 — Bounded, owner-thread candidate publish with rollback
+
+#+begin_src c
+monad_status_t monad_candidate_commit(
+    monad_t *, monad_candidate_t *, const monad_publish_options_t *,
+    monad_publication_receipt_t **out, monad_error_t *);
+#+end_src
+
+- One all-or-nothing commit of {add, replace, remove} with source authority,
+  structural ABI, verified QTT/effect/lifetime compatibility and generation.
+- Expose the generation's epoch and references to retired image owners.
+- Explicitly define behavior when a host foreign function runs at module init;
+  no unintended irreversible scene edits before commit.
+- Respect outstanding =monad_read_t= pins and =monad_native_handle_t= imports.
+- A commit cannot block on GPU fences or an unbounded JIT compile.
+- Expose a checked abort path and a clear distinction between rejected
+  compilation and a failed post-publication host migration.
+
+Why missing: atomic native publication exists, but the host cannot hold an
+already fully compiled candidate and commit it at an engine-defined safe point.
+
+** MISSING ABI-003 — Cancellation, progress, and worker isolation
+
+#+begin_src c
+monad_compile_job_t *monad_compile_submit(monad_compile_pool_t *, ...);
+monad_status_t monad_compile_job_poll(monad_compile_job_t *, ...);
+void monad_compile_job_cancel(monad_compile_job_t *);
+#+end_src
+
+- Background compilation should use independently thread-owned compiler state
+  and immutable source snapshots; UI/render threads never enter its mutable
+  parser, inferencer or LLVM builder.
+- Cancellation is cooperative with deterministic cleanup; no asynchronous
+  thread kill while holding compiler/runtime/LLVM locks.
+- Return progress phases, last diagnostics, and output generation.
+- Support compile quotas for source bytes, wall time and retained IR memory.
+
+Why missing: =monad_compiler_session_t= is thread-affine and can analyze
+source on its owning thread, but cannot produce a native candidate consumable
+by the game-thread =monad_t= through the public ABI.
+
+* Priority P0 — QTT and foreign-object semantics
+
+** MISSING ABI-004 — Full compiler-authoritative export contract view
+
+Desired retained snapshot for an export:
+
+| Identity | Required fact |
+|----------+---------------|
+| Type     | Canonical structural TypeId, ABI representation, calling convention |
+| Quantity | Per argument/capture quantities (including finite grades and omega) |
+| Effects  | Normalized explicit row plus row-polymorphism resolution authority |
+| Regions  | Borrow/loan/owner scope, expiry proof, generative nominal type |
+| State    | Persistent schema identity and compiler-verified migration hook |
+| Resource | Checked destructor/DUP/DROP evidence and ownership plan |
+
+The host must not infer these facts from printed type strings or hand-rolled
+hashes. Fingerprints may index an immutable certificate, not substitute for a
+compiler assertion. The host may reject additional capabilities (GPU-only,
+render-thread-only, disallowed I/O), but must not fabricate QTT proofs.
+
+Existing =monad_qtt_report_*= is an important starting point. It has evidence
+stages, effect fingerprints, quantities, representation, and destructor-plan
+availability. However, the public result lacks a full, directly verifiable
+state/loan/effect/capability contract for arbitrary engine callbacks.
+
+** MISSING ABI-005 — Region/loan-safe host API for borrowed Frame/Scene values
+
+Conceptual shape:
+
+#+begin_src c
+monad_region_t *monad_region_begin(monad_thread_t *, const char *name);
+monad_status_t monad_host_borrow_in_region(
+    monad_region_t *, monad_foreign_object_t *,
+    const monad_foreign_borrow_policy_t *, monad_value_t **out);
+monad_status_t monad_region_end(monad_region_t *);
+#+end_src
+
+- A =Frame= borrow cannot escape its frame scope, be retained in a globally
+  reachable dynamic cell, or be used after the frame's engine-owned epoch.
+- A =Mesh= borrow must remain nominally typed and generation checked when the
+  underlying scene mutates; no raw GPU pointer is exported.
+- The compiler rejects a leaked loan when it can see it; the host retains
+  dynamic epoch checks for untrusted/dynamic interfaces.
+- Embrace QTT multiplicities but do NOT confuse multiplicity with storage
+  provenance or GPU fence completion. QTT README explicitly separates them.
+
+Existing: generative =monad_foreign_type_identity=, foreign object retain/
+release, owner-thread object space, and =monad_compiler_import_foreign_types=.
+These do not express a full engine frame region or lifetime-safe borrow token.
+
+** MISSING ABI-006 — Callable host procedure imports through QTT compilation
+
+The current object space supports dynamic procedures. The compiler needs an
+unambiguous declaration/import pipeline that maps a host procedure's structural
+calling contract, effects, nominal type authority and quantity constraints
+into ordinary Monad Core, so that compiled Monad code may call e.g. =(mesh 0)=
+or =(frame-delta f)= without inventing a Lisp VM or a universal boxed hot path.
+Native known monomorphic calls should lower directly when safe, with managed
+values using their compiler-authorized representation.
+
+* Priority P1 — Genuine interactive REPL semantics
+
+** MISSING ABI-007 — Evaluate checked expressions to typed, retained results
+
+#+begin_src c
+monad_status_t monad_repl_evaluate(
+    monad_t *, monad_candidate_t *,
+    monad_repl_result_t **out, monad_error_t *);
+#+end_src
+
+A REPL must distinguish *definition publication* from *expression evaluation*.
+It should support arbitrary valid expressions (including values that have no
+scalar C ABI) without manufacturing a source-level wrapper and a global name.
+A result should carry a stable nominal/structural type identity, printable
+representation, QTT ownership, and a safe release function.
+
+Existing =monad_load_source= compiles publishable definitions, and
+=monad_value_call= executes dynamic object-space callables. Neither is a
+compiler-authoritative general expression evaluation/result API.
+
+** MISSING ABI-008 — REPL output and error channels
+
+- Structured diagnostic stream: errors, warnings, source ranges and phases.
+  (Existing compiler diagnostic APIs already cover much of this.)
+- Typed value formatting/pretty printing with a maximum byte budget, depth,
+  cycle detection and no arbitrary side effects unless explicitly permitted.
+- Captured stdout/stderr/log-like output for evaluation scopes, with bounded
+  backpressure and cancellation; never block the graphics thread.
+- Rich outputs optional: text, syntax tree, type/effect judgement, resource
+  diagram, scene object link, or GPU measurement reference.
+
+** MISSING ABI-009 — Import-graph and incremental recompilation descriptors
+
+Given an edited module, identify all affected imported modules and exported
+name dependencies, recompile minimum affected units, publish one coherent
+transaction. Return a stable graph/query; no filesystem scanning from the
+render callback, no recompiling the entire universe after every keystroke.
+
+* Priority P1 — State migration and retirement
+
+** MISSING ABI-010 — Verified persistent-state migration contract
+
+Support compiler-checked old/new state schema identities, a pure or staged
+migration function, error reporting, and either commit of new state + code
+or retention of old state + code. Host-owned Scene/GPU state is not
+automatically rolled back unless mutations occur in an explicit engine
+transaction with reversal/compensation semantics.
+
+** MISSING ABI-011 — Image retirement and accounting
+
+- Existing =monad_read_begin_signature= and frozen =monad_native_handle_t=
+  already pin native resources; =monad_live_native_image_count= observes count.
+- Request an optional explicit retirement notification, retained-byte census,
+  and generation-referenced snapshot that Obsidian can correlate with frame
+  CPU/GPU measurements. Don't require GPU cleanup from Monad's compiler.
+- All retained native code must be reclaimed after no host/worker/continuation
+  can execute it; publish/retire and GPU-fence lifetimes are separate protocols.
+
+* Existing: do not request again
+
+| Available now in embed.tar(8).gz | Public header |
+|---------------------------------+---------------|
+| =monad_open/close= and runtime/thread handles | =monad.h= |
+| =monad_load_source/string/file= atomic native registry generation | =monad.h= |
+| =monad_prepare_source/file= parse/HM results | =monad.h= |
+| =monad_source_result_*= diagnostics + certified export metadata | =monad.h= |
+| =monad_read_begin_signature= and =monad_read_end= coherent reader pins | =monad.h= |
+| =monad_find_native_handle= direct ABI callable with frozen ownership | =monad.h= |
+| =monad_qtt_report_*= graded/effect/resource evidence | =qtt.h= |
+| =monad_runtime_register_foreign_type= nominal identities/executor | =embed.h= |
+| =monad_value_call=, retained values, dynamic hooks and procedures | =embed.h= |
+| =monad_compiler_check_source= and typed diagnostics | =compiler.h= |
+| =monad_compiler_import_foreign_types= metadata transfer | =compiler.h= |
+| =monad_runtime_snapshot_host_bindings= object-space introspection | =embed.h= |
+
+* Acceptance suite requested from MonadC
+
+- Broken candidate: old function address/epoch/closure/state unchanged.
+- Accepted 100-definition candidate: one generation commit, no mixed reads.
+- 1000 consecutive reloads with persistent state and bounded retired images.
+- A Frame loan cannot escape; shared values have checked retain, unique
+  resources do not duplicate; explicit host-error tests remain.
+- Cancelling 100 simultaneous compile jobs neither leaks LLVM objects nor
+  stalls frame dispatch; minimum frame p99 measured under heavy compilation.
+- Source import edit recompiles only affected dependents; diagnostics remain
+  coherent to source version, including errors on worker thread.
+- GPU resource finalization occurs after GPU last use, even when Monad's
+  QTT destructor/foreign executor has run earlier on the CPU.
+
+
+* Cycle 13 — Precise candidate scheduler handoff (2026-10-11)
+
+Obsidian now has a *real bounded request queue*; it does not need MonadC to
+implement host queuing, boot-module coalescing or REPL history. This queue does
+NOT contain compiler candidates. To safely decouple compilation from the
+GPU owner's frame schedule, the SDK needs the following authoritative contracts:
+
+1. A thread-safe, detached candidate handle that owns a full immutable input
+   snapshot, selected imported-module versions, compiler contexts and diagnostics.
+   The worker must not borrow the live =monad_object_space_t= or engine pointers.
+2. An explicit =compile/verify= phase yielding compiler-authored *whole-image*
+   ABI, QTT quantity, effect, foreign loan and persistent-state schema evidence.
+   A source-result export catalog does not satisfy this requirement.
+3. Cancellation/supersession before commit with safe destruction; once commit
+   begins, completion must have atomic success or preserve the prior generation.
+4. An owner-thread bounded =commit= entry point that rejects stale base-image
+   generations and publishes an already verified candidate without recompiling.
+5. Native retirement must honor pinned readers, registered callbacks, retained
+   foreign captures and CPU/GPU completion fences. QTT cannot prove a GPU fence
+   has fired unless the runtime receives an actual completion signal.
+6. Observable stage timings, retained bytes, cancellation status and structured
+   diagnostics that do not contain borrowed pointers after result destruction.
+
+The suggested names =monad_candidate_compile=, =monad_candidate_verify= and
+=monad_candidate_commit= are *requests*, not live C declarations or callable
+entry points. Any eventual SDK design may choose better names and types, but
+these guarantees are the real acceptance criteria.
+
+* Cycle 18 — Explicit host-import QTT contracts (request; not available ABI)
+
+Obsidian now separates runtime physical-effect admission from compiler proof:
+=src/monad/effect_policy.[ch]= cannot certify an imported function's QTT
+multiplicity or loan effects merely by recognizing its name.
+
+Needed from MonadC: verified host procedure signatures with type IDs,
+effects, quantities and borrow lifetimes; a candidate manifest listing exact
+host imports; candidate prepare/verify/commit with an engine reservation token,
+plus abort and quiescent retirement. These are *semantic requirements only*;
+Obsidian does not call hypothetical compiler functions.
+
+See =docs/HOST-EFFECTS.org= for acceptance and physical-resource boundaries.
+
+* Howto games — Effectful frame callbacks or a host state store (request; not available ABI)
+
+Writing =monad/howto/snake.mon= (SDF-sphere Snake: grid state, GLFW-code
+steering, =blip!= scoring) against the current compiler produced two exact
+surface findings, both reproducible with =monad check= today:
+
+1. Mixed Int/Float arithmetic resolves through literals but not through
+   Float-typed variables: =(* (frame-number f) 0.12)= checks, while
+   =(* (- c half-board) cell-size)= with =cell-size :: Float= does not
+   ("Couldn't match expected type: Int ... While checking: cell-size").
+   Untyped parameters poison inference the same way; =Float= result
+   annotations on helpers (=cell-x/cell-z=) are required. Either document
+   the coercion rule or unify it.
+2. Module =set!= state inside a frame callback is a type error, not a gate:
+   =on-frame!= demands =Frame -> Bool= but the callback infers
+   =? -io-> Bool= ("cannot unify () with Bool -> b"). Playable games need
+   one of: (a) effect-polymorphic callback registration accepting =-io->=
+   procedures with declared state effects, or (b) a host-owned key/value
+   state store binding (=frame-state!/frame-state=) so callbacks stay pure
+   while progress persists across frames. These are *semantic requirements
+   only*; Obsidian does not call hypothetical compiler functions.
+
+Until then =snake.mon= is DOCUMENTS INTENT: it parses, its host names and
+arities match the registered API, and it names the exact missing rule.
+
+** Howto untyped-syntax addendum (2026-10-13, observed with standalone check)
+
+Rewriting all 41 guides to untyped Scheme refined the snake.mon finding:
+with fully untyped parameters the `set!` effect error no longer reproduces
+standalone — bodies check and only the =on-frame!= macro call fails (host
+link-time), exactly like every other guide. The annotated-params error
+(=Frame -> Bool= vs =? -io-> Bool=) therefore reflects bidirectional effect
+checking that untyped code defers, not an unconditional rejection of state.
+The engine-side question stands (what the host accepts at publication), but
+the evidence narrows it: inference, not syntax, decides. Related rules
+established by probe files in the same pass: =%=, =/=, =and/or/not= are
+core primitives; =(Float n)= casts Int->Float (core/Math/Angle.mon); mixed
+Int/Float arithmetic needs annotated numeric pins; =on-frame!= behaves as a
+macro while other host calls defer to link.

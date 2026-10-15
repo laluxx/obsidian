@@ -1,0 +1,92 @@
+#+TITLE: Obsidian — Cycle 10: Coherent Native Reads, REPL Safety, Language Tooling
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Objective
+
+Increase soundness of the existing MonadC embedding client without inventing
+missing compiler APIs. Keep one engine-owned =monad_t= and one object space,
+with compiler-owned native images. Incremental overlay on Cycle 9.
+
+* Concrete changes
+
+** Native image pinning across real engine callbacks
+
+- =src/monad/native_read.[ch]=: a small, reusable host-side guard composing
+  =ObsPublication= call leases with the SDK's =monad_read_t= generation pin.
+- =obs_native_read_begin/find_i64/end= hold one coherent native image from
+  name resolution through C ABI call and release it on every exit path.
+- =begin_signature/find= expose the real signature-parametric snapshot/lookup
+  API for future typed renderer, physics and game system callbacks. The C host
+  never asserts compiler/QTT proof merely by naming a function pointer.
+- =src/monad/runtime.c=: =obs_monad_camera_step= now invokes a frozen read
+  rather than issuing an unpinned direct lookup. Existing numerical bounds,
+  finite-value checking and owner-thread validation remain in place.
+- The host's epoch guard is still not a substitute for the compiler image pin.
+  Release order is compiler pin first, host lease second.
+
+** REPL source and diagnostics
+
+- History drafts are preserved over navigation and Unicode input. Editing an
+  old command creates a new draft without modifying the immutable history.
+- =:images= displays =monad_live_native_image_count=, including generations
+  retained by readers. =:state= reports publication epoch/success/failure/
+  active-call counts. Both are read-only at the compiler checkpoint.
+- =(native-image-count)= exposes the compiler's image count through a guarded
+  foreign procedure, while =interactive.mon= adds concise pure Monad helpers.
+
+** Quality and tests
+
+- New =tests/native/native_read.c= links a deterministic runtime test double
+  but compiles against the *actual* =monad.h= ABI, including parameterized
+  read signatures. Exercises 50,000 open/lookup/close cycles; active-call
+  publication exclusion; negative lookup and signature; failed open cleanup.
+- =make test-native-read= is strict when the SDK is absent; =make test= runs it
+  when present and emits an explicit skip otherwise. =test-all= requires it.
+- Added REPL regressions for restored unsent drafts, edited history entries,
+  UTF-8 truncation boundaries; randomized model suite remains intact.
+- =make test-repl-abi= now checks the changed client translation units against
+  the real public headers. The ordinary engine build discovers native_read.c
+  automatically via =src/monad/*.c=.
+
+* Actual validation in this environment
+
+- =make MONADC_ROOT=/mnt/data/cycle10_sdk test-native-read test-native test-repl-abi=
+  PASS, using the unpacked supplied =embed.tar(8).gz= public SDK headers.
+- Strict C23 =-Wall -Wextra -Werror -pedantic= tests passed, including the
+  deterministic 50,000-iteration publication/read lease regression.
+- UndefinedBehaviorSanitizer runs of native-read and REPL model: PASS.
+- =make -n all=: graph includes the new =native_read.c= translation unit.
+- Full native engine link, actual MonadC JIT execution, QTT code/loan proofs,
+  scene/GPU transactional rollback and Vulkan frame timings: NOT VERIFIED.
+  Do not represent ABI-typed mocks as running a real compiler.
+
+* Compiler handoff and research boundary
+
+Monadc =embed.tar(8).gz= already implements atomic source generations,
+=monad_read_begin= and signature-parametric =monad_read_begin_signature=,
+=monad_read_find_native= and explicit =monad_read_end=. No new compiler APIs
+are needed for this Cycle 10 native read work.
+
+Still required for sound, nonblocking game code replacement:
+=docs/MONADC-API-REQUESTS.org= ABI-001—003 (independent candidate compilation,
+compatibility verification and bounded commit), ABI-004—006 (compiler-derived
+QTT contract + checked frame loans/host effects), ABI-007/008 (expression
+REPL output), ABI-009 (dependency graph), ABI-010 (state migration).
+Engine-side mutations need their own staging/rollback and GPU fencing.
+
+* Further design references
+
+- LLVM ORCv2: https://llvm.org/docs/ORCv2.html (tracked code ownership).
+- Erlang code loading: https://www.erlang.org/docs/27/system/code_loading.html
+  (versioned code, old calls may finish on older generations).
+- Idris 2 multiplicities: https://idris2.readthedocs.io/en/latest/tutorial/multiplicities.html
+  (quantities are not, alone, GPU resource lifetime proofs).
+
+* Cycle 11 priorities
+
+1. Integrate real MonadC runner and typed callback tests through editor,
+   renderer and callback path; test mid-frame reload rejection and image count.
+2. Consume compiler-owned staged candidates once MonadC provides APIs.
+3. Make Frame and Scene foreign borrow proofs enforceable in actual QTT typing.
+4. Profile compile, publication and end-to-end GPU frame p95/p99 independently.

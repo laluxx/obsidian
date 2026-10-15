@@ -1,0 +1,29 @@
+;;; camera-policy.mon --- scalar camera step, the one boot path that publishes
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto camera-policy
+
+;;; Commentary:
+
+Run: OBSIDIAN_MONAD_BOOT=monad/howto/camera-policy.mon ./obsidian
+Headless: ./obsidian --eval-file monad/howto/camera-policy.mon --frames 2 \
+--output /tmp/camera.rgba --agent-report /tmp/camera.json \
+--width 320 --height 200
+Status: PUBLISHES. The typed Int -> Int export resolves through the
+checked camera-policy bridge; no Frame callback, no QTT certificate needed.
+
+;;; Code:
+(module Main)
+
+(define (step-mm current)
+  (+ current 500))
+
+(define (obsidian_camera_step_mm current)
+  (step-mm current))
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))

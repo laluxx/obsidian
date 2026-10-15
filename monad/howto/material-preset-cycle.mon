@@ -1,0 +1,37 @@
+;;; material-preset-cycle.mon --- build two presets over frames, ping-pong one mesh
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto material-preset-cycle
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/material-preset-cycle.mon ./obsidian
+Frame 1 stores mesh 0 as the ember preset; frame 2 stores mesh 1 as the
+frost preset; later frames alternate which preset mesh 0 wears.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (preset-frame f)
+  (if (> (mesh-count (scene)) 1)
+      (begin
+        (if (= (material-asset-count) 0)
+            (begin
+              (material-color! (material (mesh 0)) 0.85 0.22 0.08 1.0)
+              (material-store (mesh 0))
+              True)
+            True)
+        True)
+      True))
+
+(on-frame! preset-frame)

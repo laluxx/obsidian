@@ -1,0 +1,59 @@
+#+TITLE: Obsidian Cycle 62 — Durable appearance presets
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Delivered slice
+
+Cycle 61 added an in-memory SDF appearance clipboard. Cycle 62 persists that
+value-only clipboard as a portable OBSLOOK v1 preset and provides an
+independent Python authoring path:
+
+F8 SDF tool → Ctrl+Shift+C copy → Ctrl+Shift+S save → new run or external
+authoring → Ctrl+Shift+L load → Ctrl+Shift+V paste onto a sphere, box or
+terrain → one undoable scene edit → existing per-frame SDF buffer publication.
+
+Loading changes only clipboard state. It does not mutate a scene object or
+create undo history. Applying the sample uses the existing material/emission
+property bridge, preserving target geometry, transform, CSG properties and
+terrain octaves.
+
+* Changed production systems
+
+- =src/editor/sdf_appearance_clipboard.[ch]= implements an explicit 100-byte
+  format, endian-independent packing, IEEE binary64 checks, version/size
+  validation, CRC32/IEEE, numeric validation, and fail-closed load semantics.
+- =src/platform/input.c= adds F8-scoped Ctrl+Shift+S/L save/load operations;
+  Ctrl+Shift+C/V remain in-memory copy/paste. The path is
+  =OBSIDIAN_SDF_LOOK_PATH= or =./obsidian-appearance.obslook=.
+- =src/core/atomic_file.c= is reused; no second atomic writer is introduced.
+- =tools/obslook.py= independently writes and inspects the format using only
+  Python's standard library.
+- Native C and Python tests exercise both codec directions and production
+  clipboard/scene-journal behavior.
+
+* Verification
+
+Observed in this checkout:
+
+- =make test-sdf-appearance-preset= — PASS. It builds the native production C
+  fixture, cross-checks Python-authored data through the C loader and scene
+  edit path, and checks the independent writer/decoder round trip.
+- =make -j2 test= — PASS for all available native/tooling suites. The
+  optional real Monad integration runners were skipped because
+  =OBSIDIAN_MONAD_TEST_RUNNER= and =OBSIDIAN_MONAD_FRAME_RUNNER= are unset.
+- =make -B src/platform/input.o && make -j2= — PASS; the engine and its
+  changed input object compiled and linked. Existing unrelated compiler
+  warnings remain.
+- =python3 tests/build-contract.py= — PASS.
+
+The native fixtures do not provide a real Vulkan device, GLFW keyboard-focus
+behavior, or the linked MonadC runtime. Those paths are not verified.
+
+* Remaining acceptance
+
+On a provisioned workstation, select real sphere/box/terrain objects, copy
+and save appearance, restart, load the preset, paste, inspect actual rendered
+color/emission, then undo/redo. Check path override, missing parent, active
+modal UI, viewport drag, property-slider gesture, Vulkan validation and clean
+shutdown. Confirm owner-thread file IO against the actual runtime.
+

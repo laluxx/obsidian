@@ -1,0 +1,27 @@
+;;; cycle6-error-contract.mon --- Cycle 6 foreign-object negative contracts.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract cycle6-error-contract
+
+;;; Commentary:
+
+Bounded borrows must signal errors rather than fabricate host pointers.
+
+;;; Code:
+(define (cycle6-error? thunk)
+  (catch True
+    (lambda () (thunk) False)
+    (lambda (condition data) True)))
+
+(define (cycle6-negative-contract)
+  (and (cycle6-error? (lambda () (mesh -1)))
+       (cycle6-error? (lambda () (node -1)))
+       (cycle6-error? (lambda () (sdf -1)))
+       (cycle6-error? (lambda () (gltf -1)))
+       (cycle6-error? (lambda () (mesh 999999999)))
+       (cycle6-error? (lambda () (mesh-visible! (scene) True)))
+       (cycle6-error? (lambda () (camera-move! (scene) 1.0 0.0 0.0)))))
+(if (cycle6-negative-contract)
+    True
+    (error "Cycle 6 negative references did not fail"))

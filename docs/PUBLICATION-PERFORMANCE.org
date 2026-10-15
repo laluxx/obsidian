@@ -1,0 +1,34 @@
+#+TITLE: Obsidian — Hot-publication performance contract
+#+STARTUP: overview
+
+* Three different latencies
+
+1. =Queue wait=: time between queue admission and owner-thread dispatch.
+   Counts debounce/worker delay only after actual queue admission.
+2. =Publication checkpoint CPU=: synchronous work of an admitted request,
+   including compiler calls and host-borrow invalidation. The renderer owner
+   thread can be blocked during this time.
+3. =Frame latency=: the complete CPU and GPU frame timings. The engine's
+   current publication metrics DO NOT measure GPU work, and do not replace
+   a frame-time trace or GPU timestamp queries.
+
+* Measurement approach
+
+- Bounded rings: 128 recent calls across lanes, and 128 per lane.
+- Fixed storage: no heap allocation or sort in normal publication paths.
+- Report nearest-rank p95/p99 only when inspected; p99 of one sample is that
+  sample, not a stability guarantee.
+- The default budget is 16667 us and is not a compiler timeout.
+- No early cancellation of an active MonadC publication: its atomicity and
+  native-code lifetimes belong to MonadC.
+
+* SLO that can be tested once compiler candidate APIs exist
+
+Candidate compilation happens outside the owner/render thread; a verified
+candidate is committed at a safe point within an explicit CPU time budget;
+existing native generations remain pinned until the compiler can reclaim
+resources; unchanged scenes keep their physics and graphics resource owners.
+Test across successful/rejected replacements, active frame borrows, renderer
+fences and long-running repeated edits. Record max, p50, p95, p99 CPU and GPU
+frame times, heap/RSS, and compiler-retained native images. Until those tests
+pass with the real SDK, this is a target, not an implemented guarantee.

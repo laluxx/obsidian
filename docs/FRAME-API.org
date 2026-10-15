@@ -1,0 +1,117 @@
+#+TITLE: Obsidian — Frame capabilities and live Monad programs
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* The language: a real foreign object, not a script loop
+
+The public shape is succinct and compositional:
+
+#+begin_src scheme
+(frame)                   ; -> borrowed obsidian.frame, active frame only
+(frame-active?)           ; -> Bool
+(frame-number (frame))    ; -> Int
+(frame-delta (frame))     ; -> Float seconds
+(frame-width (frame))     ; -> Int pixel width
+(frame-height (frame))    ; -> Int pixel height
+(frame-slot (frame))      ; -> Int CPU frame slot
+#+end_src
+
+Do not call =(frame)= from a script loaded outside an active frame. The
+frame's lifetime begins when the engine finishes CPU frame setup and ends
+at the next =obs_end_frame=, including failure/recreate paths. A saved
+reference expires and must not be dereferenced after this boundary.
+
+* Live game code in Monad
+
+#+begin_src scheme
+(define (game-tick f)
+  (let ([step (* (frame-delta f) 0.25)])
+    (camera-move! (camera) step 0.0 0.0)))
+(on-frame! game-tick)
+#+end_src
+
+The native =on-frame!= callback runs once per =obs_begin_frame= *after*
+CPU renderer setup and *before* demo scene simulation/update. The callback
+receives a frame foreign object, not a raw engine pointer. Compilation does
+not occur in the frame loop: the engine retains a Monad callable and invokes
+it in the persistent host object space. A script can rebind the callback;
+retirement is synchronized to the engine owner thread.
+
+* Interactive resize behavior
+
+The GLFW resize callback records the latest framebuffer-pixel extent; it
+does not overwrite the extent of Vulkan images still in use. While the
+current swapchain remains presentable, frames continue at its current extent.
+The engine replaces the swapchain as soon as WSI reports
+=VK_ERROR_OUT_OF_DATE_KHR=, or after 100 ms without another resize event.
+It performs this work before the next frame capability is published, then
+renders that frame using the replacement extent. A zero-sized framebuffer
+suspends acquisition without waiting for a restore event; a nonzero resize
+resumes with a replacement.
+
+When =VK_KHR_swapchain_maintenance1= and its present-fence feature are
+available, old swapchain resources retire asynchronously after both their
+graphics frame-slot fence and all their presentation fences complete. Other
+devices use a conservative graphics-queue idle fallback during replacement.
+This WSI path does not provide present scaling, so resize motion may show the
+last completed extent until replacement; frame dimensions in Monad update
+when the new swapchain is installed.
+
+Vulkan present fences protect resource/semaphore retirement; they do not
+promise display scan-out completion. See the
+[[https://docs.vulkan.org/refpages/latest/refpages/source/VkSwapchainPresentFenceInfoKHR.html][Vulkan present-fence specification]].
+
+=monad/obsidian/lifecycle.mon= adds a native macro =every-frame= that
+expands into =on-frame!= with a =lambda=. It uses =Syntax -> Syntax=,
+following Glemax, not a separate Lisp interpreter:
+
+#+begin_src scheme
+(every-frame f
+  (camera-move! (camera) (* (frame-delta f) 0.25) 0.0 0.0))
+#+end_src
+
+See =monad/obsidian/live-frame.mon= for a standalone source example.
+The actual expansion/execution of these examples with MonadC is not yet
+proven: only real embed integration can close that gate.
+
+* Profiling without exposing raw GPU objects
+
+#+begin_src scheme
+(frame-profile! True)
+(frame-last-vertices)
+(frame-last-bytes)
+(frame-last-fence-ns)
+(frame-last-upload-ns)
+(frame-last-record-ns)
+(frame-last-submit-ns)
+(frame-last-present-ns)
+(frame-callback-calls)
+#+end_src
+
+Counters measure *CPU-side* phases, not GPU completion. Once profiling is
+enabled, =frame-last-*= returns the last completed CPU frame sample, never
+an in-flight partially written sample. Reload statistics continue to be
+accessible via =reload-*= from Cycle 5.
+
+* Testing contract
+
+=make test= runs frame-state lifecycle tests and the native resize-policy
+boundary test. The live frame fixture is stored under =tests/monad/frame/=
+and is intentionally *not* executed by the normal generic loader-only Monad
+harness. A resize-aware frame runner should change the OS window size between
+callbacks and assert that =frame-width= and =frame-height= change to the
+replacement framebuffer dimensions.
+
+=make test-frame= requires =OBSIDIAN_MONAD_FRAME_RUNNER= to name an executable
+that actually creates an engine, compiles the provided =.mon= source through
+Monad embedding, renders >=2 frames, asserts callback count >=2, and probes
+an expired saved =frame= outside the frame interval. Without such a runner,
+it fails. =make test-all= requires both the standard Monad test runner and
+this GPU-backed frame runner. A successful source load alone is insufficient.
+
+* Runtime and type-system direction
+
+The foreign-frame epoch is a conservative runtime check. QTT integration
+should eventually express frame-borrow nonescape and effect permissions at
+the language level. Do not claim static linearity or generational memory
+safety proofs until compiler-owned type/effect APIs support them.

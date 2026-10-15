@@ -1,0 +1,19 @@
+;;; material-asset-contract.mon --- Real-engine integration fixture; not executable headlessly.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract material-asset-contract
+
+;;; Commentary:
+
+(No commentary yet.)
+
+;;; Code:
+(define (cycle25-material-demo)
+  (let ([m (mesh 0)])
+    (let ([asset (material-store m)])
+      (material-asset-factors! asset 0.25 0.6)
+      (material-apply! asset m)
+      (material-asset-roughness asset))))
+;;; A later change to `asset` must NOT mutate the previously applied mesh
+;;; until material-apply! is explicitly executed again.

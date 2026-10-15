@@ -1,0 +1,31 @@
+;;; Sdf.mon --- Foreign methods for scene-owned signed-distance primitives
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign sdf
+
+;;; Code:
+
+module Foreign.Sdf
+  [Sdf ◯ at index type roughness metallic material!]
+
+type ◯ :: {Sdf}
+type Sdf = ◯
+
+define at :: Int -> ◯
+  index -> obs-scene-sdf (obs-current-scene) index
+
+method index :: ◯ -> Int
+  sdf -> sdf-index sdf
+
+method type :: ◯ -> Int
+  sdf -> sdf-type sdf
+
+method roughness :: ◯ -> Float
+  sdf -> sdf-roughness sdf
+
+method metallic :: ◯ -> Float
+  sdf -> sdf-metallic sdf
+
+method material! :: ◯ -> Float -> Float -> Unit
+  sdf roughness metallic -> sdf-material! sdf roughness metallic

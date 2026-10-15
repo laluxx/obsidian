@@ -1,0 +1,18 @@
+;;; bench-instancing.mon --- portable shared-geometry scene workload.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract bench-instancing
+
+;;; Commentary:
+
+Scene 11 loads the checked-in static instancing fixture.
+
+;;; Code:
+(define (obsidian-benchmark-scene-id [ignored : Int] -> Int) 11)
+(define (obsidian-benchmark-width [ignored : Int] -> Int) 640)
+(define (obsidian-benchmark-height [ignored : Int] -> Int) 360)
+(define (obsidian-benchmark-warmup [ignored : Int] -> Int) 30)
+(define (obsidian-benchmark-frames [ignored : Int] -> Int) 120)
+(define (obsidian-benchmark-cache-mode [ignored : Int] -> Int) 0)
+(define (obsidian-benchmark-min-meshes [ignored : Int] -> Int) 2)

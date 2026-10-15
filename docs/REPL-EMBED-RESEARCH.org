@@ -1,0 +1,153 @@
+#+TITLE: Obsidian REPL and QTT Live Development — Source Audit and Research
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* The product goal
+
+A native Vulkan engine owns the window, scene, renderer, input and UI, and
+hosts *one* Monad runtime through the embedding SDK. The engine chooses its
+REPL's visual vocabulary, animation and GPU text path; Monad decides syntax,
+macro expansion, type/effect/ownership semantics, native code and resource
+lowering. This is the same host-versus-language boundary Glemax exposed.
+
+The primary usability principle: game authors write short Monad terms such as
+=(mesh 0)=, =(scene)=, =(frame)= and compositional lexical macros. A GPU-
+rendered console should reveal inferred types and compiler resource proofs
+without requiring manual memory management. That is a *long-term outcome* of
+formal guarantees, not a promise that all C/GPU resources are memory-safe now.
+
+* Source-derived evidence from uploaded snapshots
+
+Read =embed.tar(8).gz/include/monad/{monad,embed,compiler,qtt}.h= and
+=qtt.tar(5).gz/README.org= before changing this API. The current SDK exposes:
+
+- The facade owns runtime + thread attachment; =monad_runtime_handle= and
+  =monad_thread_handle= are borrowed, with a single lifetime boundary.
+- =monad_load_source= atomically publishes a native generation of compiler-
+  checked source definitions. The compiler uses QTT authorization, verified
+  LLVM and ORC native materialization; rejection does not overwrite previous
+  native exports. This is *already implemented* and must not be re-requested.
+- =monad_prepare_source= creates immutable parse/HM inference diagnostics but
+  is *not* a native candidate that can be committed later.
+- =monad_read_begin_signature= snapshots native addresses from one generation,
+  pinning code until =monad_read_end=. =monad_find_native_handle= is a separate
+  frozen-lookup mechanism. =monad_live_native_image_count= offers observation.
+- =monad_qtt_report_*= exposes inferred quantity/effect information and
+  distinguishes inferred evidence from resource-verified evidence. These are
+  not interchangeable.
+- =monad_runtime_register_foreign_type= and =monad_foreign_object_*=
+  implement nominal foreign authority and retain/release ownership, and
+  support caller-provided finalization executors.
+- =monad_dynamic_*= and =monad_object_space_*= are the existing mutable
+  interactive object space; generic closed native calls bypass it.
+- =monad_compiler_session_*= is thread-affine and can analyze source; it is not
+  a public off-thread native candidate compiler for an existing live image.
+
+The QTT README explicitly says the compiler is not yet a complete Idris2/
+Atkey-style system: general surface multiplicities, unrestricted higher-order
+inference, and complete dependent QTT must not be claimed. It distinguishes
+quantitative usage, ownership, and representation as separate judgments.
+
+* Research conclusions
+
+** Source research
+
+- Bob Atkey, Quantitative Type Theory:
+  https://bentnib.org/quantitative-type-theory.pdf
+- Idris 2 multiplicities and erased vs linear vs unrestricted values:
+  https://idris2.readthedocs.io/en/latest/tutorial/multiplicities.html
+- Perceus reference counting and reuse:
+  https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/
+- LLVM ORCv2, removable resource trackers and JIT ownership:
+  https://llvm.org/docs/ORCv2.html
+- Erlang two-version live code and pinned callers:
+  https://www.erlang.org/docs/27/system/code_loading.html
+- Kitsune state migration and explicit update points:
+  https://doi.org/10.1145/2629460
+- Linux RCU publication/reclamation distinction:
+  https://www.kernel.org/doc/html/latest/RCU/Design/Requirements/Requirements.html
+
+** What the research means for Obsidian
+
+Erlang demonstrates that old and new code can coexist through live updates;
+LLVM ORC provides an explicit resource lifetime abstraction for native code.
+Monad already has coherent image reads and frozen handles that support this.
+Kitsune demonstrates that *data migration* is a distinct problem. QTT can help
+prove resource obligations, but does not by itself atomically migrate a live
+scene or wait for Vulkan fences. Proper hot reload needs all four layers:
+
+1. Compile+verify code and QTT contracts without mutating the live image.
+2. Validate effect/ownership/state compatibility and publish one generation.
+3. Pin calls, closures and old code until readers/continuations retire.
+4. Migrate persistent state and retire GPU resources after actual GPU use.
+
+* Implemented REPL design in Cycle 9
+
+The existing Vulkan 2D glyph renderer is reused. =src/editor/repl_panel.c=
+uses the shared =UIWindow= component for window chrome, dragging, close-button
+handling, bounds and animation, then submits transcript text through its
+transformed draw helpers. It does not create another swapchain, compute
+shader, or GPU font atlas. It therefore benefits from the engine's existing
+batching and font caches, but FPS gains are *not* measured.
+
+The REPL model is deterministic, bounded, fixed-storage, Unicode-aware and
+headlessly tested. The editor binds =C-c r= to toggle; its contents use the
+reusable editor =UIWindow= chrome and text draw helpers. RET submits; =C-j=
+inserts a source newline; =C-p/C-n= scroll through command history; =DEL=
+removes a UTF-8 scalar; =C-g= or Escape closes. It borrows input callbacks
+only when no other editor text input is active and never compiles inside
+GLFW key/character callbacks.
+
+The top-level =M-x= binding opens the existing Vertico command/keybinding
+palette; =C-h c= remains the explicit keybinding-help entry point.
+
+=src/monad/repl_service.c= invokes *the existing compiler*: prepare source
+first, inspect diagnostics, then use =obs_monad_load_source= to publish.
+=:check <source>= runs only the compiler's semantic preflight; =:help= and
+=:clear= are host-console commands. The console currently accepts source
+*definitions* rather than arbitrary expression evaluation. It does not fake
+results or interpret expressions in C. A failed preflight doesn't disturb the
+old native image. Rejected source loads leave the previous compiler-published
+native generation intact per this SDK's documented atomicity.
+
+The render/update loop handles queued REPL work only at the existing owner-
+thread checkpoint. *The compiler still runs synchronously there*. Thus the
+current UI can present smooth GPU frames during idle/typing, but a long
+compile may stall the next frame. The P0 requirement is a independently built
+candidate and bounded publication handoff; see =MONADC-API-REQUESTS.org=.
+
+* Performance measurements required before claiming "smooth"
+
+Capture CPU and GPU separately on the user's workstation:
+
+| Measurement | Acceptance method |
+|-------------+-------------------|
+| Input-to-pixel latency | GLFW event stamp through presentation timestamp |
+| Frame p50/p95/p99 | 1-minute idle, typing, 1000-line REPL transcript, compilation |
+| CPU text preparation | Nanoseconds per visible transcript frame; avoid scrolling O(N) |
+| GPU text time | Vulkan timestamp queries around 2D overlay pass |
+| Glyph cache misses | Existing =ObsFontMetrics= and atlas upload counters |
+| Reload latency | source mutation, compile, verify, commit, callback availability |
+| Memory | transient source, diagnostics, ORC old/new retained image bytes |
+| GC/ownership | foreign live objects, retain/release, frame-loan escape rejects |
+
+Do not spend GPU effort optimizing a 96-line overlay before the true runtime
+sampling establishes bottlenecks. The host shouldn't transfer large strings
+through the foreign ABI every frame; UI transcript memory remains C owned and
+only changes on input/result events. Future Monad-owned session semantics
+will use a compiler-managed typed REPL protocol instead.
+
+* Compatibility and limitations
+
+- The uploaded embed subtree is not the full compiler checkout, so a linked
+  Obsidian binary and production native exports cannot be verified here.
+- The current source loader's *native definition registry* is atomic, but
+  automatic rollback of arbitrary host side effects is not established.
+- QTT evidence report entries marked =INFERRED= are NOT a verified finalizer
+  or safe GPU region.
+- The existing engine uses generation/epoch foreign references; preventing
+  stale Mesh/Frame handles at run time is not a proof of compile-time linearity.
+- The REPL's bounded transcript can truncate output and exposes no generally
+  reified expression result. Structured compiler result and output streaming
+  are requested from MonadC.
+

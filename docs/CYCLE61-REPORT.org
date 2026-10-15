@@ -1,0 +1,79 @@
+#+TITLE: Obsidian Cycle 61 — Value-only SDF appearance transfer
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Result
+
+The F8 SDF tool now copies appearance from the selected sphere, box or
+procedural terrain and pastes it to another supported SDF. Appearance means
+base RGBA, roughness, metallic, emission RGB and emission intensity only.
+Paste uses the production property bridge and creates one scene-journal
+command; undo/redo restores the target's previous appearance.
+
+The clipboard stores copied scalar values only. It retains neither a scene
+pointer nor a ticket, survives scene-epoch changes, and preserves the previous
+sample if a later copy fails validation. The same operations are registered
+for compiled Monad with owner/effect admission.
+
+Cycle 59 was not produced and no Cycle 59 patch was applied. Cycle 60 had
+identified but not named the engine's existing primitive type 2 (terrain).
+This cycle introduces =SDF_TYPE_TERRAIN= for the existing renderer/shader
+contract; terrain was already created by the editor and handled by the shader.
+
+* Data flow and constraints
+
+- Ctrl+Shift+C/V are intercepted only with the editor and F8 SDF viewport
+  active, the camera inactive, no viewport or property gesture, and the GUI
+  not owning pointer interaction. ALT is excluded. Standard Ctrl+C/V remains
+  unchanged outside this opt-in condition.
+- Copy validates a shared epoch ticket and reads a checked inspector snapshot.
+  Invalid/stale sources do not alter the last valid clipboard sample.
+- Paste validates target and appearance, routes through
+  =obs_sdf_property_apply=, and journals material plus emission atomically.
+- Geometry, exact primitive type, transform, CSG operation/smoothness and
+  terrain octave count are preserved.
+- The compiled Monad callbacks use the exact editor clipboard and reject
+  denied host effects. They take primitive indices, not raw C pointers.
+- Renderer changes continue through deferred dirty-slot publication; there
+  is no device-wide wait or direct write to an in-flight mapped slot.
+
+* Verification
+
+#+begin_src sh
+make test-sdf-appearance-clipboard
+make build/tests/sculpt-api
+./build/tests/sculpt-api
+make -j2 test
+python3 tests/build-contract.py
+#+end_src
+
+Native checks use production clipboard, bridge, inspector, ticket registry,
+SDF publication and Monad callback sources with fixtures only at engine/GPU
+ownership boundaries. They cover sphere-to-box and sphere-to-terrain transfer,
+undo/redo, same-value no-op, malformed/stale copy, previous-sample
+preservation, active transaction rejection, scene reset, terrain geometry
+preservation, mapped slots and callback effect rejection.
+
+Real GLFW focus/key handling, rendered Vulkan pixels and compiled MonadC
+execution are not established by these native/callback declaration-seam tests.
+
+* Remaining holes
+
+- The Ctrl+Shift shortcuts have no physical-input/display acceptance here.
+- Terrain remains inspector-only for selection; Cycle 60's CPU analytic ray
+  query does not approximate the procedural shader surface.
+- Clipboard state is process-local and not persisted or bridged to the OS.
+- Appearance excludes material assets and textures.
+- No real Vulkan shader-output comparison or linked MonadC callback execution
+  was run.
+
+* Workstation acceptance
+
+1. With validation layers enabled, run the real editor and F8 tool.
+2. Copy a sphere's appearance and paste to a box; verify rendered color and
+   emission, unchanged dimensions/transform, and one-step undo/redo.
+3. Paste to terrain and verify size, octave count and transform are unchanged.
+4. Confirm shortcuts do not steal active picker/drag transactions, text input,
+   regular clipboard bindings or user bindings outside F8.
+5. Call the two Monad operations against real scene indices and verify effect
+   denial during publication.

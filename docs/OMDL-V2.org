@@ -1,0 +1,95 @@
+#+TITLE: Obsidian — OMDL v2 Envelope and Cache Identity
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope and authority
+
+=src/assets/omdl_cache.[ch]= owns the validation and portable envelope
+encoding. =src/assets/gltf_loader.c= owns glTF source identity and the
+existing legacy OMDL payload. This is a *transitional, ABI-gated container*;
+the geometry and animation arrays are not yet portable serialized structs.
+
+* On-disk layout
+
+All container integers are little-endian, regardless of the native CPU:
+
+| Offset | Width | Field |
+|--------+-------+----------------------------------------------------|
+| 0      | 8     | magic =OMDL2\0\0\0=                               |
+| 8      | 4     | format version =2=                                 |
+| 12     | 4     | envelope size =64=                                 |
+| 16     | 8     | payload byte length                                |
+| 24     | 8     | glTF source-content digest                         |
+| 32     | 8     | payload CRC64-ECMA checksum                        |
+| 40     | 8     | native ABI identity                                |
+| 48     | 16    | zero/reserved (must be zero)                       |
+| 64     | N     | *existing* =OmdlHeader= and ordered native arrays  |
+
+The loader rejects old cache files and unknown versions as misses. This
+intentionally forces one-time cache regeneration after installing Cycle 28.
+The renderer and glTF source remain the authority; caches are disposable.
+
+** Source identity
+
+The source digest covers both the raw glTF/GLB file bytes and every decoded
+cgltf buffer's contents. Each buffer's length is mixed into the CRC64 stream.
+A changed external =.bin= buffer is therefore a cache miss even if the glTF
+JSON is unchanged. The glTF document is hashed once before cgltf parsing and
+rechecked afterwards to detect a rewritten source during that interval.
+
+External texture files are separately loaded/cached by the texture subsystem
+and are NOT incorporated into the geometry cache digest. These caches need
+their own content hashes and invalidation rules. CRC64-ECMA is effective for
+accidental corruption, but it is *not cryptographically authenticated* and
+cannot protect against an active adversary that rewrites the digest.
+
+** Native layout identity
+
+The v2 envelope is portable; the v2 *payload is not*. Validation incorporates
+native sizes, selected struct offsets/alignments, host byte order and version
+salt. A mismatch is a cache miss. No foreign endian or architecture may read
+an ABI-incompatible cached payload. This identity is a conservative check,
+not a proof of cross-compiler ABI layout compatibility.
+
+The long-term portable format must serialize *each field explicitly* and
+normalize scalar representation (fixed-width integers, IEEE 754 floats,
+booleans and enum encodings), with a schema version per section. It should
+also specify canonical padding, per-section checksums and size ceilings.
+
+* Validation ordering
+
+1. Read/capture source glTF and decoded buffers.
+2. Validate the v2 envelope (magic, version, lengths, source/ABI digests).
+3. Stream the payload checksum using bounded 16 KiB scratch space.
+4. Check legacy section layout and native metadata/scene graph.
+5. Only then begin the existing checked GPU geometry streaming.
+
+* Resource and runtime limitations
+
+- GPU mega-buffers still append/reserve incrementally. A partial GPU upload
+  failure refuses scene registration but cannot reclaim earlier reservations.
+- The cache contents are verified before GPU streaming, but the same open
+  inode might be modified by a third-party writer after verification. A truly
+  immutable source snapshot or fully staged upload is needed to close this.
+- The cache currently requires a synchronous checksum scan on the engine
+  thread; benchmark actual startup and runtime frame stalls before tuning.
+- glTF source parsing and decoded buffer loading still occur on a cache hit.
+- No Vulkan/MonadC integration test is claimed by the headless cache tests.
+
+* Testing and profiling
+
+#+begin_src sh
+make test
+make bench-omdl-digest
+# Optional separate cache codec sanitizer test:
+gcc -std=c23 -O1 -g -Wall -Wextra -Werror -pedantic \
+  -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc/assets \
+  tests/native/omdl_cache.c src/assets/omdl_cache.c \
+  -o /tmp/omdl-cache-asan && /tmp/omdl-cache-asan
+#+end_src
+
+V2 tests cover valid round-trip, old-format rejection, changed source/ABI,
+checksummed payload corruption, spoofed payload header with recomputed CRC,
+version/reserved-field corruption, truncated and extended files, a same-size
+changed source file and 2,000 generated v2 round trips. Existing native
+section-layout fuzz cases remain intact.

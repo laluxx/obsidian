@@ -1,0 +1,60 @@
+#+TITLE: Obsidian Monad migration — Cycle 1 delivery
+#+DATE: 2026-10-10
+#+STARTUP: overview
+
+* Scope completed in source
+
+1. All 31 pre-existing first-party C translation units, with accompanying
+   headers, moved out of the root/editor split into an owned =src/=
+   subsystem layout.  Core graphics algorithms remain unchanged.
+2. =Makefile= now discovers subsystem translation units and produces .d
+   dependency files; installed flat header surface is retained for now.
+3. Persistent engine Monad runtime added at =src/monad/runtime.[ch]=.
+4. Host capabilities registered at =src/monad/bindings.[ch]=, including
+   generation-checked scene/camera foreign references and dynamic key
+   procedure dispatch with owner-thread and recursion guards.
+5. Compiled native Monad policy named =obsidian_camera_step_mm : Int -> Int=
+   loaded from a module via the same ABI as Glemax's tested Monad host and
+   hooked to =C-M-<right>= when =OBSIDIAN_MONAD_BOOT= is configured.
+6. Optional F5 module reload added as a DEVELOPMENT pathway, not guaranteed
+   atomic hot replacement; failures disable the potentially stale native
+   callable.
+7. One central =TODO.org= with the original hand-written task notes saved
+   verbatim at =docs/archive/original-TODO.org=.
+8. New Monad source examples/tests only; no new C test code introduced.
+
+* Verification performed
+
+| Check                              | Outcome                          |
+|------------------------------------+----------------------------------|
+| Make dependency graph dry run      | PASS (33 C compilation steps)    |
+| New Monad C host syntax, -Werror   | PASS with API declaration fixture|
+| Source quote-include resolution    | PASS except generated SPIR-V and missing legacy embedded font |
+| Active Org task ID uniqueness      | PASS (78 unique IDs)             |
+| Native full build                  | BLOCKED: missing Vulkan / GLFW / CGLM / FreeType / MonadC |
+| Native Monad module execution      | NOT RUN: MonadC binary absent    |
+| In-engine Vulkan tests             | NOT RUN: no driver/display/assets|
+| Compiler ABI and hot swap         | NOT VERIFIED                     |
+
+IMPORTANT: The API declaration fixture for syntax checking was used outside
+this repository.  It confirms C syntax and local consistency, NOT binary
+compatibility with your real MonadC headers.  The shipped archive contains
+only Obsidian's actual project sources.
+
+* Critical next gates
+
+- Verify actual MonadC header signatures, result ownership, and linkage.
+- Execute =tests/monad/native-camera-policy.mon= and compare native output.
+- Prove dynamic object-space host bindings are visible to the intended Monad
+  evaluator/compiler image.  If not, integrate a Glemax-style image rather
+  than pretending =monad_load_string= and the live evaluator are equivalent.
+- Test stale foreign references, invalid arity/types and key rebindings.
+- Implement safe transactional hot replacement before production F5 workflows.
+- Benchmark input latency, startup cost, frame time and memory.
+- Preserve the original engine rendering and optimize only with measurements.
+
+* No claim of completion
+
+This is the FIRST migration implementation cycle, not a fully Monad-hosted
+engine or a finished REPL.  The legacy graphics/audio/physics implementations
+remain the behavior reference and fallback.

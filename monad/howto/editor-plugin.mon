@@ -1,0 +1,64 @@
+;;; editor-plugin.mon --- a first-class editor plugin in Monad
+
+;;; :author Laluxx
+;;; :version 0.1.0
+;;; :keywords obsidian howto editor-plugin
+
+;;; Commentary:
+
+;; A tour-mode plugin: one chord stages the editor for inspection, another
+;; restores it. Commands, keymap routing and panel/gizmo policy live here;
+;; storage, rendering and dispatch stay in the C host.
+;; Try: OBSIDIAN_MONAD_EDITOR_BOOT=monad/howto/editor-plugin.mon ./obsidian
+;; Status: DOCUMENTS INTENT. Forms mirror monad/obsidian/editor.mon, which
+;; is the proven reference plugin. Live keymap replacement requires the
+;; embedded host; changed source is rejected without disturbing bindings.
+
+;;; Code:
+(define f False)
+(define t True)
+
+;;; Capabilities: opaque host values, never raw pointers.
+
+define global-map
+  (obsidian-global-keymap)
+
+define inspector-panel
+  (obsidian-inspector-panel)
+
+define hierarchy-panel
+  (obsidian-hierarchy-panel)
+
+define rotate-mode
+  (obsidian-gizmo-mode-rotate)
+
+define translate-mode
+  (obsidian-gizmo-mode-translate)
+
+define skybox-setting
+  (obsidian-render-setting-skybox)
+
+define editor-state
+  (obsidian-editor)
+
+;;; Commands: pure policy over host state.
+
+(define (tour-start-command)
+  (begin
+    (selection-mesh! (editor-selection editor-state) 0)
+    (editor-panel-open! inspector-panel t)
+    (editor-panel-open! hierarchy-panel t)
+    (gizmo-mode! rotate-mode)
+    (render-setting! skybox-setting t)))
+
+(define (tour-stop-command)
+  (begin
+    (selection-mesh! (editor-selection editor-state) -1)
+    (editor-panel-open! inspector-panel f)
+    (gizmo-mode! translate-mode)
+    (render-setting! skybox-setting f)))
+
+;;; Routing: chords into the live global map with help text.
+
+(define-key global-map "C-c t" tour-start-command "Start selection tour" 0)
+(define-key global-map "C-c T" tour-stop-command "Stop selection tour" 0)

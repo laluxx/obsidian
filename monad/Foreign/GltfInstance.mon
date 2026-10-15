@@ -1,0 +1,30 @@
+;;; GltfInstance.mon --- Foreign methods for scene-owned glTF instances
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian foreign gltf instance
+
+;;; Code:
+
+module Foreign.GltfInstance
+  [GltfInstance ◯ at index mesh-start mesh-count animation-count joint-count]
+
+type ◯ :: {GltfInstance}
+
+define at :: Int -> ◯
+  index -> obs-scene-gltf (obs-current-scene) index
+
+method index :: ◯ -> Int
+  gltf -> gltf-index gltf
+
+method mesh-start :: ◯ -> Int
+  gltf -> gltf-mesh-start gltf
+
+method mesh-count :: ◯ -> Int
+  gltf -> gltf-mesh-count gltf
+
+method animation-count :: ◯ -> Int
+  gltf -> gltf-animation-count gltf
+
+method joint-count :: ◯ -> Int
+  gltf -> gltf-joint-count gltf

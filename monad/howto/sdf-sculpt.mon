@@ -1,0 +1,44 @@
+;;; sdf-sculpt.mon --- build five spheres inside compiled Monad, drift the center
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto sdf-sculpt
+
+;;; Commentary:
+
+Run: OBSIDIAN_MONAD_BOOT=monad/howto/sdf-sculpt.mon ./obsidian
+Status: DOCUMENTS INTENT. Publication currently rejects the Frame
+callback with MONAD-C0004 (no closed native ABI for polymorphic
+definitions). Host names and arities below match the registered C API.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (build-sculpture)
+  (begin
+    (sdf-sphere!  0.0  0.0  0.0  1.00  0.96  0.25  0.22)
+    (sdf-sphere! -1.6  0.0 -0.3  0.54  0.20  0.55  1.00)
+    (sdf-sphere!  1.6  0.0 -0.3  0.54  0.20  1.00  0.75)
+    (sdf-sphere!  0.0  1.6 -0.3  0.54  1.00  0.60  0.20)
+    (sdf-sphere!  0.0 -1.6 -0.3  0.54  0.65  0.30  1.00)))
+
+(define (drift-center n)
+  (begin
+    (sdf-move! (sdf-ticket 0) (* n 0.12) 0.0 0.0)
+    (sdf-tint! (sdf-ticket 0) 0.95 0.35 0.15)))
+
+(define (sculpture-frame f)
+  (if (= (sdf-count (scene)) 0)
+      (begin (build-sculpture) True)
+      (begin (drift-center (frame-number f)) True)))
+
+(on-frame! sculpture-frame)

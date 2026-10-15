@@ -1,0 +1,35 @@
+;;; dispatch-watch.mon --- publication and dispatch counters as a frame report
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto dispatch-watch
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/dispatch-watch.mon ./obsidian
+Attempts, failures and commit/rejection counts are admission diagnostics
+for the live image, not GPU or JIT proofs. Enable per-frame CPU buckets
+with OBSIDIAN_MONAD_PROFILE_FFI=1 before launch.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (publication-health)
+  (list (binding-commits)
+        (binding-rejections)
+        (dispatch-frame-calls)
+        (dispatch-frame-failures)))
+
+(define (watch-frame f)
+  (begin (publication-health) True))
+
+(on-frame! watch-frame)

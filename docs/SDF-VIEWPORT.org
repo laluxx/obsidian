@@ -1,0 +1,104 @@
+#+TITLE: Obsidian SDF viewport interaction — Cycle 55
+#+SUBTITLE: Interactive camera picking, coalesced preview and atomic Emacs-style undo
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Delivered behavior
+
+With the standard GLFW editor enabled and free-fly camera inactive:
+
+1. Press =F8= to enable the *opt-in* SDF sphere drag tool. A visible editor
+   message confirms ON/OFF. The existing mesh gizmo remains the default when
+   the tool is disabled, or when a ray misses all ticketed spheres.
+2. Left-click a visible, translation-only sphere. The production gizmo's
+   inverse view-projection code turns GLFW top-left coordinates into a world
+   ray. The shared SDF raycast returns its lifetime-checked ticket. The
+   inspector selection becomes that sphere, and the existing editor gizmo is
+   activated on its index.
+3. Drag: each pointer sample intersects the camera-facing plane through the
+   sphere's initial center; it previews a new world position in the *actual*
+   scene/renderer. The plane, initial grab point and original position are
+   anchored at mouse-down, avoiding frame-to-frame positional drift.
+4. Release: commit the entire gesture as ONE reversible editor command.
+5. Escape *before release*: restore the original scene, without adding undo
+   history. Window focus loss attempts the same cancellation. Turning the
+   tool off during a drag likewise attempts a safe cancel.
+6. =Ctrl+Z= (tool on; viewport owns the mouse) invokes the Emacs-style
+   inspector undo; =Ctrl+Shift+Z= invokes its explicit redo operation.
+   The existing editor keymap remains unchanged when the tool is OFF.
+
+Gesture owns LEFT only. Panel/UI regions are checked by the existing editor
+before SDF picking. A non-hit falls through to the original mesh selection.
+Right/middle-camera navigation and compiled Monad callback ownership are not
+replaced. A conflict on commit/cancel leaves the gesture open for deliberate
+recovery, with an editor error message; no forced overwrite is attempted.
+
+* Coalesced change, not a 64-sample drag
+
+The existing Cycle 54 grouping API intentionally has a 64-change capacity.
+Naively using it once for *every* mouse motion would make a normal drag fail
+in under a second. =obs_sdf_inspector_drag_move= is a strictly scoped,
+absolute-position operation that can only create ONE coalescible command per
+single-object drag. Further pointer samples update its after-image while
+preserving the true before-image. Returning precisely to the start removes
+that staged command. A material edit, a different object's edit, an expired
+ticket, or direct scene conflict is refused rather than absorbed silently.
+
+The caller still uses Cycle 54's real begin/end/abort transaction and its
+Cycle 53 Emacs-style reversible history. =flushSdfSSBO= is the unchanged
+per-frame, post-fence GPU publication path; no device-wide wait or fake scene.
+
+* Ray and lifecycle constraints
+
+- Supported primitives: existing *ticketed*, unrotated/unscaled SDF spheres.
+  This isn't a shader-exact raymarch result, mesh/physics edit, or an SDF
+  smooth-union surface selection. Occlusion by meshes is not checked.
+- Unprojection follows =gizmo.c= camera matrices (not a second camera), and
+  rejects non-finite rays, zero-size framebuffers and off-viewport clicks.
+- Plane is frozen to the camera front vector at press: dragging always moves
+  in a screen-aligned world plane, not on arbitrary surfaces.
+- Selection and active gestures expire on scene epoch reset. A stale preview
+  is never rolled into a new scene after reset. World-value validation keeps
+  finite positions within float bounds before publication.
+- The editor remains a single-owner, global engine. User interaction never
+  compiles or runs Monad source in a GLFW callback.
+- No nested pointer drags, multi-object drags, mesh-gizmo undo, persistent
+  history, axis snapping or full keyboard-focus arbitration in this cycle.
+
+* Validation and executable acceptance
+
+=make test-sdf-viewport= compiles actual =src/editor/sdf_viewport.c= and
+production =sdf_inspector=, =sdf_sculpt=, token, and SDF SSBO modules. Tests:
+4,000 continuous pointer samples coalesced to a single undo; release/undo/
+redo; multi-frame SSBO preview/cancel; miss and parallel-plane rejection;
+conflict on release/disable; manual-group exclusion; scene reset while
+active; changing another sphere; origin-return no-op; 600 alternating
+commit/cancel gestures; and invalid rays. These are executed C tests, not
+source-string matching.
+
+=make test= also runs the available other engine tests and compile checks.
+The real GLFW/camera glue in =gizmo.c= and =input.c= requires production
+GLFW/CGLM/Vulkan headers and a graphical engine; those are unavailable in
+this container and therefore are NOT compilation-/runtime-certified here.
+
+=make test-sdf-viewport-runtime= is a separate strict full-stack client that
+loads compiled =sculpture.mon=, steps actual Vulkan frames, picks a sphere
+constructed by compiled Monad, previews/undoes/commits via the same viewport
+core, and captures raw RGBA + JSON and PNG. It is deliberately *not* part of
+=make test=: lack of MonadC/Vulkan will fail rather than fake success.
+It uses world rays; a real mouse-on-display acceptance run is still required
+to certify pixel-to-world conversion, UI hit-testing and the on-screen gizmo.
+
+* Manual desktop checklist (not executed here)
+
+- Start =make run= with one ticketed SDF sphere visible in editor mode.
+- =F8= ON; click its center, drag in both axes: it follows without jumping.
+- =Escape=: it snaps back; undo count is unchanged.
+- Drag/release, =Ctrl+Z=, =Ctrl+Shift+Z=: moved/original/moved respectively.
+- Start a drag over a panel: no sphere selection or scene mutation.
+- Lose window focus during preview: scene restores (unless another writer
+  caused a conflict, which must be reported without overwriting that writer).
+- After a scene reset, a stale ticket must not move an unrelated sphere.
+- =F8= OFF: original mesh selection and gizmo behavior unchanged.
+- Exercise HiDPI and resize cases, and Vulkan validation layers; record
+  frame p95/p99 before claiming interactive performance acceptance.

@@ -1,0 +1,84 @@
+#+TITLE: Obsidian — Cycle 18: Host effect policy and preflighted callback publication
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope and design constraints
+
+This incremental cycle makes the engine's physical-effect admission more
+consistent and reduces callback replacement failures. The Monad compiler
+remains responsible for quantitative type checking, effects, native images,
+function lifetimes and hot code publication. Obsidian's policy is a *second,
+runtime-only guard*: it is neither a compiler certificate nor an isolated
+sandbox for arbitrary native code.
+
+* Changes implemented
+
+** DONE Shared engine effect/lifetime policy
+
+- =src/monad/effect_policy.[ch]= implements allocation-free admission for
+  =READ=, =WRITE=, =GPU=, =AUDIO=, and =IO= with engine/frame/value regions.
+- Owner-thread and engine availability checks precede effect admission.
+- During =LOADING=, only read-only operations are admitted. GPU submission,
+  engine writes, audio, and I/O are rejected. During =POISONED= or =EMPTY=,
+  all operations are rejected. Ready images can use admitted effects.
+- =obs_monad_effect_allowed= is a central engine wrapper for existing C host
+  callbacks; it does not interpret or independently certify Monad programs.
+- =scene_api.c= now rejects node-visible! mutations during publication, closing
+  an actual inconsistency with existing guarded camera, mesh and SDF setters.
+- SDF material and mesh visibility writes are explicitly tagged =WRITE|GPU=.
+- =effect_api.[ch]= exposes =(engine-mutable?)= and
+  =(engine-gpu-mutable?)= as read-only, concise Monad host procedures.
+- =modules/obsidian/effects.mon= provides Monad-side convenience helpers.
+
+** DONE Non-destructive validation of staged callbacks
+
+- =src/monad/live_binding_txn.[ch]= adds a preflight callback that checks
+  the entire journal before any prior callbacks are retired.
+- Successful compiler publications now validate all staged engine bindings
+  before the previous host callback set is discarded. Native/editor-owned
+  key chords cannot be overwritten by newly published Monad code.
+- Rejected preflight leaves current host bindings untouched. Preflight and
+  post-preflight application failures are recorded in separate counters.
+- The =committed= counter increments only after every application succeeds.
+- This is NOT transactional commit across native code and C-owned effects:
+  post-publication allocation failures can still partially apply host changes,
+  and old closures remain subject to MonadC's own native-generation lifetime
+  rules. An eventual compiler candidate/host preparation protocol is needed.
+
+** DONE Executable regressions
+
+- =tests/native/effect_policy.c=: 50,000 deterministic combinations of
+  publication phases, effect masks, owner thread, engine and frame lifetime.
+- =tests/native/live_binding_txn.c=: 100,000 deterministic transaction
+  cases including checked preflight rejection, success, failed application,
+  saturation, retain/release, and preservation of existing callbacks.
+- Both are part of =make test=. Both passed with ASan + UBSan.
+- Full available =make test= passed using actual MonadC public SDK headers
+  (mock implementations for SDK-backed execution tests), not a running JIT.
+
+* Known limits and evidence
+
+- NO complete Vulkan/Jolt build or engine GUI execution was verified here.
+- NO real Monad source execution, QTT import proof, frame GPU timestamps,
+  native candidate compilation, or state migration was verified here.
+- Neither the runtime effect policy nor header-compatible test doubles prove
+  that Monad's type checker has certified a particular host effect.
+- Old bindings are not retired when preflight rejects a callback plan, but
+  native image publication may already have succeeded. Full atomicity requires
+  a real candidate-commit protocol with host resources prepared BEFORE the
+  compiler publishes the new image.
+- Keymap allocation failures during apply must be solved with a reserved,
+  allocation-free commit path; this cycle prevents preknown ownership and
+  notation failures but does not falsely claim complete rollback.
+
+* Next cycle
+
+** NEXT Host resource reservation before native publication
+
+- Refactor keymap binding updates into an allocation-aware prepare/commit
+  interface with all required memory and ownership reserved beforehand.
+- Prove effect and loan signatures imported into MonadC are compiler-checked,
+  not merely read from runtime policy tables.
+- Wire the eventual candidate-commit API with host reservations, a bounded
+  frame-safe publication step, and reliable abort/reclaim paths.
+- Execute real Monad/C callback lifecycle and GPU rendering tests.

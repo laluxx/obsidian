@@ -1,0 +1,49 @@
+#+TITLE: Obsidian — Cycle 33: Pending scene geometry reservations
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Summary
+
+Cycle 33 adds CPU-side disjoint geometry reservations and pairs each reservation
+with a Cycle 32 prepared upload flight. It provides ownership/state machinery
+for future asynchronous scene loading; it does not submit asynchronous Vulkan
+work or publish a real pending scene into the renderer.
+
+* Implementation
+
+- =ObsPendingScenes= is a fixed-capacity 16-slot owner-thread journal. It
+  allocates monotonic scene tickets and reserves disjoint ranges using the
+  production upload planner across all eight geometry streams.
+- The journal preserves triangle-stream alignment padding, rolls back only a
+  prepared tail reservation, leaves interior holes until a drain, and releases
+  submitted or unknown reservations only when the caller supplies a separate
+  GPU-quiescence proof.
+- =ObsGeometrySceneUploads= composes those reservations with Cycle 32's
+  =ObsGeometryFlight=. It copies/owns all cooked source spans before reserving
+  destinations, retains CPU staging through pending/unknown states, and
+  exposes destination metadata only after a signaled observation.
+- The queue owns no Vulkan device resources, scene graph, textures, physics
+  state, renderer visibility, or Monad handles. It is not wired into the
+  glTF loader or frame loop; current Vulkan uploads remain synchronous.
+
+* Verification
+
+- Cycle 33 archive manifest verified in an isolated extraction.
+- =make test-native=: PASS. Reservation test: 100,000 scene lifecycle cases;
+  paired scene-upload test: 50,000 staging/publication/recovery cycles.
+- =make test=: PASS; the live Monad and frame integration suites explicitly
+  skipped because their runner variables were unset.
+- Both new tests under ASan+UBSan: PASS.
+- =make -j$(nproc)=: PASS; full engine linked with new source files.
+- Runtime startup selected an NVIDIA GeForce RTX 3060 and initialized Vulkan.
+
+* Limits
+
+- No asynchronous Vulkan fence-polling pump, GPU destination reservation
+  authority, renderer checkpoint publication, or loader integration.
+- Existing append allocators do not consult =ObsPendingScenes=. Connecting the
+  journal to GPU work before migrating/excluding those allocators would allow
+  destination overlap.
+- No concurrent GPU upload, device-loss, Vulkan validation-layer, Jolt
+  lifetime, Monad identity, or performance test was run. Native journal tests
+  prove CPU state transitions only.

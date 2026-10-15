@@ -1,0 +1,93 @@
+#+TITLE: Obsidian — Cycle 38: Retained texture resources for pending scenes
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Goal
+
+Close the CPU-side ownership hole between the private Cycle 37 texture
+manifest and the Cycle 35 pending-scene owner. Introduce one resource contract
+that can undo partially acquired texture references and move successful
+registrations into a published Scene without allocations or manual GPU
+management from Monad.
+
+* Implementation
+
+** DONE Releasable texture capability leases
+
+=src/scene/cache_textures.[ch]= adds:
+
+- =ObsCacheTextureAcquire= with an explicit success/failure result, distinct
+  from an optional missing texture ID (= -1=).
+- =ObsCacheTextureRelease=, called once for every successfully acquired
+  reference in reverse order. Distinct paths may map to one refcounted ID;
+  the matching release occurs *per acquisition*, not per integer value.
+- =obs_cache_textures_stage_retained=: allocate ownership storage before
+  acquiring anything, stage the existing interned path set, rollback on
+  partial failure, and set =plan->resolved= only after full success.
+- =obs_cache_texture_lease_move=: allocation-free ownership transfer to
+  another lease (for example, from pending asset to live Scene).
+- =obs_cache_texture_lease_release=: idempotent release/clear for cancellation,
+  post-publication scene teardown, and failure recovery.
+
+This is an alternative to the existing non-owning =obs_cache_textures_resolve=,
+which remains unchanged for the synchronous cache-hit loader. Neither API
+exposes raw GPU/descriptor pointers to Monad.
+
+** DONE Verify composition with the existing pending SceneLoad owner
+
+=tests/native/cache_texture_lease.c= uses the REAL production
+=src/scene/pending_load.c= with a mock GPU backend and a refcounted texture
+pool. It proves:
+
+- No visible candidate before the GPU completion/commit boundary.
+- Cancelling a ready candidate releases its texture references.
+- A failed backend commit quarantines the scene and retains references until
+  a real quiescence verdict is supplied.
+- Published candidates transfer ownership to the scene; scene teardown
+  releases the retained references.
+- Partial resource-acquisition failures preserve a retryable private plan
+  and release earlier acquisitions, including aliases to the same pool ID.
+
+The new test runs 50,000 generated acquisition cases and 2,500 pending scene
+lifecycles, in addition to the earlier texture manifest tests.
+
+* Evidence
+
+- =make test= including Cycle 38 and existing native suites: PASS.
+- The above tests with AddressSanitizer and UndefinedBehaviorSanitizer: PASS.
+- The available Monad embed public SDK declaration tests: PASS when supplied
+  with =embed.tar(8).gz= headers.
+- Full Vulkan / Jolt build and in-engine Monad evaluation: NOT VERIFIED.
+- Real texture-pool reference release, async residency, descriptor reuse,
+  and actual asynchronous =load_gltf= scene activation: NOT IMPLEMENTED.
+
+* Required engine API before production integration
+
+Obsidian's existing =texture_pool_add= is a global append operation that
+returns an index, but currently has no per-acquisition release. It therefore
+MUST NOT be passed to =obs_cache_textures_stage_retained= with a no-op release:
+that would misrepresent a shared renderer allocation as a rollback-safe
+lease. The next renderer-side step is to implement:
+
+1. A refcounted =texture_pool_acquire= returning a retained handle or
+   explicit optional-unavailable result, without changing live bindings.
+2. A matching =texture_pool_release= that retires references only after any
+   pending background decode, Vulkan uploads, descriptor users and GPU work
+   have passed a verified lifetime/quiescence boundary.
+3. A prepared descriptor/bindless publication operation, avoiding partially
+   visible material resources on failed scene activation.
+4. A full =ObsPendingSceneLoad= candidate for the actual parser, including
+   scene tree, animation, material, physics and texture payloads.
+
+These are **Obsidian engine requirements**, not missing MonadC embedding APIs.
+QTT can prove the script-side ownership of SceneLoad capabilities only when
+its compiler API exposes the relevant resource contracts. Host/GPU lifetimes
+still require real engine fences and owner-thread admission.
+
+* Cycle 39 recommendation
+
+Implement the actual refcounted texture-pool lifetime and fence-aware
+retirement, with fault-injected decode/upload cases. Only after proving that
+boundary should the synchronous cache-hit resolver be replaced with retained
+leases. Re-run a complete Vulkan/Jolt build and launch before claiming full
+async scene loading.

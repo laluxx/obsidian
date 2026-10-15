@@ -1,0 +1,75 @@
+#+TITLE: Obsidian / Monad — Cycle 12: Owned Native ABI Evidence and Source-Scoped Transitions
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Objective
+
+Build the first structural, bounded engine-side view of *changes* between
+compiler-published native export results. Preserve the clear separation
+between C-call ABI observation and QTT/state/resource proofs; do not invent
+a nonexistent independent native-candidate compilation API.
+
+* Implemented
+
+** Structural ABI capture
+- Each captured exported procedure now owns the *entire bounded signature*
+  (calling convention, ABI version, result and up to 16 parameter types).
+- Signature arrays and symbol names are copied before the compiler result is
+  released, rather than retaining borrowed SDK pointers.
+- Invalid, incomplete, over-capacity signatures are recorded as unknown,
+  never silently regarded as compatible.
+- Duplicate sampled names cause catalog capture to fail closed.
+- Catalogs are tagged with their exact source unit; unrelated REPL and boot
+  publications do not yield a misleading compatibility transition.
+
+** Post-publication change diagnostics
+- =src/monad/catalog_transition.[ch]= detects ABI differences, additions and
+  source-result omissions, QTT fingerprint drift, and disappeared fingerprints.
+- =:diff= prints the last same-source-unit comparison in the GPU REPL.
+- New native procedures for Monad: =native-abi-changes=,
+  =native-abi-unknown=, =native-export-removals=, =native-proof-drift=,
+  =native-cert-fingerprint-removed= and =native-transition-complete?=.
+- =modules/obsidian/certificates.mon= includes =native-abi-transition= and
+  =native-overlap-abi-stable?= to inspect the result concisely.
+
+* Crucial limitations / evidence boundary
+
+A source-result export list is *not* the complete native image export registry.
+In particular, an export absent from a second REPL submission is NOT known
+removed from the actual live native image. The name
+=native-export-removals= refers only to absence from the newer source-result
+sample and is never treated as an unload signal.
+
+Likewise a QTT certificate *fingerprint* is an index to compiler evidence,
+not proof of effect/quantity equivalence or state-schema migration. Even
+=0= ABI changes plus complete sampled signatures is NOT authorization for
+hot code replacement; the engine observes these facts only AFTER MonadC's
+atomic =monad_load_source= transaction.
+
+** Compiler requirements that remain real blockers
+- Independent native candidate compile and retention on a worker thread.
+- Compiler-verified export/loan/effect/state contracts for the *complete*
+  candidate and currently retained native image.
+- Owner-thread commit of an already verified candidate with rollback of
+  staged host-side effects and migration.
+- Genuine QTT-checked captured host procedures and Frame/Scene loans.
+
+See =docs/MONADC-API-REQUESTS.org=; this cycle does not introduce fictional
+=monad_candidate_*= declarations in compiled engine code.
+
+* Verification
+
+- =make test= using the real *public MonadC SDK headers* from
+  =embed.tar(8).gz=: PASS for all executable headless native/SDK checks.
+- 50,000 deterministic ABI-change permutations: PASS.
+- Deep-copy, duplicate-name, incomplete-signature, source identity cases:
+  PASS.
+- =make test-repl-abi= against real SDK declarations: PASS.
+- Real JIT, interactive Vulkan, integrated QTT compile/migrate, and full
+  executable linking: NOT VERIFIED here; integration runners show SKIP.
+
+* Incremental patch contract
+
+This archive overlays =obsidian/= as of Cycle 11. It adds the two structural
+comparison files and changes the source catalog, runtime, REPL, Monad helpers,
+Makefile test wiring, and central =TODO.org=. No removals are required.

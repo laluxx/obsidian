@@ -1,0 +1,18 @@
+;;; bench-scene-warm.mon --- The same scene-id workload with the validated OMDL cache required warm.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract bench-scene-warm
+
+;;; Commentary:
+
+Run with: make bench-monad BENCH_MONAD_MANIFEST=tests/monad/bench-scene-warm.mon
+
+;;; Code:
+(define (obsidian-benchmark-scene-id [ignored : Int] -> Int) 1)
+(define (obsidian-benchmark-width [ignored : Int] -> Int) 1280)
+(define (obsidian-benchmark-height [ignored : Int] -> Int) 720)
+(define (obsidian-benchmark-warmup [ignored : Int] -> Int) 120)
+(define (obsidian-benchmark-frames [ignored : Int] -> Int) 600)
+(define (obsidian-benchmark-cache-mode [ignored : Int] -> Int) 1)
+(define (obsidian-benchmark-min-meshes [ignored : Int] -> Int) 1)

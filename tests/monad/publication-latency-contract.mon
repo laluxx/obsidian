@@ -1,0 +1,30 @@
+;;; publication-latency-contract.mon --- requires a live embedded Monad object space.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract publication-latency-contract
+
+;;; Commentary:
+
+publication-latency-contract.mon — requires a live embedded Monad object space.
+Compiler/runtime tests should invoke these definitions, not merely parse them.
+Durations are host CPU checkpoint observations; not GPU frame-time proofs.
+
+;;; Code:
+(define (publication-latency-contract)
+  (and (>= (publish-last-us) 0)
+       (>= (publish-p95-us) 0)
+       (>= (publish-p99-us) (publish-p95-us))
+       (>= (publish-wait-p95-us) 0)
+       (>= (publish-stalls) 0)
+       (> (publish-budget-us) 0)
+       (>= (publish-repl-p95-us) 0)
+       (>= (publish-boot-p95-us) 0)))
+
+(define (publication-latency-observation)
+  (list (publish-last-us)
+        (publish-p95-us)
+        (publish-p99-us)
+        (publish-wait-p95-us)
+        (publish-stalls)
+        (publish-budget-us)))

@@ -1,0 +1,110 @@
+#+TITLE: Obsidian — Cycle 44: first real cold glTF worker-owned GPU candidate
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Summary
+
+Cycle 44 reconstructs the full original baseline plus the Cycle 41, 42, and
+43 incremental overlays. The new delta contains only changed/new files.
+
+Unlike the prior cache-miss inventory, a constrained subset of uncached glTF
+files now returns an actual, privately owned =ObsGltfCacheCandidate= compatible
+with Obsidian's existing =ObsPendingSceneLoad= and Vulkan scene-load adapter.
+The new producer does not call =load_gltf=, use the legacy =omdl_*= globals,
+access a live =Scene=, mutate texture pools, or issue Vulkan commands.
+
+* Implemented
+
+** Cold path, production source
+
+- =src/assets/gltf_cook_static.c= uses real cgltf parsing, decoded buffers,
+  validation, and private allocations to produce eight geometry stream spans,
+  one =OmdlMeshMeta=, one =Mesh=, one =OmdlSceneGraph=, and an empty but valid
+  =ObsCacheTexturePlan=.
+- Decodes vertex positions, normals, UV0, tangents, colors (and defaults),
+  explicit indices or nonindexed triangles. Rejects invalid/out-of-range
+  indices and nonfinite material, vertex, and transform values.
+- Builds local meshlets with up to 64 vertices and 124 triangles each; local
+  triangle index bytes are padded to four-byte boundaries, with conservative
+  bounds and backface-cone culling disabled via a cutoff > 1. No unsafe
+  approximation of GPU skin data: empty skin/morph streams are explicit.
+- Preserves the root-node TRS/matrix, bounds, names, PBR constant factors,
+  empty texture-channel references, and initial GPU-unpublished sentinels.
+- Caps the accepted JSON/GLB file at 16 MiB, sum of decoded buffers at 128
+  MiB, vertices at 262,144 and triangles at 262,144. Unsupported or oversized
+  source is never submitted as a partially cooked candidate.
+- The production async worker attempts the OMDL cache hit, then the new
+  static cold cooker. When both cannot prepare a candidate it uses the
+  existing validated source inventory to report NEEDS_COOK or FAILED.
+- No changes to owner-thread Vulkan submission, fence polling, scene
+  commit/rollback and candidate/lease destruction. The new candidate goes
+  through those existing guards; this cycle does not replace them with mocks.
+
+** Deliberate supported subset
+
+- Exactly one root glTF node referencing one mesh with one triangles primitive.
+- No other nodes, skins, animation channels, morph targets, image assets or
+  textures. Extra attribute sets, unsupported material extensions, and all
+  skin vertex attributes are excluded instead of being ignored.
+- Non-textured PBR constant factors and model transforms are allowed.
+- All other *valid* glTF sources still require the full per-request cooker
+  and terminate with =OBS_GLTF_ASYNC_NEEDS_COOK=.
+
+* Verification performed
+
+| Gate | Result |
+|------+--------|
+| New real cgltf owned static-cooker fixture | PASS |
+| Indexed, unindexed and non-textured material | PASS |
+| 66-vertex multi-meshlet packing + index roundtrip | PASS |
+| Static transform, material fields and 8 stream spans | PASS |
+| Invalid index, unsupported valid multi-node, missing path | PASS |
+| Four concurrent cgltf/cooker worker threads | PASS |
+| New cooker ASan/UBSan/LSan (native seam) | PASS |
+| Production async controller fake GPU, cold-candidate publication | PASS |
+| =make -j2 test= all available headless native/tooling | PASS |
+| Full real Vulkan/GLFW/Monad SDK build | NOT RUN — dependencies absent |
+| Vulkan validation layers / actual GPU submission | NOT RUN — no GPU |
+| Cold skinned/textured/animated models | NOT IMPLEMENTED |
+
+The native static-cooker test compiles the REAL producer and uses real cgltf.
+The engine ABI is substituted by a matching structural test seam because
+this environment has no development Vulkan/CGLM/Monad SDK. The controller
+seam exercises the REAL state machine with an injected backend. Passing
+these tests is not evidence of real GPU, driver, swapchain or visual parity.
+
+* Known limitations and review notes
+
+- One node / one primitive is intentionally a narrow initial vertical slice;
+  complex glTF still stops at NEEDS_COOK. No promise of a full async cooker.
+- This path does not persist an OMDL cold cache artifact; future requests
+  still cook again unless the legacy cooker separately writes a valid cache.
+- The simple sequential meshlet packer is correct for the supported subset
+  but lacks meshoptimizer's spatial sort/overdraw/cache-aware optimisation.
+  Its conservative cone costs culling opportunities and requires profiling.
+- CPU staging is independent of the renderer, but not an atomic multi-file
+  filesystem snapshot. External buffers may change during parsing/loading.
+- Validation-layer checks, mesh-shader correctness, memory/performance
+  limits across real Vulkan devices, and scene/editor parity are outstanding.
+- Source planning may still reparse valid unsupported files after the cook
+  subset refuses them; measure and eliminate redundant parsing when expanding
+  the independently owned full scene cooker.
+
+* Cycle 45 recommendation
+
+Expand this producer to multiple nodes, meshes and triangle primitives with
+stable per-node identities and correct hierarchy transforms. Add texture path
+manifests through retained leases, indexed accessors and rich material parity.
+Then extend morph/skin/animation data and switch meshlet building to a
+quality/performance-validated optimizer. Run live driver validation and cold
+vs warm frame-time p50/p95/p99 tests before dropping NEEDS_COOK entirely.
+
+* Apply incremental overlay
+
+#+begin_src sh
+# In the parent of the obsidian/ directory with Cycle 43 already applied:
+tar -xzf obsidian-monad-cycle44-incremental-20261012.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE44-MANIFEST.sha256
+make -j2 test
+#+end_src

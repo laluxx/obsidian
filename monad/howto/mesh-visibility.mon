@@ -1,0 +1,33 @@
+;;; mesh-visibility.mon --- toggle mesh visibility, read names and counts
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto mesh-visibility
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/mesh-visibility.mon ./obsidian
+Even frames show mesh 0, odd frames hide it; mesh 1 stays visible.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (visibility-frame f)
+  (if (> (mesh-count (scene)) 1)
+      (begin
+        (mesh-visible! (mesh 0) (= (% (frame-number f) 2) 0))
+        (mesh-visible! (mesh 1) True)
+        (mesh-name (mesh 0))
+        True)
+      True))
+
+(on-frame! visibility-frame)

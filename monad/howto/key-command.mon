@@ -1,0 +1,38 @@
+;;; key-command.mon --- bind a key chord to a compiled camera nudge
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto key-command
+
+;;; Commentary:
+
+ Run: OBSIDIAN_MONAD_BOOT=monad/howto/key-command.mon ./obsidian
+ Press C-c n to drift the camera; F5 re-queues this boot module.
+ Status: DOCUMENTS INTENT. Registrations made while compiling are journaled
+ and replayed only after native publication succeeds; a rejected load keeps
+ the previous image. Reload must rebind: this module rebinds every load.
+
+;;; Code:
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (nudge-forward)
+  (camera-move! (camera) 0.1 0.0 0.0))
+
+(define (drift-frame f)
+  (begin
+    (camera-move! (camera) (* 0.1 (frame-delta f)) 0.0 0.0)
+    (if (= (frame-number f) 60)
+        (begin (unbind-key! "C-c n") True)
+        True)))
+
+(on-frame! drift-frame)
+(bind-key! "C-c n" nudge-forward)

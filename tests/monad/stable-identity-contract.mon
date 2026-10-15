@@ -1,0 +1,29 @@
+;;; stable-identity-contract.mon --- live engine identity test fixtures (Cycle 23).
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract stable-identity-contract
+
+;;; Commentary:
+
+stable-identity-contract.mon — live engine identity test fixtures (Cycle 23).
+Run inside a real embedded Monad engine; requires an initialized scene.
+These are deliberately NOT counted as executed by headless `make test`.
+Interactive procedure:
+1. (define saved (node 0))
+2. Add unrelated nodes in the editor.
+3. (node-name saved) succeeds, (node-index saved) returns the new slot.
+4. Delete the saved node -> (node-name saved) must reject a stale handle.
+5. Repeat with (mesh 0), using an unrelated mesh add/delete/reallocation.
+6. Reset the scene -> both kinds of previously held handles expire.
+
+;;; Code:
+(define (obsidian-test-stable-node-roundtrip)
+  (let ([saved (node 0)])
+    (= (node-name saved)
+       (node-name (node (node-index saved))))))
+
+(define (obsidian-test-stable-mesh-roundtrip)
+  (let ([saved (mesh 0)])
+    (= (mesh-name saved)
+       (mesh-name (mesh (mesh-index saved))))))

@@ -1,0 +1,50 @@
+;;; input-keys.mon --- sampled keyboard and mouse state, no chords
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto input-keys
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/input-keys.mon ./obsidian
+Polls GLFW codes directly: arrows/WASD for steering, R for reset, left
+mouse button for action. Chords belong to bind-key! (key-command.mon);
+pointer position belongs to input-observe.mon. Out-of-range codes fail
+closed; unpressed reads False.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define key-left 263)
+
+(define key-right 262)
+
+(define key-up 265)
+
+(define key-down 264)
+
+(define key-r 82)
+
+(define mouse-left 0)
+
+(define (keys-frame f)
+  (begin
+    (list (key-down? key-left)
+          (key-down? key-right)
+          (key-down? key-up)
+          (key-down? key-down)
+          (key-down? key-r)
+          (mouse-down? mouse-left))
+    True))
+
+(on-frame! keys-frame)

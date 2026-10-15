@@ -1,0 +1,215 @@
+#+TITLE: Obsidian — Cycle 42: engine audit and correctness recovery
+#+DATE: 2026-10-12
+#+STARTUP: overview
+
+* Scope and provenance
+
+This cycle begins with the user-provided =obsidian.tar(2).gz=, overlaid with
+=obsidian-monad-cycle41-incremental-20261011.tar(1).gz= in that order. The
+Cycle 41 SHA-256 manifest was checked against an untouched reconstruction.
+Cycle 42 is an incremental overlay, NOT a replacement tree.
+
+The audit inventories the current source and test tree and traces the critical
+production paths (Vulkan/frame/swapchain, rendering, async geometry, glTF,
+texture lifetimes, scene graph, Monad publication, audio, physics, editor,
+platform and build/test wiring). It is a *static, risk-based subsystem audit*,
+NOT an assertion that every function received formal verification. The full
+Vulkan/GLFW/CGLM/MonadC/Jolt SDKs, driver and interactive display are missing
+from this environment. Runtime behavior cannot be proven by test doubles.
+
+* Executive judgment
+
+The core has moved beyond a toy renderer: meshlet buffers, task/mesh/compute
+passes, dynamic rendering, HZB/shadows, CPU geometry preparation, lifetime-
+tracked geometry uploads, editor/scene tooling, physics, audio, Monad
+embedding and GPU/frame profiling are present. The actual boundary between
+resource ownership *specification* and a fully running, fault-tolerant GPU
+engine remains unfinished. Specifically, cached OMDL geometry can use the
+nonblocking async path, but uncached glTF source only reaches NEEDS_COOK.
+The legacy glTF loader still forces GPU quiescence on the frame path.
+
+* Findings — prioritized
+
+** CRITICAL C42-AUD-01: uncached asynchronous glTF stops before cooking
+   :FILES: src/assets/gltf_async.c; src/assets/gltf_source_plan.c; src/assets/gltf_loader.c
+   :STATUS: CONFIRMED; NOT FIXED
+   A cache hit creates an owned eight-stream candidate; a valid cache miss
+   produces a source fingerprint/inventory and terminal NEEDS_COOK, but no
+   cooked meshes, meshlets, textures, morph streams, skins or animation scene
+   payload. The old cooker keeps =omdl_*= arrays, =s_staged_meshes=, texture
+   and node mapping globals and issues Vulkan calls. Do not invoke it on a
+   worker or call it as a "nonblocking" fallback.
+
+** HIGH C42-AUD-02: synchronous work and queue/device stalls in render path
+   :FILES: src/graphics/vulkan_setup.c; src/assets/gltf_loader.c; src/graphics/renderer.c
+   :STATUS: CONFIRMED; NOT FIXED
+   The drag/drop queue is drained from =drawFrame= with frame fence waits, and
+   =load_gltf= starts with =vkDeviceWaitIdle=. Texture recycling uses a
+   deliberately blocking =vkDeviceWaitIdle= checkpoint. These are allowed
+   explicit synchronization semantics, but not latency-safe for a steady
+   render loop. Real p95/p99 frame-time regressions are not measured here.
+
+** HIGH C42-AUD-03: render graph admission can access invalid resource IDs
+   :FILES: src/graphics/render_graph.c; src/graphics/render_graph.h
+   :STATUS: CONFIRMED BY CODE INSPECTION; NOT FIXED
+   =add_dep= stores arbitrary IDs without range/type checks. =rg_execute=
+   uses =graph->resources[dep->res]= directly and similarly indexes color and
+   depth attachments. Resource/pass/dep capacity failures are not propagated
+   to the caller. The =rg_reset= declaration claims retained resources, but
+   its body clears =res_count=. Rebuild this with validated typed handles,
+   explicit status, early pass rejection and runtime-backed Vulkan tests.
+
+** HIGH C42-AUD-04: failed pthread launch produced a misleading live ticket
+   :FILES: src/assets/gltf_async.c; tests/native/async_gltf_controller.c
+   :STATUS: FIXED AND REGRESSION TESTED
+   Before this cycle =obs_gltf_async_request= returned a nonzero ticket even
+   when the initial =pthread_create= failed; the internal ticket was left
+   installed without a worker or normal completion. The correction returns
+   zero for an initial launch failure, retires the failed ticket with a
+   terminal record, and makes an already-issued queued ticket observable as
+   FAILED if launching that queued worker fails. Fault-injected pthread tests
+   cover both paths and subsequent request recovery.
+
+** HIGH C42-AUD-05: unsafe zero-length audio loop and 64-bit WAV narrowing
+   :FILES: src/audio/audio.c; tests/native/audio_lifetime.c
+   :STATUS: FIXED AND REGRESSION TESTED
+   A zero-frame looping buffer previously spun indefinitely on the audio
+   callback. A WAV decoder length was converted from =ma_uint64= to
+   =uint32_t= before allocation, then the full 64-bit count was read into
+   the smaller buffer. New checks reject zero or oversized frames and partial
+   decode, protect playback and buffer mutations with the audio mutex, reject
+   unregistered full-pool allocations and avoid locking a dead mutex after
+   shutdown. The production miniaudio-backed implementation passes strict
+   syntax compilation. The callback and decoder are exercised using fake
+   miniaudio device/IO for isolated native tests, not a real audio device.
+
+** HIGH C42-AUD-06: textures are safely retired but not yet safely recycled
+   :FILES: src/graphics/renderer.c; src/graphics/texture_refs.c
+   :STATUS: CONFIRMED; NOT FIXED
+   =texture_pool_collect_retired= drains asynchronous uploads then calls
+   =vkDeviceWaitIdle= before physical retirement. =texture_pool_add= still
+   appends via =textureCount++=; retired slots are not reused, which can
+   exhaust =MAX_TEXTURES= under repeated scene churn. Per-slot generations
+   and fence-aware descriptor residency must precede reuse.
+
+** HIGH C42-AUD-07: Monad module publish can still stall a frame
+   :FILES: src/monad/runtime.c; src/monad/source_stage.c; src/monad/live_binding_txn.c
+   :STATUS: CONFIRMED; NOT FIXED
+   Boot source staging and optional advisory semantic preflight are workers;
+   final =monad_load_source= compilation/native materialization and callback
+   journal replay occur at owner-thread publication. The replay journal does
+   not generally roll back arbitrary host side effects after publication.
+   QTT/certificates cannot replace explicit GPU lifetime tests.
+
+** MEDIUM C42-AUD-08: source identity is not a complete asset snapshot
+   :FILES: src/assets/gltf_source_plan.c; src/assets/gltf_loader.c
+   :STATUS: CONFIRMED SCOPE LIMIT; NOT FIXED
+   The fingerprint contains source document and decoded buffer contents, not
+   necessarily all externally referenced image contents. External resources
+   can change independently; a cache-key/content contract must specify what
+   texture cache invalidation observes. The bounded inspection is not a
+   pinned, immutable multi-file snapshot.
+
+** MEDIUM C42-AUD-09: headless build rules drifted from source and files
+   :FILES: Makefile; tools/incremental_overlay.py; tests/tooling/test_incremental_workflow.py
+   :STATUS: FIXED AND TESTED
+   The Vulkan scene-load test generator replaced an obsolete first line while
+   the production source now uses a compile-time contract header macro. The
+   keymap test used =__wrap_malloc/calloc/realloc/strdup= without GNU linker
+   =--wrap= flags. =make test= referenced an absent tooling test script.
+   Corrected the source seam, linker options and provided deterministic
+   incremental-tar builder + tamper/traversal-safe verifier with tests.
+
+** MEDIUM C42-AUD-10: full GPU+scene feature acceptance remains open
+   :FILES: src/graphics/vulkan_setup.c; src/scene/*; src/physics/*; src/editor/*
+   :STATUS: NOT VERIFIED
+   Native headless tests exercise pure modules and interface-shaped fakes.
+   They cannot establish live descriptor binding correctness, source/skin/
+   animation visual parity, physical GPU retirement, swapchain recreate and
+   device-loss handling, physics instantiation under asset publication,
+   multi-window correctness, editor interactions, or real Monad callbacks.
+   Separate on-device evidence before claiming production readiness.
+
+* Strengths confirmed by source trace and native tests
+
+- Dedicated CPU-ownership geometry flight and reservation journal:
+  =geometry_async=, =geometry_upload_flight=, =geometry_scene_upload=,
+  =geometry_pending=, =geometry_budget= and =pending_load= reject stale
+  tickets and quarantine ambiguous transfer lifetimes.
+- Actual OMDL v2 cache-hit decoding/preflight supports eight geometry
+  streams; a dedicated worker does not mutate scene/Vulkan state.
+- Retained texture manifest leases transfer from pending payloads into
+  published glTF instances and release on cancellation.
+- Scene geometry, hierarchy, material, slot/foreign identity and
+  publication-queue native tests include high-volume randomized cases.
+- Runtime exposes profiling and benchmarking hooks; earlier cycle reports
+  include some GPU samples, but these are historical evidence on different
+  machines and were not rerun for this audit.
+
+* Cycle 42 implementation
+
+1. Corrected initial and queued async worker launch failure accounting and
+   added =pthread_create= fault injection to the real controller seam.
+2. Hardened =audio.c= against zero-length callback loops, pool exhaustion,
+   allocation failure, decoder length truncation, partial reads and
+   unsynchronized audio buffer mutation; added a bounded fake-device test.
+3. Repaired three headless build/test issues encountered when replaying this
+   exact baseline and Cycle 41 overlay.
+4. Added an incremental overlay tool which packs an explicit file-only delta,
+   writes an integrity manifest and file list, and independently rejects
+   duplicates, traversal, non-regular members and hash mismatches.
+5. Added the engine-wide audit findings and carried open tasks into TODO.org.
+
+* Verification and limits
+
+| Gate                                                  | Result       |
+|-------------------------------------------------------+--------------|
+| Pristine Cycle 41 overlay SHA-256 manifest            | PASS         |
+| =make -j2 test= (headless native + tooling)            | PASS         |
+| Async controller ASan + UBSan                         | PASS         |
+| Source-plan ASan + UBSan                              | PASS         |
+| Audio lifetime ASan + UBSan                           | PASS         |
+| Real miniaudio translation unit (strict syntax)      | PASS         |
+| Fresh full Vulkan/Jolt executable link               | NOT VERIFIED |
+| Real Vulkan validation-layer scene launch            | NOT VERIFIED |
+| Real GPU frame-time and texture residency             | NOT VERIFIED |
+| MonadC native API/embedded frame test                 | SKIP         |
+| Graphical renderer capacity test                      | SKIP         |
+
+The environment has no installed Vulkan, GLFW and CGLM development headers
+or MonadC SDK and no live GPU/display. The native audio test mocks only
+miniaudio device/decoder calls; the real implementation compiles with the
+bundled =vendor/miniaudio.h=. This is not an ALSA/PulseAudio acceptance test.
+
+* Engineering sequence proposed for Cycle 43+
+
+1. Extract immutable per-load glTF decoding/cooking context from all loader
+   globals. Produce a *real* eight-stream candidate on cache misses, with
+   meshlet/morph/skin/animation parity and proper texture plan ownership.
+2. Connect it directly to the existing =ObsPendingSceneLoad= publication
+   path. Enforce owner-thread Vulkan, real fence polling, correct cancel and
+   quarantine release. Test source corruption and live scene edits in flight.
+3. Hard-stop invalid render-graph resource handles and replace the graph's
+   silent fixed-capacity truncation with explicit checked admission.
+4. Move texture recycling off device-idle checkpoints using per-slot
+   generations and confirmed GPU/descriptor last-use fences.
+5. Run full engine on Vulkan validation layers with 3D scenes (cold/warm,
+   textured/multi-mesh, skinned/morph, material overrides), 100+ repeated
+   loads/cancels, swapchain recreation and device-loss fault injection.
+6. Measure wall/CPU/GPU p50/p95/p99 and memory after each warm/cold batch,
+   plus Monad owner-thread publication latency. Keep assertions and data,
+   not just a successful process launch.
+
+* Incremental overlay usage
+
+#+begin_src sh
+# From the parent of the existing obsidian/ directory:
+tar -xzf obsidian-monad-cycle42-incremental-20261012.tar.gz
+cd obsidian
+sha256sum -c docs/CYCLE42-MANIFEST.sha256
+make -j2 test
+# When starting with the supplied full archive, first apply Cycle 41.
+#+end_src
+
+The tar contains only changed/new source, tests, Makefile, TODO and reports.
+No full tree, build products or dependency binaries are shipped.

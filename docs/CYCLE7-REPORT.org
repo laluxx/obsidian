@@ -1,0 +1,102 @@
+#+TITLE: Obsidian — Cycle 7 implementation report
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Cycle 7 is a strictly incremental overlay on the Cycle 6 canonical
+=obsidian/= tree. The user requested CPU-wide parallel Make builds, high
+performance Jolt compilation, additional foreign-object exposure in Monad,
+and more Monad-first game-programming ergonomics.
+
+* Implemented
+
+** Engine and dependency build
+
+- GNU Make 4.3+ grouped target =$(JOLTC_STATIC) $(JOLT_STATIC) &:= avoids
+  two independent Jolt CMake configure/build invocations under =make -j=.
+- =JOBS= defaults to online logical processors via =getconf= or =nproc=;
+  =MAKEFLAGS= adds parallelism unless explicitly provided or jobserver-owned.
+- =JOLT_JOBS= independently bounds nested CMake build concurrency.
+- =JOLT_BUILD_TYPE= defaults to =Distribution= (Jolt uses =-O3= for release
+  on GCC/Clang). Configured build disables distribution debug rendering and
+  profiler overhead, retaining ordinary runtime physics behavior.
+- =JOLT_NATIVE=1 is opt-in for the local machine; the default remains portable.
+- Optional =msdf-tool= honors =JOBS= but does not shadow the engine goal.
+- No changes were made inside vendored Jolt sources.
+
+** Frame state and engine hook
+
+- =src/core/frame_state.[ch]= defines a CPU-side frame state machine with
+  monotone ordinal, begin/end epoch, dimensions, delta and slot.
+- =obs_begin_frame= opens the frame capability after renderer CPU setup,
+  =obs_end_frame= closes it on entry, *including swapchain early-return paths*.
+- =src/monad/frame_api.[ch]= registers the compact =frame= capability plus
+  =obs-current-frame= compatibility spelling, checked field readers,
+  =frame-active?=, =frame-profile!=, and read-only CPU profiling counters.
+- =on-frame!= retains a Monad procedure in the engine object space; it is
+  invoked with a borrowed frame once per CPU frame. Invocation pins the
+  closure to survive callback-driven replacement and prevents reentry.
+- On image reload or host close, =obs_monad_discard_live_bindings= retires
+  the frame callback *alongside* legacy Monad key dispatch closures. A
+  failed (possibly partial) source publication also discards any newly
+  registered closures. A failing callback is disabled rather than repeatedly
+  invoked, without accidentally discarding a successor it just installed.
+- =frame-callback-calls= exposes successful invocation count for integration
+  harnesses; it resets on callback replacement.
+- Last-frame profiling now reads the *completed* sample, not partially
+  mutated values from the current frame.
+
+** Monad as the language
+
+- =modules/obsidian/frame.mon=: standard frame-summary, aspect and game
+  policy functions written in Monad.
+- =modules/obsidian/lifecycle.mon=: =every-frame=, =with-camera= and
+  =with-render= in the native =Syntax -> Syntax= transformer idiom used in
+  Glemax. No additional host interpreter.
+- =modules/obsidian/live-frame.mon=: a frame-rate-independent camera
+  movement example driven by a registered Monad procedure.
+- =modules/obsidian/language.mon=: =with-frame= Syntax transformer.
+
+* Validation evidence
+
+- [X] =make -j2 test=: headless native tests pass (including frame lifetime,
+      UTF-8 fuzzing, reload watcher and timing statistics).
+- [X] =make -j2 -n <JOLT.a> <joltc.a>= has a single CMake configure and
+      build recipe, rather than simultaneous recipes.
+- [X] Strict C syntax check of =frame_api.c= and =frame_state.c= using
+      *API-shaped fixtures* for absent real MonadC/Vulkan headers.
+- [X] =make test-frame= fails closed when frame integration runner is unset.
+- [ ] Full engine compile + link + launch: Vulkan, FreeType, assets,
+      glslangValidator and MonadC SDK are unavailable locally.
+- [ ] Actual upstream Jolt build/benchmarks: vendored JoltPhysics source is
+      not in this archive and CMake may fetch it over the network.
+- [ ] Compiled Monad callback invocation and macro expansion: the real
+      compiler/image/object-space runtime is not present.
+- [ ] Hardware profiling for Jolt throughput or frame latency: not measured.
+
+* Safety and guarantees
+
+A =Frame= capability is CPU-scoped and borrowed. It does not carry a VkDevice,
+VkCommandBuffer, or VkFence. The C bridge checks the runtime owner thread,
+engine incarnation and frame epoch on every read. A frame saved in a global
+variable must be rejected after =endFrame= or a subsequent =beginFrame=.
+
+The =on-frame!= callback uses the same *persistent* Monad engine object
+space as keys and other engine objects. It is not a new runtime or standalone
+interpreter. This is the intended ABI integration, but remains blocked on the
+real compiled MonadC system. There is no claim of QTT-proven transactional
+code publication or safe rollback of failed source loads.
+
+* Follow-on priorities
+
+1. Compile and execute a real Monad frame callback against the engine and
+   verify stale frame handles through the actual object space.
+2. Integrate compiler-owned candidate image publication with type/effect and
+   QTT lifetime contracts; measure hot-reload frame stalls.
+3. Measure physics simulation Jolt baseline, before vs Distribution, on
+   representative scenes, and tune CPU ISA/worker scheduling appropriately.
+4. Introduce logical generation-tagged entity/mesh IDs, materials, transforms
+   and reflection descriptors as compositional Monad capabilities.
+5. Validate completed-frame profiling, vertex count, and frame p95/p99
+   under Vulkan on the user's production machine.

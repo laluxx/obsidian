@@ -1,0 +1,31 @@
+;;; live-publication-contract.mon --- Requires a REAL embedded Monad runner Runner scenario, not a passing standalone smoke fixture:
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract live-publication-contract
+
+;;; Commentary:
+
+live-publication-contract.mon — Requires a REAL embedded Monad runner
+1. Publish module defining (on-frame! a) and (bind-key! "C-c m" a).
+2. Verify callback a executes and key dispatch invokes a.
+3. Attempt loading a source registering b and then failing QTT checking.
+Assert a still executes and old key binding remains (no b observed).
+4. Publish b successfully; assert only b executes, no stale a values.
+5. Reject a camera-move! during source loading; compare camera state.
+6. Repeatedly publish/bind/unbind with ASan/TSan and check retained images.
+The native transaction unit tests exercise the host ledger independently;
+they cannot certify that compiler callbacks execute before/after commit.
+
+;;; Code:
+(define (publication-callback-contract f)
+  (= (frame-number f) (frame-number f)))
+
+;;; Cycle 19 integration assertions (requires REAL MonadC/engine runner):
+;;; - (binding-publication-health) yields a pair of nonnegative counters.
+;;; - Compile with invalid native key chord: old image keymap survives.
+;;; - Compile a valid on-frame!/bind-key!: both activate as one host image.
+;;; - Repeat with valgrind/ASan and assert old generation reclamation.
+(define (binding-publication-counters-valid?)
+  (let ([health (binding-publication-health)])
+    (and (>= (car health) 0) (>= (car (cdr health)) 0))))

@@ -1,0 +1,54 @@
+#+TITLE: Obsidian — Cycle 4 incremental delivery report
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Scope
+
+Incremental patch from canonical Cycle 3 =obsidian/= to Cycle 4.
+No source deletion; no vendor changes; C and GLSL source files are sectioned.
+Patch includes only modified and added files, NOT a complete engine tree.
+
+* Engineering work delivered
+
+- =src/monad/hotreload.[ch]=: monotonic owner-thread stable file watcher,
+  optional =OBSIDIAN_MONAD_WATCH=1=, checked file snapshots, bounded
+  reload/retry scheduling, native pointer reacquisition.
+- =src/graphics/msdf_generator.{h,cpp}= + =tools/msdf/= build an
+  optional C++ generator backed by upstream Chlumsky/msdfgen. Input:
+  Unicode glyph in a TTF/OTF font. Output: linear RGB MSDF in RGBA8,
+  image dimensions, projection and pixel-range metadata.
+- =shaders/msdf_glyph.frag= is a separate GPU decoding reference; not
+  wired into the existing bitmap-font 2D pipeline. 3D scene SDF unchanged.
+- Source organization =/// SectionName= in Obsidian C/headers/tests/GLSL.
+  No vendor source has been reformatted.
+- Updated =README.md=, one central =TODO.org=, source-specific
+  =docs/{HOTRELOAD,MSDF}.org=, and Monad-language policy test fixtures.
+
+* Verification performed locally
+
+- PASS: compile =src/monad/hotreload.c= under C23, strict warnings.
+- PASS: executable ephemeral C smoke exercised file changes, debounce,
+  acknowledgement and multiple edits (not committed as an added C test).
+- PASS: C++ generator/CLI syntax under strict C++17 with API-shaped stubs;
+  actual upstream headers were inspected via msdfgen repository but the
+  msdfgen library itself is unavailable in this environment.
+- PASS: dry-run main Makefile including added watcher and shader sources.
+- PASS: patch application/extraction + checksum verification (see manifest).
+
+* Integration and quality gates NOT claimed
+
+- Not compiled against the real MonadC SDK, Vulkan, GL shader compiler,
+  FreeType, Jolt or the real msdfgen CMake targets here.
+- No Vulkan runtime, end-to-end glyph atlas, GPU shader sampling, or visual
+  quality tests; do not treat this as shipped UI font replacement.
+- No atomic transactional native-image hot swap. Existing MonadC loader
+  may modify live runtime state during unsuccessful loads. Requires compiler
+  candidate image, prepare/commit/abort API and quiescent reclamation.
+- Monad-language tests are fixtures but not executed without MonadC.
+
+* Next cycle
+
+1. Real MonadC integration and transactional native-image publication.
+2. Live command trampolines, type/effect compatibility, dependency reloads.
+3. Real upstream msdfgen library compile + golden Unicode samples.
+4. Typed msdf atlas/Font foreign objects after owning GPU pipeline is ready.

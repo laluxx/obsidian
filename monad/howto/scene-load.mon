@@ -1,0 +1,40 @@
+;;; scene-load.mon --- PROPOSES API: request a glTF load, orbit when ready
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto scene-load proposal
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/scene-load.mon ./obsidian
+No host binding exists yet: loading is editor-owned (scene buffers).
+Proposed surface: (scene-load! path) validates the path and queues one
+pending scene through the existing owner-thread admission, returning a
+ticket; (scene-load-ready? ticket) polls without blocking the frame.
+Stale tickets and missing files fail closed; the visible scene is never
+torn down by a failed request. Compare gltf-orbit-360.mon, which waits
+for an editor-side load instead.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (load-frame f)
+  (if (= (frame-number f) 1)
+      (begin (scene-load! "assets/models/sponza.gltf") True)
+      (if (scene-load-ready? 1)
+          (begin
+            (camera-angles! (camera) 90.0 -12.0)
+            True)
+          True)))
+
+(on-frame! load-frame)

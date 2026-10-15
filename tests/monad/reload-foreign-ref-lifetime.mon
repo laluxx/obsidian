@@ -1,0 +1,18 @@
+;;; reload-foreign-ref-lifetime.mon --- Foreign reference model — borrow Scene/Camera instead of copying C structs.
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian tests contract reload-foreign-ref-lifetime
+
+;;; Commentary:
+
+Lifetime and stale-reference rejection require the actual Monad embed SDK.
+
+;;; Code:
+(define (obsidian-test-static-engine-refs)
+  (let* ([s (obs-current-scene)]
+         [c (obs-current-camera)])
+    (and (>= (obs-scene-node-count s) 0)
+         (>= (obs-camera-speed c) 0))))
+(unless (obsidian-test-static-engine-refs)
+  (error "invalid scene/camera foreign references"))

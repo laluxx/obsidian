@@ -1,0 +1,168 @@
+#+TITLE: Obsidian — A language built from engine capabilities
+#+DATE: 2026-10-11
+#+STARTUP: overview
+
+* Design principles
+
+The embedding implementation follows Glemax's persistent Monad host and
+object-space registration approach. Use the ordinary Monad reader, syntax
+transformers and type system; do not implement a separate scripting language.
+Public operations should be fast to write without hiding their effects.
+Engine-owned mutable objects are opaque references. The C engine validates
+host identity, generation, bounds, ownership and owner thread per operation.
+
+* Public, compact surface (Cycle 6 source implementation)
+
+| Construct / operation | Arity | Effect / meaning |
+|-----------------------+-------+------------------|
+| =scene=               | 0 | borrow current scene |
+| =camera=              | 0 | borrow current camera |
+| =render=              | 0 | borrow renderer policy |
+| =mesh=                | 1 | borrow indexed mesh |
+| =node=                | 1 | borrow indexed scene-tree node |
+| =sdf=                 | 1 | borrow indexed SDF primitive |
+| =gltf=                | 1 | borrow indexed glTF instance |
+| =gltf-joint-count=    | 1 | sum skin joint entries for a live glTF instance |
+| =node-count=          | 1 | number of hierarchy nodes in scene |
+| =mesh-count=          | 1 | number of scene meshes |
+| =sdf-count=           | 1 | number of SDF primitives |
+| =gltf-count=          | 1 | number of instances |
+| =mesh-name=           | 1 | read mesh name |
+| =mesh-visible?=       | 1 | read visibility |
+| =mesh-visible!=       | 2 | set visibility and mark GPU mesh dirty |
+| =mesh-index=          | 1 | read verified mesh index |
+| =mesh-material-index= | 1 | material-table index hint, not a Material capability |
+| =material= / =mesh-material= | 1 | borrow typed mesh-owned PBR view |
+| =material-roughness/metallic= | 1 | read PBR scalar |
+| =material-red/green/blue/alpha= | 1 | read mesh base-color component |
+| =material-factors!=  | 3 | atomic finite roughness/metallic update |
+| =material-color!=    | 5 | atomic finite RGBA update |
+| =transform= / =mesh-transform= | 1 | borrow typed mesh world-model view |
+| =transform-x/y/z=    | 1 | read world-model translation |
+| =transform-position!=| 4 | update finite world-model translation; sync physics body |
+| =gltf-node=          | 2 | borrow a glTF node for current glTF structural epoch |
+| =gltf-node-index/name= | 1 | inspect a live OMDL node |
+| =gltf-node-offset-x/y/z= | 1 | read persistent local animation offset |
+| =gltf-node-offset!=  | 4 | set finite additive node-local translation |
+| =gltf-node-offset-clear!= | 1 | clear the script offset |
+| =material-store=     | 1 | capture a mesh's PBR values as a scene material asset |
+| =material-asset=     | 1 | borrow scene material preset by index |
+| =material-asset-count= | 0 | count current scene material presets |
+| =material-asset-factors!= | 3 | update a preset's roughness/metallic values |
+| =material-apply!=    | 2 | explicitly copy preset values to a mesh |
+| =node-name=           | 1 | read hierarchy node name |
+| =node-visible!=       | 2 | change UI hierarchy flag |
+| =sdf-roughness=       | 1 | read scalar material factor |
+| =sdf-material!=       | 3 | update roughness and metallic together |
+| =camera-move!=        | 4 | atomically apply bounded world-space delta |
+| =camera-angles!=      | 3 | validated yaw and pitch |
+| =render-ao?=          | 1 | read ambient occlusion request |
+| =render-ao!=          | 2 | set ambient occlusion request for following frames |
+| =render-ibl?=         | 1 | read IBL request |
+| =render-ibl!=         | 2 | set IBL request for following frames |
+| =render-culling-frozen?= | 1 | read culling freeze state |
+| =render-culling-frozen!= | 2 | freeze/unfreeze culling for following frames |
+| =key-down?=           | 1 | read sampled key state |
+| =frame-ms=            | 0 | read frame delta, integer ms |
+| =reload!=             | 0 | enqueue boot-module reload |
+
+Every public binding retains its =obs-*= counterpart as an explicit low-level
+ABI where one already existed. Compact form calls the *same* storage/epoch
+validation. =mesh= is intentionally a noun, not =obsidian-mesh= or
+=make-mesh=. No implicit creation occurs; =mesh= borrows an existing object.
+
+* Monad example
+
+#+begin_src scheme
+(let* ([world (scene)]
+       [count (mesh-count world)])
+  (if (> count 0)
+      (let ([m (mesh 0)])
+        (mesh-visible! m True)
+        (list (mesh-name m) (mesh-material-index m)))
+      (list)))
+
+(camera-move! (camera) 0.5 0.0 0.0)
+(sdf-material! (sdf 0) 0.15 0.85)
+
+(let ([policy (render)])
+  (render-ao! policy False)
+  (render-ibl! policy True)
+  (render-culling-frozen! policy False))
+
+(let* ([m (mesh 0)]
+       [p (material m)]
+       [t (transform m)])
+  (material-factors! p 0.35 0.7)
+  (material-color! p 0.8 0.2 0.1 1.0)
+  (transform-position! t 2.0 0.0 -3.0))
+#+end_src
+
+Renderer setters accept only Boolean values and a live renderer-policy
+capability on the engine owner thread. They change session-only engine state;
+the renderer consumes it on subsequent frames. These controls do not expose
+editor preferences or raw Vulkan objects. The effect gate rejects writes
+during Monad publication, and the live contract restores each value after
+testing its transition.
+
+Cycle 24's =material= is a typed view of the PBR factors stored on its mesh,
+not the renderer's independent immediate-mode =Material= struct or a
+material-table asset. =transform= views the mesh's world-model translation.
+Both are nominal foreign references that resolve through the owning mesh's
+stable identity; writes validate every input before mutation and mark GPU
+mesh state dirty only when values change. World-model edits can be overwritten
+by animation, so they are not persistent glTF node transforms.
+
+Cycle 25 adds a distinct stable =obsidian.material-asset= preset. It snapshots
+roughness, metallic and base-color RGBA values; applying copies them to one mesh
+and dirties that GPU slot only when values differ. Later preset edits do not
+update previously applied meshes. It is not a shared texture/material table.
+
+=gltf-node= borrows an OMDL node under the current glTF structural epoch.
+=gltf-node-offset!= owns a separate additive local-axis translation, composed
+after sampled animation each update and before hierarchy/skinning propagation.
+Unlike stable mesh/tree-node/material identities, these node borrows expire
+when any glTF instance is loaded or the scene is reset.
+
+=gltf-joint-count= (also exposed as =GltfInstance.joint-count=) returns the
+sum of =joints_count= across the instance's skins. It counts skin joint
+entries, not unique node IDs. It returns zero when the instance has no skin
+metadata; stale instance handles and inconsistent nonzero skin metadata are
+rejected.
+
+* Monad native syntax transformers
+
+=monad/obsidian/language.mon= implements =with-mesh=, =with-node=,
+=with-scene=, =with-material=, =with-transform=, =with-gltf-node= and
+=with-material-asset= as native Monad
+=Syntax -> Syntax= transformers (following
+Glemax's =lisp/subr.mon= macro definitions), not C preprocessor macros.
+
+#+begin_src scheme
+(with-mesh m 0
+  (mesh-visible! m True)
+  (mesh-name m))
+#+end_src
+
+These macros are available only after evaluating/loading the defining module;
+the language-loading contract is not automated and remains a real MonadC test
+gate. They should *never* be reported as working without that test.
+
+* Evolvability and QTT
+
+Eventually =Mesh= can be a compiler-known engine-facing type backed by an
+opaque host capability. The native runtime owns type representation, effects
+and lifetimes; the engine owns the external mesh allocation and Vulkan
+retirement protocol. QTT does not eliminate runtime invalidation after
+scene array compaction or GPU fence synchronization by itself.
+
+Do not conflate a mesh's embedded PBR view with an independent material asset
+or renderer-side Vulkan resource. Foreign references are typed and engine-owned;
+their precise invalidation boundary is documented per capability above.
+
+* Testing requirements
+
+=make test= runs native seam tests; it runs all =tests/monad/*.mon= only when
+=OBSIDIAN_MONAD_TEST_RUNNER= is configured. =make test-all= must fail if no
+runner exists. The short API and Syntax-transformer tests are executable
+contracts but have not yet been run against an actual engine + MonadC SDK.

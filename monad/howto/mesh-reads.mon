@@ -1,0 +1,43 @@
+;;; mesh-reads.mon --- mesh views: visibility, index, material and transform
+
+:author Laluxx
+:version 0.1.0
+:keywords obsidian howto mesh-reads
+
+;;; Commentary:
+
+Boot: OBSIDIAN_MONAD_BOOT=monad/howto/mesh-reads.mon ./obsidian
+Snapshots mesh 0 through every read-only mesh view in one frame: live
+index, visibility flag, assigned material-table index, and borrowed
+material/transform views. Writes live in mesh-visibility.mon and
+transform-place.mon; views borrow, never copy.
+
+;;; Code:
+
+(module Main)
+
+(define (obsidian_camera_step_mm current)
+  current)
+
+(define (obsidian_middle_orbit_yaw_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (obsidian_middle_orbit_pitch_urad delta_millipixels)
+  (* delta_millipixels 10))
+
+(define (mesh-snapshot m)
+  (list (mesh-index m)
+        (mesh-visible? m)
+        (mesh-material-index m)
+        (mesh-name m)))
+
+(define (reads-frame f)
+  (if (> (mesh-count (scene)) 0)
+      (begin
+        (mesh-snapshot (mesh 0))
+        (mesh-transform (mesh 0))
+        (mesh-material (mesh 0))
+        True)
+      True))
+
+(on-frame! reads-frame)

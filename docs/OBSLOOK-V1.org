@@ -1,0 +1,83 @@
+#+TITLE: OBSLOOK v1 — portable SDF appearance presets
+#+DATE: 2026-10-13
+#+STARTUP: overview
+
+* Scope and ownership
+
+OBSLOOK stores value-only appearance for sphere, box and procedural terrain
+SDF primitives: RGBA, roughness, metallic, emissive RGB and emission strength.
+It contains no scene index/ticket, object identity, geometry, transform, CSG,
+pointer, Vulkan state or engine-global metadata.
+
+The owner-thread C clipboard module owns the engine codec. Saving uses the
+existing =obs_atomic_write_bytes= helper to write a same-directory temporary
+file and atomically rename it. Atomic rename does not guarantee that the
+directory entry survives sudden power loss. Loading rejects symlinks and
+non-regular files, requires exact length, validates header and CRC, then
+validates all numbers before changing clipboard state. A failed load preserves
+the previous sample. Save/load refuse an open speculative inspector group.
+
+Loading alone does not edit the scene. Paste goes through the existing
+property bridge and undo journal.
+
+* Layout: exactly 100 bytes
+
+| Offset | Size | Encoding | Meaning |
+|--------+------+----------+---------|
+|      0 |    8 | bytes | ASCII =OBSLOOK1= |
+|      8 |    4 | u32 LE | Version =1= |
+|     12 |    4 | u32 LE | Payload length =80= |
+|     16 |   80 | 10 × f64 LE | RGBA, roughness, metallic, emissive RGB, strength |
+|     96 |    4 | u32 LE | CRC32/IEEE over bytes 0..95 |
+
+The encoded floating-point values use IEEE 754 binary64. The C build requires
+radix 2, mantissa 53 and maximum exponent 1024 and explicitly encodes
+little-endian fields; it does not write a native C struct. Short files,
+trailing bytes, unknown versions, bad CRC and invalid numbers are rejected.
+CRC detects accidental corruption; it is not a signature or authentication.
+
+All values must be finite. RGBA, roughness, metallic and emissive RGB are in
+the range 0..1. Emission strength is in the range 0..1,000,000. The existing
+renderer converts values to float when applying them to a primitive.
+
+* Editor workflow
+
+Enable the F8 SDF tool and select a primitive:
+
+- =Ctrl+Shift+C=: sample its material and emission.
+- =Ctrl+Shift+S=: atomically save the sampled appearance.
+- =Ctrl+Shift+L=: load a preset into the clipboard only.
+- =Ctrl+Shift+V=: paste onto the selected primitive as one undoable edit.
+- =Ctrl+Z= / =Ctrl+Shift+Z=: use the existing scene undo/redo commands.
+
+The default file is =./obsidian-appearance.obslook= relative to the working
+directory. Set =OBSIDIAN_SDF_LOOK_PATH= to override it. The parent directory
+must already exist. File IO is not exposed to Monad: Monad retains only its
+existing effect-admitted in-memory copy/paste functions.
+
+* Scriptable authoring
+
+=tools/obslook.py= has no non-standard dependencies. For example:
+
+#+begin_src sh
+python3 tools/obslook.py write my-look.obslook \
+  --rgba 0.2 0.3 0.4 1 --roughness 0.7 --metallic 0.6 \
+  --emissive 0.5 0.4 0.3 --strength 99
+python3 tools/obslook.py inspect my-look.obslook
+#+end_src
+
+The writer atomically replaces the target in its directory. =inspect= emits
+validated JSON. The CLI creates a preset file; it does not create a second
+scene/runtime or bypass engine undo.
+
+* Verification limits
+
+=make test-sdf-appearance-preset= checks Python encode → production C load →
+scene paste/undo/redo/GPU-slot fixture and production C save → Python decode.
+It also checks invalid files, numeric validation, CRC, symlinks, clipboard
+preservation and active-gesture refusal.
+
+Real GLFW dispatch, Vulkan rendering, linked MonadC, non-Linux filesystem
+semantics and crash/power-loss durability remain unverified. See
+=docs/CYCLE62-REPORT.org= for observed checks.
+
